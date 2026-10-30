@@ -39,6 +39,9 @@ pub struct ActorBox {
     pub actor: ObjId,
     pub center: Vec3,
     pub extent: Vec3,
+    /// Blocks other actors (`bBlockActors`) and player-controlled ones (`bBlockPlayers`).
+    pub blocks_actors: bool,
+    pub blocks_players: bool,
 }
 
 #[derive(Default)]
@@ -47,6 +50,9 @@ pub struct Collision {
     tris: Vec<Tri>,
     grid: HashMap<(i32, i32), Vec<u32>>,
     pub actors: Vec<ActorBox>,
+    /// Whether the trace being made is for the player's pawn (which `bBlockPlayers` blocks) or for any other
+    /// actor (which `bBlockActors` blocks).
+    player_mover: bool,
     /// Movers: their triangles in their own space, placed by a transform that follows them.
     pub movers: Vec<MoverShape>,
 }
@@ -140,6 +146,14 @@ impl Collision {
         self.trace_with(start, end, extent, ignore, true)
     }
 
+    /// Like `trace`, for a mover that is (or is not) the player's pawn.
+    pub fn trace_as(&mut self, player: bool, start: Vec3, end: Vec3, extent: Vec3, ignore: Option<ObjId>) -> Option<Hit> {
+        self.player_mover = player;
+        let hit = self.trace_with(start, end, extent, ignore, true);
+        self.player_mover = false;
+        hit
+    }
+
     /// The level's geometry only: BSP, meshes and terrain, not actors.
     pub fn trace_static(&self, start: Vec3, end: Vec3, extent: Vec3) -> Option<Hit> {
         self.trace_with(start, end, extent, None, false)
@@ -191,7 +205,7 @@ impl Collision {
             }
         }
         for b in self.actors.iter().filter(|_| actors) {
-            if Some(b.actor) == ignore {
+            if Some(b.actor) == ignore || !(if self.player_mover { b.blocks_players } else { b.blocks_actors }) {
                 continue;
             }
             if let Some(h) = box_trace(b, start, end, extent) {

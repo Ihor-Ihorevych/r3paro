@@ -49,7 +49,9 @@ fn refresh_actor_boxes(vm: &mut Vm<'_>) {
     let s = Slots::get(vm);
     let mut boxes = Vec::new();
     for &a in &actors {
-        if !crate::read(vm, a, s.collide).as_bool() || !crate::read(vm, a, s.block).as_bool() {
+        let blocks_actors = crate::read(vm, a, s.block).as_bool();
+        let blocks_players = crate::read(vm, a, s.block_players).as_bool();
+        if !crate::read(vm, a, s.collide).as_bool() || !(blocks_actors || blocks_players) {
             continue;
         }
         if crate::read(vm, a, s.static_mesh).as_obj().is_some() {
@@ -59,7 +61,7 @@ fn refresh_actor_boxes(vm: &mut Vm<'_>) {
         if r <= 0.0 || h <= 0.0 {
             continue;
         }
-        boxes.push(ActorBox { actor: a, center: crate::read_vec(vm, a, s.location), extent: Vec3::new(r, r, h) });
+        boxes.push(ActorBox { actor: a, center: crate::read_vec(vm, a, s.location), extent: Vec3::new(r, r, h), blocks_actors, blocks_players });
     }
     world(vm).actors = actors;
     world(vm).collision.actors = boxes;
@@ -70,6 +72,7 @@ fn refresh_actor_boxes(vm: &mut Vm<'_>) {
 struct Slots {
     collide: Option<usize>,
     block: Option<usize>,
+    block_players: Option<usize>,
     static_mesh: Option<usize>,
     radius: Option<usize>,
     height: Option<usize>,
@@ -83,6 +86,7 @@ impl Slots {
         Slots {
             collide: crate::actor_slot(vm, "bCollideActors"),
             block: crate::actor_slot(vm, "bBlockActors"),
+            block_players: crate::actor_slot(vm, "bBlockPlayers"),
             static_mesh: crate::actor_slot(vm, "StaticMesh"),
             radius: crate::actor_slot(vm, "CollisionRadius"),
             height: crate::actor_slot(vm, "CollisionHeight"),
@@ -100,7 +104,8 @@ pub fn move_actor(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<Hit> {
     }
     let loc = vec(&get(vm, a, "Location"));
     let ext = extent(vm, a);
-    let hit = world(vm).collision.trace(loc, loc + delta, ext, Some(a));
+    let player = is_player_pawn(vm, a);
+    let hit = world(vm).collision.trace_as(player, loc, loc + delta, ext, Some(a));
     let time = hit.map(|h| h.time).unwrap_or(1.0);
     set(vm, a, "Location", value(loc + delta * time));
     hit
@@ -129,7 +134,14 @@ fn move_and_slide(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<Hit> {
 fn floor_below(vm: &mut Vm<'_>, a: ObjId, depth: f32) -> Option<Hit> {
     let loc = vec(&get(vm, a, "Location"));
     let ext = extent(vm, a);
-    world(vm).collision.trace(loc, loc - Vec3::Z * depth, ext, Some(a)).filter(|h| h.normal.z >= WALKABLE_Z)
+    let player = is_player_pawn(vm, a);
+    world(vm).collision.trace_as(player, loc, loc - Vec3::Z * depth, ext, Some(a)).filter(|h| h.normal.z >= WALKABLE_Z)
+}
+
+/// Whether `a` is the pawn the local player controls (what `bBlockPlayers` actors block).
+fn is_player_pawn(vm: &mut Vm<'_>, a: ObjId) -> bool {
+    let Some(pc) = world(vm).player else { return false };
+    get(vm, pc, "Pawn").as_obj() == Some(a)
 }
 
 fn gravity(vm: &mut Vm<'_>, a: ObjId) -> f32 {

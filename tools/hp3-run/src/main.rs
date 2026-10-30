@@ -195,6 +195,16 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
     // HP3_TRACE_FROM=<tick>: HP3_TRACE_CALLS only starts printing at that tick.
     let trace_from: Option<u32> = std::env::var("HP3_TRACE_FROM").ok().and_then(|v| v.parse().ok());
     let held_trace = trace_from.and_then(|_| vm.trace_calls.take());
+    let walkabout_from: Option<u32> = std::env::var("HP3_WALKABOUT").ok().and_then(|v| v.parse().ok());
+    #[derive(Default)]
+    struct Walk {
+        last: Option<glam::Vec3>,
+        distance: f32,
+        stuck: u32,
+        longest_stuck: u32,
+        max_tick_ms: f32,
+    }
+    let mut walk = Walk::default();
     for frame in 0..frames {
         if trace_from == Some(frame) {
             vm.trace_calls = held_trace.clone();
@@ -226,8 +236,44 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                 hp3_world::world(&mut vm).input.mouse_move(d[0], d[1]);
             }
         }
+        // HP3_WALKABOUT=<tick>: from then on hold forward and sweep the camera, measuring how the player gets on.
+        if let Some(start) = walkabout_from
+            && frame >= start
+        {
+            if frame == start {
+                hp3_world::world(&mut vm).input.key_down("W");
+            }
+            hp3_world::world(&mut vm).input.mouse_move(2.0, 0.0);
+        }
+        let tick_start = std::time::Instant::now();
         hp3_world::tick(&mut vm, 1.0 / 60.0);
         follow_travel(&mut vm);
+        if let Some(start) = walkabout_from
+            && frame >= start
+        {
+            walk.max_tick_ms = walk.max_tick_ms.max(tick_start.elapsed().as_secs_f32() * 1000.0);
+            let pawn = hp3_world::world(&mut vm).player.and_then(|pc| hp3_world::get(&mut vm, pc, "Pawn").as_obj());
+            if let Some(p) = pawn {
+                let at = hp3_world::physics::vec(&hp3_world::get(&mut vm, p, "Location"));
+                if let Some(last) = walk.last {
+                    let step = at.distance(last);
+                    walk.distance += step;
+                    if step < 0.5 {
+                        walk.stuck += 1;
+                        walk.longest_stuck = walk.longest_stuck.max(walk.stuck);
+                    } else {
+                        walk.stuck = 0;
+                    }
+                }
+                walk.last = Some(at);
+            }
+        }
+    }
+    if walkabout_from.is_some() {
+        println!(
+            "walkabout: walked {:.0} units, longest stuck {} ticks, slowest tick {:.1} ms",
+            walk.distance, walk.longest_stuck, walk.max_tick_ms
+        );
     }
     let tick_time = t.elapsed();
     list_class(&mut vm);
