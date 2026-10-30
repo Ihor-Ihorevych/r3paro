@@ -34,6 +34,28 @@ This is permitted by `CLEANROOM.md` (item 5) and confirmed by the maintainer. It
   events; collision rules (`bBlockActors` both ways, cylinders, `Bump`, `Attach`/`Detach`/`BaseChange`); movers
   (OldPos interpolation, push/carry, `KeyFrameReached`); `Mount` ledge climbing; MoveTo arrival and slow-down.
 
+## Spells: everything enchantable reacts like the original
+
+Done: touch rules, animation notifies, spell stats from `Spells.ini`, blocking rules, projectile `HitWall`,
+trailer physics, `ConstantAcceleration`, `SetPhysics` dropping the base, `SetBase` events. Checked with the cast
+harness (`HP3_CAST=<Spell>:<TargetClass>:<n>@<tick>` in `hp3-run`, see `tools/hp3-run/src/casttest.rs`):
+Alohomora (chests in four maps, padlock), Depulso (knight spawners, `KnightCollapse`, pumpkin spawner, flying
+books), Lumos (gargoyles), Spongify (pads), Rictusempra (Poxie, crate spawner, FireCrab, Bundimun), Glacius
+(salamander base), Lapifors and Draconifors (statues; the player takes over the dragon), Carpe Retractum (hook
+swing, pull-and-drop with hang and release, item pull).
+
+Open, in the order they matter:
+- Static mesh collision follows the reference: a simple box or collision model when the mesh has one, otherwise the
+  triangles of collision-enabled materials; today render triangles are used, so some meshes stop spells (and
+  walkers) where the original does not.
+- `Bump` is never sent when a move is blocked (doors that open on bump, pushed objects).
+- `Trace`/`TraceActors`/`CollidingActors`/`RadiusActors` filters (`bProjTarget`, `bBlockZero/NonZeroExtentTraces`,
+  owner skipping, line of sight) are looser than the original's.
+- Creatures whose spell target is a companion-cast proxy (`CompanionSpellTrigger`: skeletons, knight collapses)
+  need Ron or Hermione nearby to react; companions in the hubs still follow imperfectly.
+- Not checked: Patronum (needs a charged cast and a Dementor), Verdimillous, Incendio, Peeves' proxies, the dragon's
+  fire (`DraconisForsFireSpell`) on webs and triggers, Spongify bouncing a character.
+
 ## Later
 
 Saves, Bink video, remaining GUI widgets, companions, spell effects and the cast ray, Android integration.
