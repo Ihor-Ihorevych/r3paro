@@ -203,6 +203,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
         stuck: u32,
         longest_stuck: u32,
         max_tick_ms: f32,
+        max_tick_frame: u32,
     }
     let mut walk = Walk::default();
     for frame in 0..frames {
@@ -251,7 +252,11 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
         if let Some(start) = walkabout_from
             && frame >= start
         {
-            walk.max_tick_ms = walk.max_tick_ms.max(tick_start.elapsed().as_secs_f32() * 1000.0);
+            let ms = tick_start.elapsed().as_secs_f32() * 1000.0;
+            if ms > walk.max_tick_ms {
+                walk.max_tick_ms = ms;
+                walk.max_tick_frame = frame;
+            }
             let pawn = hp3_world::world(&mut vm).player.and_then(|pc| hp3_world::get(&mut vm, pc, "Pawn").as_obj());
             if let Some(p) = pawn {
                 let at = hp3_world::physics::vec(&hp3_world::get(&mut vm, p, "Location"));
@@ -271,8 +276,8 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
     }
     if walkabout_from.is_some() {
         println!(
-            "walkabout: walked {:.0} units, longest stuck {} ticks, slowest tick {:.1} ms",
-            walk.distance, walk.longest_stuck, walk.max_tick_ms
+            "walkabout: walked {:.0} units, longest stuck {} ticks, slowest tick {:.1} ms (tick {})",
+            walk.distance, walk.longest_stuck, walk.max_tick_ms, walk.max_tick_frame
         );
     }
     let tick_time = t.elapsed();
