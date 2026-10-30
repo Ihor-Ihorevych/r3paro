@@ -162,3 +162,39 @@ pub fn register(vm: &mut Vm<'_>) {
         Ok(Value::Empty)
     });
 }
+
+/// An actor's looping ambient sound.
+#[derive(Clone, Debug)]
+pub struct Ambient {
+    pub actor: ObjId,
+    pub sound: SoundKey,
+    pub location: Vec3,
+    pub volume: f32,
+    pub pitch: f32,
+    /// In the actor's `SoundRadius` units.
+    pub radius: f32,
+}
+
+/// Every live actor that has an `AmbientSound`.
+pub fn ambient_sounds(vm: &mut Vm<'_>) -> Vec<Ambient> {
+    let actors = world(vm).actors.clone();
+    let mut out = Vec::new();
+    for a in actors {
+        if vm.db.objects.get(a).deleted {
+            continue;
+        }
+        let v = get(vm, a, "AmbientSound");
+        let Some(sound) = key_of(vm, &v) else { continue };
+        let volume = get(vm, a, "SoundVolume").as_float() / 128.0;
+        let pitch = get(vm, a, "SoundPitch").as_float() / 64.0;
+        out.push(Ambient {
+            actor: a,
+            sound,
+            location: crate::physics::vec(&get(vm, a, "Location")),
+            volume,
+            pitch: if pitch > 0.0 { pitch } else { 1.0 },
+            radius: get(vm, a, "SoundRadius").as_float(),
+        });
+    }
+    out
+}

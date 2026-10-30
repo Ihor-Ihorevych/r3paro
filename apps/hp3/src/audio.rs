@@ -50,11 +50,15 @@ pub struct AudioSystem {
     _stream: AudioStreamWithCallback<Callback>,
     cache: HashMap<SoundKey, Option<Arc<Sound>>>,
     music_dir: PathBuf,
+    /// Ambient sounds playing: the actor's owner id and the sound's tag.
+    ambient: HashMap<u64, u64>,
+    frame: u32,
 }
 
 /// Slots of `PlaySound` (`ESoundSlot`) that matter here.
 const SLOT_TALK: u8 = 5;
 const SLOT_INTERFACE: u8 = 6;
+const SLOT_AMBIENT: u8 = 4;
 
 fn tag_of(key: &SoundKey) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -67,11 +71,22 @@ impl AudioSystem {
     pub fn new(sdl: &sdl3::Sdl, root: &Path) -> Option<AudioSystem> {
         let audio = sdl.audio().ok()?;
         let spec = AudioSpec { freq: Some(mixer::OUTPUT_RATE as i32), channels: Some(2), format: Some(AudioFormat::f32_sys()) };
+        // Volumes from the game's own settings (`[ALAudio.ALAudioSubsystem]`).
+        let config = hp3_core::Config::load(root);
+        let setting = |key: &str, default: f32| {
+            config.get("ALAudio.ALAudioSubsystem", key).and_then(|v| v.trim().parse::<f32>().ok()).unwrap_or(default)
+        };
         let mixer = Arc::new(Mutex::new(Mixer::default()));
+        if let Ok(mut m) = mixer.lock() {
+            m.music_volume = setting("MusicVolume", 0.5);
+            m.effect_volume = setting("SoundVolume", 1.0);
+            m.voice_volume = setting("SoundVolume", 1.0);
+            m.ambient_volume = setting("AmbientVolume", 1.0);
+        }
         let stream = audio.open_playback_stream(&spec, Callback { mixer: mixer.clone(), buffer: Vec::new(), meter: std::env::var_os("HP3_AUDIO_DEBUG").map(|_| (0.0, 0)) }).ok()?;
         stream.resume().ok()?;
         let music_dir = ["Music", "music"].iter().map(|d| root.join(d)).find(|p| p.is_dir()).unwrap_or_else(|| root.join("Music"));
-        Some(AudioSystem { mixer, _stream: stream, cache: HashMap::new(), music_dir })
+        Some(AudioSystem { mixer, _stream: stream, cache: HashMap::new(), music_dir, ambient: HashMap::new(), frame: 0 })
     }
 
     fn sound(&mut self, vm: &mut Vm<'_>, key: &SoundKey) -> Option<Arc<Sound>> {
@@ -156,10 +171,58 @@ impl AudioSystem {
         if let Ok(mut m) = self.mixer.lock() {
             m.listener = mixer::Listener { position: position.to_array(), right: mixer::right_from_yaw(yaw) };
         }
+        self.frame += 1;
+        if self.frame % 15 == 1 {
+            self.sync_ambient(vm, position);
+        }
+    }
+
+    /// Starts the ambient sounds whose actors the listener is now within reach of, and stops those left behind.
+    fn sync_ambient(&mut self, vm: &mut Vm<'_>, listener: glam::Vec3) {
+        let mut wanted: HashMap<u64, u64> = HashMap::new();
+        for a in hp3_world::audio::ambient_sounds(vm) {
+            let reach = mixer::reach_for(a.radius);
+            if a.location.distance(listener) >= reach {
+                continue;
+            }
+            let owner = a.actor.0 as u64 + 1;
+            let tag = tag_of(&a.sound);
+            wanted.insert(owner, tag);
+            if self.ambient.get(&owner) == Some(&tag) {
+                continue;
+            }
+            let Some(s) = self.sound(vm, &a.sound) else { continue };
+            if let Ok(mut m) = self.mixer.lock() {
+                if let Some(old) = self.ambient.get(&owner) {
+                    m.stop(*old, owner);
+                }
+                m.play(PlayRequest {
+                    sound: s,
+                    volume: a.volume,
+                    pitch: a.pitch,
+                    looping: true,
+                    placement: Placement::World { position: a.location.to_array(), reach },
+                    category: Category::Ambient,
+                    owner,
+                    slot: SLOT_AMBIENT,
+                    no_override: true,
+                    tag,
+                });
+            }
+        }
+        if let Ok(mut m) = self.mixer.lock() {
+            for (owner, tag) in &self.ambient {
+                if wanted.get(owner) != Some(tag) {
+                    m.stop(*tag, *owner);
+                }
+            }
+        }
+        self.ambient = wanted;
     }
 
     /// Silences everything (on a level change).
     pub fn stop_all(&mut self) {
+        self.ambient.clear();
         if let Ok(mut m) = self.mixer.lock() {
             m.stop_all();
         }

@@ -35,6 +35,7 @@ impl From<crate::bink::Pcm> for Sound {
 pub enum Category {
     Effect,
     Voice,
+    Ambient,
 }
 
 /// Where a sound comes from.
@@ -101,6 +102,7 @@ pub struct Mixer {
     pub listener: Listener,
     pub effect_volume: f32,
     pub voice_volume: f32,
+    pub ambient_volume: f32,
     pub music_volume: f32,
 }
 
@@ -112,6 +114,7 @@ impl Default for Mixer {
             listener: Listener { position: [0.0; 3], right: [0.0, 1.0] },
             effect_volume: 1.0,
             voice_volume: 1.0,
+            ambient_volume: 1.0,
             music_volume: 0.7,
         }
     }
@@ -192,9 +195,13 @@ impl Mixer {
         out.fill(0.0);
         let frames = out.len() / 2;
         let listener = self.listener;
-        let (effect_volume, voice_volume) = (self.effect_volume, self.voice_volume);
+        let (effect_volume, voice_volume, ambient_volume) = (self.effect_volume, self.voice_volume, self.ambient_volume);
         for v in &mut self.voices {
-            let category_volume = if v.category == Category::Voice { voice_volume } else { effect_volume };
+            let category_volume = match v.category {
+                Category::Voice => voice_volume,
+                Category::Ambient => ambient_volume,
+                Category::Effect => effect_volume,
+            };
             let (gain, pan) = match v.placement {
                 Placement::Flat => (v.volume * category_volume, 0.0),
                 Placement::World { position, reach } => {
