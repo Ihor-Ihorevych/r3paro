@@ -1,0 +1,19 @@
+[package]
+name = "hp3"
+description = "Desktop runner: opens a window and plays a level."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+hp3-core.workspace = true
+hp3-package.workspace = true
+hp3-assets.workspace = true
+hp3-script.workspace = true
+hp3-world = { path = "../../crates/hp3-world" }
+hp3-render = { path = "../../crates/hp3-render" }
+sdl3 = { version = "0.20", features = ["build-from-source-static", "raw-window-handle"] }
+wgpu = "26"
+glam = "0.30"
+pollster = "0.4"

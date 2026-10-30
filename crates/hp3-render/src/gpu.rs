@@ -1,4 +1,5 @@
-//! wgpu rendering of a `Scene`: one textured pipeline, offscreen target, read back to RGBA.
+//! wgpu rendering of a `Scene`: one textured pipeline. `GpuScene` holds the uploaded scene; it draws into a
+//! window's surface or an offscreen target read back to RGBA.
 
 use std::collections::HashMap;
 
@@ -28,20 +29,21 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 }
 "#;
 
+pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
 pub struct Renderer {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
     globals_layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    pub color_format: wgpu::TextureFormat,
     pub adapter_info: String,
 }
 
-const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
-const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
-
 impl Renderer {
+    /// A renderer without a window, drawing to sRGB RGBA targets.
     pub fn new_headless() -> Result<Renderer, String> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -50,6 +52,11 @@ impl Renderer {
             force_fallback_adapter: false,
         }))
         .map_err(|e| format!("no GPU adapter: {e}"))?;
+        Self::with_adapter(&adapter, wgpu::TextureFormat::Rgba8UnormSrgb)
+    }
+
+    /// A renderer for an adapter, drawing to targets of `color_format`.
+    pub fn with_adapter(adapter: &wgpu::Adapter, color_format: wgpu::TextureFormat) -> Result<Renderer, String> {
         let info = adapter.get_info();
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
             .map_err(|e| format!("device: {e}"))?;
@@ -112,7 +119,7 @@ impl Renderer {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs"),
-                targets: &[Some(COLOR_FORMAT.into())],
+                targets: &[Some(color_format.into())],
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
@@ -141,6 +148,7 @@ impl Renderer {
             globals_layout,
             texture_layout,
             sampler,
+            color_format,
             adapter_info: format!("{} ({:?})", info.name, info.backend),
         })
     }
@@ -164,35 +172,29 @@ impl Renderer {
         tex.create_view(&Default::default())
     }
 
-    /// Renders `scene` from `camera` and returns `width * height` RGBA pixels.
-    pub fn render_to_rgba(&self, scene: &Scene, camera: &Camera, width: u32, height: u32) -> Vec<u8> {
+    pub fn depth_target(&self, width: u32, height: u32) -> wgpu::TextureView {
+        self.device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("depth"),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: DEPTH_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+            .create_view(&Default::default())
+    }
+
+    /// Uploads a scene's textures and geometry.
+    pub fn upload_scene(&self, scene: &Scene) -> GpuScene {
         let d = &self.device;
-        let size = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
-        let target = d.create_texture(&wgpu::TextureDescriptor {
-            label: Some("target"),
-            size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: COLOR_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let depth = d.create_texture(&wgpu::TextureDescriptor {
-            label: Some("depth"),
-            size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let view_proj = camera.view_proj(width as f32 / height as f32);
-        let globals = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let globals = d.create_buffer(&wgpu::BufferDescriptor {
             label: Some("globals"),
-            contents: bytemuck::cast_slice(&view_proj.to_cols_array()),
-            usage: wgpu::BufferUsages::UNIFORM,
+            size: 64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
         let globals_bg = d.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
@@ -210,7 +212,7 @@ impl Renderer {
                 continue;
             }
             let view = batch.texture.as_ref().and_then(|k| views.get(k)).unwrap_or(&white);
-            let bg = d.create_bind_group(&wgpu::BindGroupDescriptor {
+            let bind = d.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
                 layout: &self.texture_layout,
                 entries: &[
@@ -218,26 +220,31 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                 ],
             });
-            let vb = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            let vertices = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,
                 contents: bytemuck::cast_slice(&batch.vertices),
                 usage: wgpu::BufferUsages::VERTEX,
             });
-            let ib = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            let indices = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,
                 contents: bytemuck::cast_slice(&batch.indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
-            draws.push((bg, vb, ib, batch.indices.len() as u32));
+            draws.push(Draw { bind, vertices, indices, count: batch.indices.len() as u32 });
         }
-        let mut enc = d.create_command_encoder(&Default::default());
+        GpuScene { globals, globals_bg, draws }
+    }
+
+    /// Draws `scene` from `camera` into `color` (with `depth` of the same size).
+    pub fn draw(&self, scene: &GpuScene, camera: &Camera, color: &wgpu::TextureView, depth: &wgpu::TextureView, aspect: f32) -> wgpu::CommandBuffer {
+        let view_proj = camera.view_proj(aspect);
+        self.queue.write_buffer(&scene.globals, 0, bytemuck::cast_slice(&view_proj.to_cols_array()));
+        let mut enc = self.device.create_command_encoder(&Default::default());
         {
-            let target_view = target.create_view(&Default::default());
-            let depth_view = depth.create_view(&Default::default());
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target_view,
+                    view: color,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -246,7 +253,7 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth_view,
+                    view: depth,
                     depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
                     stencil_ops: None,
                 }),
@@ -254,14 +261,35 @@ impl Renderer {
                 occlusion_query_set: None,
             });
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &globals_bg, &[]);
-            for (bg, vb, ib, n) in &draws {
-                pass.set_bind_group(1, bg, &[]);
-                pass.set_vertex_buffer(0, vb.slice(..));
-                pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..*n, 0, 0..1);
+            pass.set_bind_group(0, &scene.globals_bg, &[]);
+            for d in &scene.draws {
+                pass.set_bind_group(1, &d.bind, &[]);
+                pass.set_vertex_buffer(0, d.vertices.slice(..));
+                pass.set_index_buffer(d.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..d.count, 0, 0..1);
             }
         }
+        enc.finish()
+    }
+
+    /// Renders `scene` offscreen from `camera` and returns `width * height` RGBA pixels.
+    pub fn render_to_rgba(&self, scene: &Scene, camera: &Camera, width: u32, height: u32) -> Vec<u8> {
+        let d = &self.device;
+        let gpu = self.upload_scene(scene);
+        let size = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
+        let target = d.create_texture(&wgpu::TextureDescriptor {
+            label: Some("target"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.color_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let depth = self.depth_target(width, height);
+        let color = target.create_view(&Default::default());
+        let draw = self.draw(&gpu, camera, &color, &depth, width as f32 / height as f32);
         let bytes_per_row = (width * 4).div_ceil(256) * 256;
         let readback = d.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
@@ -269,19 +297,16 @@ impl Renderer {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
+        let mut enc = d.create_command_encoder(&Default::default());
         enc.copy_texture_to_buffer(
             target.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
                 buffer: &readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(bytes_per_row),
-                    rows_per_image: Some(height),
-                },
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(bytes_per_row), rows_per_image: Some(height) },
             },
             size,
         );
-        self.queue.submit([enc.finish()]);
+        self.queue.submit([draw, enc.finish()]);
         let slice = readback.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
         let _ = d.poll(wgpu::PollType::Wait);
@@ -293,4 +318,18 @@ impl Renderer {
         }
         out
     }
+}
+
+struct Draw {
+    bind: wgpu::BindGroup,
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    count: u32,
+}
+
+/// A scene uploaded to the GPU.
+pub struct GpuScene {
+    globals: wgpu::Buffer,
+    globals_bg: wgpu::BindGroup,
+    draws: Vec<Draw>,
 }

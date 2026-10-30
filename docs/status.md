@@ -31,7 +31,11 @@ Milestones are from the plan (M0 to M12).
   placeholders.
 - Known issue: the interpreter runs at about 0.5 µs per statement; Adv1 needs about 9 ms per tick, mostly in
   the ambient creatures' scripts. A performance pass is planned (fewer value copies, faster property access).
-- M5 onwards: not started.
+- **M5 Playable render, started**: `hp3 <HP3 folder> [map]` opens an SDL3 window and draws the level with
+  wgpu while its scripts run at 60 Hz. The camera flies freely (WASD, mouse, Space/Ctrl, Shift); the
+  player's own view, movement and the dynamic actors are next. Building it needs CMake (Visual Studio Build
+  Tools ship one) because SDL3 is compiled from source.
+- M6 onwards: not started.
 
 ## Checking
 
