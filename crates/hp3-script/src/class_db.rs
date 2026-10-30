@@ -7,12 +7,14 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use hp3_package::bytecode::Token;
 use hp3_package::object::{self, Body, OwnedTag, PropertyKind};
 use hp3_package::props::{self, TagType};
 use hp3_package::{ObjRef, Package, PackageSet, Reader};
 
 use crate::names::{Name, Names};
-use crate::value::{ObjKey, Value};
+use crate::objects::{ObjKind, ObjectTable};
+use crate::value::{ObjId, ObjKey, Value};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StructId(pub u32);
@@ -63,6 +65,22 @@ pub struct StructDef {
     by_name: HashMap<Name, usize>,
     pub slots: usize,
     pub defaults: Vec<Value>,
+    /// The package and export it was loaded from; token operands refer into this package.
+    pub pkg: Rc<Package>,
+    pub export: usize,
+    /// Its entry in the object table.
+    pub object: ObjId,
+    pub script: Rc<Vec<Token>>,
+    pub script_size: u32,
+    /// For functions.
+    pub native_index: u16,
+    pub function_flags: u32,
+    pub operator_precedence: u8,
+    /// For states: probe mask, ignore mask, label table offset, state flags.
+    pub state_info: (u64, u64, u16, u32),
+    /// Functions and states declared directly in this struct, by name.
+    pub functions: HashMap<Name, StructId>,
+    pub states: HashMap<Name, StructId>,
 }
 
 impl StructDef {
@@ -113,6 +131,7 @@ pub struct ClassDb<'s> {
     pub structs: Vec<StructDef>,
     by_key: HashMap<(Rc<str>, usize), StructId>,
     package_names: HashMap<String, Rc<str>>,
+    pub objects: ObjectTable,
     pub stats: LoadStats,
 }
 
@@ -124,6 +143,7 @@ impl<'s> ClassDb<'s> {
             structs: Vec::new(),
             by_key: HashMap::new(),
             package_names: HashMap::new(),
+            objects: ObjectTable::default(),
             stats: LoadStats::default(),
         }
     }
@@ -142,12 +162,20 @@ impl<'s> ClassDb<'s> {
         self.names.intern(pkg.name(index))
     }
 
-    fn resolve_key(&mut self, pkg: &Rc<Package>, r: ObjRef) -> Option<ObjKey> {
+    /// The object-table entry of a package export, allocated on first use.
+    pub fn obj_for(&mut self, pkg: &Package, index: usize) -> ObjId {
+        let key = self.key(pkg, index);
+        let name = self.name_of(pkg, pkg.exports[index].name);
+        self.objects.for_key(key, name)
+    }
+
+    /// The object an object reference of `pkg` points to.
+    pub fn resolve_obj(&mut self, pkg: &Rc<Package>, r: ObjRef) -> Option<ObjId> {
         if r.is_none() {
             return None;
         }
         match self.set.resolve(pkg, r) {
-            Some((p, i)) => Some(self.key(&p, i)),
+            Some((p, i)) => Some(self.obj_for(&p, i)),
             None => {
                 self.stats.unresolved_objects += 1;
                 let s = format!("{}: unresolved {}", pkg.name, pkg.ref_path(r));
@@ -190,10 +218,21 @@ impl<'s> ClassDb<'s> {
         }
         let chain = self.set.export_chain(pkg, index);
         let o = object::read_export(pkg, index, &chain).ok()?;
+        let mut function = (0u16, 0u32, 0u8);
+        let mut state_info = (0, 0, 0, 0);
         let (structure, kind, class_defaults) = match &o.body {
-            Body::Class { structure, defaults, .. } => (structure.clone(), StructKind::Class, Some(defaults.clone())),
-            Body::State { structure, .. } => (structure.clone(), StructKind::State, None),
-            Body::Function { structure, .. } => (structure.clone(), StructKind::Function, None),
+            Body::Class { structure, defaults, state, .. } => {
+                state_info = (state.probe_mask, state.ignore_mask, state.label_table_offset, state.state_flags);
+                (structure.clone(), StructKind::Class, Some(defaults.clone()))
+            }
+            Body::State { structure, state } => {
+                state_info = (state.probe_mask, state.ignore_mask, state.label_table_offset, state.state_flags);
+                (structure.clone(), StructKind::State, None)
+            }
+            Body::Function { structure, function: f } => {
+                function = (f.native_index, f.function_flags, f.operator_precedence);
+                (structure.clone(), StructKind::Function, None)
+            }
             Body::Struct { structure, .. } => (structure.clone(), StructKind::Struct, None),
             _ => return None,
         };
@@ -203,7 +242,8 @@ impl<'s> ClassDb<'s> {
         };
         let name = self.name_of(pkg, pkg.exports[index].name);
         let id = StructId(self.structs.len() as u32);
-        let (mut props, mut slots, mut defaults) = match super_ {
+        // A function's super is the function it overrides; its parameters are its own.
+        let (mut props, mut slots, mut defaults) = match super_.filter(|_| kind != StructKind::Function) {
             Some(s) => {
                 let sd = self.get(s);
                 (sd.props.clone(), sd.slots, sd.defaults.clone())
@@ -212,6 +252,8 @@ impl<'s> ClassDb<'s> {
         };
         // Reserve the id before loading children, which may refer back to this struct.
         self.by_key.insert(key.clone(), id);
+        let object = self.objects.for_key(key.clone(), name);
+        self.objects.get_mut(object).kind = ObjKind::Struct(id);
         self.structs.push(StructDef {
             key,
             name,
@@ -221,7 +263,20 @@ impl<'s> ClassDb<'s> {
             by_name: HashMap::new(),
             slots: 0,
             defaults: Vec::new(),
+            pkg: pkg.clone(),
+            export: index,
+            object,
+            script: Rc::new(structure.script.clone()),
+            script_size: structure.script_size,
+            native_index: function.0,
+            function_flags: function.1,
+            operator_precedence: function.2,
+            state_info,
+            functions: HashMap::new(),
+            states: HashMap::new(),
         });
+        let mut functions = HashMap::new();
+        let mut states = HashMap::new();
         let mut own = Vec::new();
         let mut child = structure.children;
         let mut guard = 0;
@@ -238,17 +293,27 @@ impl<'s> ClassDb<'s> {
                     own.push((self.name_of(pkg, pkg.exports[ci].name), ty, p.array_dim.max(1) as usize, p.property_flags));
                     p.field.next
                 }
-                Body::Class { structure, .. }
-                | Body::State { structure, .. }
-                | Body::Function { structure, .. }
-                | Body::Struct { structure, .. } => structure.field.next,
+                Body::Function { structure, .. } => {
+                    let next = structure.field.next;
+                    if let Some(f) = self.load_struct(pkg, ci) {
+                        functions.insert(self.get(f).name, f);
+                    }
+                    next
+                }
+                Body::State { structure, .. } => {
+                    let next = structure.field.next;
+                    if let Some(st) = self.load_struct(pkg, ci) {
+                        states.insert(self.get(st).name, st);
+                    }
+                    next
+                }
+                Body::Class { structure, .. } | Body::Struct { structure, .. } => structure.field.next,
                 Body::Enum { field, .. } | Body::Const { field, .. } => field.next,
                 _ => break,
             };
             child = next;
         }
-        // Children are linked last-declared first.
-        own.reverse();
+        // Children are linked in declaration order, which is also parameter order for functions.
         for (pname, ty, dim, flags) in own {
             let default = self.default_value(&ty);
             for _ in 0..dim {
@@ -265,6 +330,8 @@ impl<'s> ClassDb<'s> {
             def.by_name = by_name;
             def.slots = slots;
             def.defaults = defaults;
+            def.functions = functions;
+            def.states = states;
         }
         if let Some(tags) = class_defaults {
             let mut values = std::mem::take(&mut self.structs[id.0 as usize].defaults);
@@ -411,12 +478,12 @@ impl<'s> ClassDb<'s> {
             PropType::Str => Value::Str(r.fstring().ok()?),
             PropType::Object | PropType::Class => {
                 let o = ObjRef(r.ci().ok()?);
-                Value::Object(self.resolve_key(pkg, o))
+                Value::Object(self.resolve_obj(pkg, o))
             }
             PropType::Delegate => {
                 let o = ObjRef(r.ci().ok()?);
                 let n = r.ci().ok()?;
-                let obj = self.resolve_key(pkg, o);
+                let obj = self.resolve_obj(pkg, o);
                 Value::Delegate(obj, self.name_of(pkg, usize::try_from(n).ok()?))
             }
             PropType::Struct(id) => self.decode_struct(pkg, *id, r)?,

@@ -85,6 +85,12 @@ pub struct Package {
     pub exports: Vec<Export>,
 }
 
+impl std::fmt::Debug for Package {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Package({})", self.name)
+    }
+}
+
 impl Package {
     pub fn open(path: &Path) -> Result<Package> {
         let data = std::fs::read(path).map_err(|e| Error::Io(path.to_path_buf(), e))?;

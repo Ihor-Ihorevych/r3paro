@@ -14,6 +14,8 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("classes") if args.len() >= 2 => classes(Path::new(&args[1]), args.get(2).map(String::as_str)),
         Some("instances") if args.len() >= 2 => instances(Path::new(&args[1]), args.get(2).map(String::as_str)),
+        Some("compile") if args.len() == 2 => compile_all(Path::new(&args[1])),
+        Some("call") if args.len() >= 4 => call(Path::new(&args[1]), &args[2], &args[3], &args[4..]),
         _ => {
             eprintln!("usage: hp3-run classes <HP3 folder> [class]");
             return ExitCode::from(2);
@@ -26,6 +28,105 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Compiles every script and reports opcodes the VM lacks and natives that are called but not implemented.
+fn compile_all(root: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    use hp3_script::compile::Expr;
+    use std::collections::BTreeMap;
+    let set = PackageSet::open(root)?;
+    let mut db = ClassDb::new(&set);
+    db.load_all_classes();
+    let mut vm = hp3_script::Vm::new(db);
+    let ids: Vec<_> = (0..vm.db.structs.len()).map(|i| hp3_script::StructId(i as u32)).collect();
+    let mut unsupported: BTreeMap<u8, usize> = BTreeMap::new();
+    let mut missing: BTreeMap<String, usize> = BTreeMap::new();
+    let mut statements = 0;
+    fn walk(e: &Expr, f: &mut dyn FnMut(&Expr)) {
+        f(e);
+        let kids: Vec<&Expr> = match e {
+            Expr::Let(a, b) | Expr::ArrayElement(a, b) | Expr::DynArrayElement(a, b) | Expr::StructCmp(_, a, b)
+            | Expr::Context(a, b) | Expr::ClassContext(a, b) => vec![a, b],
+            Expr::JumpIfNot(_, a) | Expr::Return(a) | Expr::Switch(a) | Expr::GotoLabel(a) | Expr::Assert(_, a)
+            | Expr::Discard(a) | Expr::DynArrayLength(a) | Expr::StructMember(_, a) | Expr::Cast(_, a)
+            | Expr::DynamicCast(_, a) | Expr::MetaCast(_, a) | Expr::Iterator(a, _) => vec![a],
+            Expr::Case(_, Some(a)) => vec![a],
+            Expr::DynArrayInsert(a, b, c) | Expr::DynArrayRemove(a, b, c) => vec![a, b, c],
+            Expr::Virtual(_, v) | Expr::Global(_, v) | Expr::Final(_, v) | Expr::Native(_, _, v) | Expr::New(v) => v.iter().collect(),
+            _ => vec![],
+        };
+        for k in kids {
+            walk(k, f);
+        }
+    }
+    let t = std::time::Instant::now();
+    for id in ids {
+        if vm.db.get(id).script.is_empty() {
+            continue;
+        }
+        let code = vm.code(id);
+        statements += code.statements.len();
+        let mut calls = Vec::new();
+        for s in &code.statements {
+            walk(s, &mut |e| match e {
+                Expr::Unsupported(op) => *unsupported.entry(*op).or_default() += 1,
+                Expr::Final(f, _) | Expr::Native(_, Some(f), _) => calls.push(*f),
+                Expr::Native(i, None, _) => *missing.entry(format!("native #{i} (no declaration)")).or_default() += 1,
+                _ => {}
+            });
+        }
+        for f in calls {
+            if vm.db.get(f).function_flags & hp3_script::vm::FUNC_NATIVE != 0 && !vm.has_native(f) {
+                *missing.entry(vm.function_path(f)).or_default() += 1;
+            }
+        }
+    }
+    println!("compiled {statements} statements in {:?}", t.elapsed());
+    println!("unsupported opcodes: {unsupported:?}");
+    let mut by_count: Vec<_> = missing.into_iter().collect();
+    by_count.sort_by(|a, b| b.1.cmp(&a.1));
+    println!("{} natives called but not implemented (call sites):", by_count.len());
+    for (n, c) in by_count.iter().take(60) {
+        println!("  {c:5} {n}");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn parse_arg(s: &str) -> hp3_script::Value {
+    use hp3_script::Value;
+    if let Ok(i) = s.parse::<i32>() {
+        Value::Int(i)
+    } else if let Ok(f) = s.parse::<f32>() {
+        Value::Float(f)
+    } else if s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("false") {
+        Value::Bool(s.eq_ignore_ascii_case("true"))
+    } else {
+        Value::Str(s.to_string())
+    }
+}
+
+/// Calls `Class.Function` on a fresh instance of the class with the given arguments.
+fn call(root: &Path, class: &str, func: &str, args: &[String]) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let set = PackageSet::open(root)?;
+    let mut db = ClassDb::new(&set);
+    db.load_all_classes();
+    let mut vm = hp3_script::Vm::new(db);
+    let cid = vm.db.find(class).ok_or("no such class")?;
+    let fname = vm.db.names.find(func).ok_or("no such function name")?;
+    let f = vm.find_function(None, Some(cid), fname).ok_or("no such function")?;
+    let name = vm.db.names.intern("TestObject");
+    let obj = vm.new_object(cid, name);
+    let mut values: Vec<_> = args.iter().map(|a| parse_arg(a)).collect();
+    let t = std::time::Instant::now();
+    let r = vm.invoke(f, Some(obj), &mut values);
+    println!("{} -> {:?} ({} statements, {:?})", vm.function_path(f), r, vm.steps, t.elapsed());
+    for (i, v) in values.iter().enumerate() {
+        println!("  arg {i} after: {v:?}");
+    }
+    for l in &vm.log {
+        println!("  log: {l}");
+    }
+    Ok(if r.is_ok() { ExitCode::SUCCESS } else { ExitCode::FAILURE })
 }
 
 /// Builds the property values of every scripted object in every map (or one map) and reports problems.
