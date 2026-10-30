@@ -42,6 +42,16 @@ fn key_name(sc: Scancode) -> Option<String> {
         Scancode::Home => "Home".into(),
         Scancode::End => "End".into(),
         Scancode::Insert => "Insert".into(),
+        Scancode::Kp0 => "NumPad0".into(),
+        Scancode::Kp1 => "NumPad1".into(),
+        Scancode::Kp2 => "NumPad2".into(),
+        Scancode::Kp3 => "NumPad3".into(),
+        Scancode::Kp4 => "NumPad4".into(),
+        Scancode::Kp5 => "NumPad5".into(),
+        Scancode::Kp6 => "NumPad6".into(),
+        Scancode::Kp7 => "NumPad7".into(),
+        Scancode::Kp8 => "NumPad8".into(),
+        Scancode::Kp9 => "NumPad9".into(),
         Scancode::Delete => "Delete".into(),
         _ if name.len() == 1 => name.to_ascii_uppercase(),
         _ if name.starts_with('F') && name[1..].parse::<u8>().is_ok() => name.to_string(),
@@ -183,6 +193,7 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
     let mut events = sdl.event_pump()?;
     let mut last = Instant::now();
     let mut accumulator = 0.0f32;
+    let fixed_step = std::env::var_os("HP3_FIXED_STEP").is_some();
     let mut frames = 0u32;
     let mut fps_timer = Instant::now();
     let mut free_camera = false;
@@ -247,7 +258,18 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
                 }
                 Event::MouseButtonDown { mouse_btn: MouseButton::Left, .. } if in_menu => hp3_world::gui::mouse_button(&mut vm, true),
                 Event::MouseButtonUp { mouse_btn: MouseButton::Left, .. } if in_menu => hp3_world::gui::mouse_button(&mut vm, false),
-                Event::KeyDown { keycode: Some(Keycode::Escape), .. } => break 'main,
+                // Escape opens the game's menu; Shift+Escape leaves the program.
+                Event::KeyDown { keycode: Some(Keycode::Escape), keymod, .. }
+                    if keymod.intersects(sdl3::keyboard::Mod::LSHIFTMOD | sdl3::keyboard::Mod::RSHIFTMOD) =>
+                {
+                    break 'main
+                }
+                Event::MouseWheel { y, .. } if !free_camera && y != 0.0 => {
+                    // A wheel notch is a key pressed and let go at once (it cycles the spells).
+                    let key = if y > 0.0 { "MouseWheelUp" } else { "MouseWheelDown" };
+                    hp3_world::world(&mut vm).input.key_down(key);
+                    hp3_world::world(&mut vm).input.key_up(key);
+                }
                 Event::KeyDown { scancode: Some(Scancode::F1), repeat: false, .. } => free_camera = !free_camera,
                 Event::KeyDown { scancode: Some(sc), repeat: false, .. } if !free_camera => {
                     if let Some(k) = key_name(sc) {
@@ -319,11 +341,16 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
 
         let frame_start = Instant::now();
         let mut stages: Vec<(&str, f32)> = Vec::new();
-        // The level's scripts run at a fixed 60 Hz.
-        accumulator += dt;
-        while accumulator >= 1.0 / 60.0 {
-            hp3_world::tick(&mut vm, 1.0 / 60.0);
-            accumulator -= 1.0 / 60.0;
+        // One world tick per drawn frame, with the real time since the last one (at most a thirtieth of a second,
+        // so a stall does not make the world jump). HP3_FIXED_STEP=1 keeps a fixed 60 Hz instead.
+        if fixed_step {
+            accumulator += dt;
+            while accumulator >= 1.0 / 60.0 {
+                hp3_world::tick(&mut vm, 1.0 / 60.0);
+                accumulator -= 1.0 / 60.0;
+            }
+        } else {
+            hp3_world::tick(&mut vm, dt.min(1.0 / 30.0));
         }
         stages.push(("ticks", frame_start.elapsed().as_secs_f32() * 1000.0));
         // A level switch the game asked for: the new level is loaded and its scene built.

@@ -471,16 +471,26 @@ fn arrive_from(vm: &mut Vm<'_>, pawn: ObjId) {
 /// horizontal field of view. `None` when the game gives no view (location at the origin).
 pub fn player_view(vm: &mut Vm<'_>) -> Option<(glam::Vec3, [i32; 3], f32)> {
     let pc = world(vm).player?;
-    // HP3 computes a new view only when `bTicked` differs from `bViewUpdated` (once per frame); the
-    // renderer asks once per drawn frame, so it always gets a fresh one.
-    let ticked = get(vm, pc, "bTicked").as_bool();
-    set(vm, pc, "bViewUpdated", Value::Bool(!ticked));
-    let mut args = [Value::Object(None), Value::Empty, Value::Empty];
-    vm.event(pc, "PlayerCalcView", &mut args).ok()?;
-    let (loc, rot) = (args[1].fields(), args[2].fields());
-    if loc.len() != 3 || rot.len() != 3 || loc.iter().all(|v| v.as_float() == 0.0) {
-        return None;
-    }
+    // The view is asked for once per drawn frame, with the controller as the view actor and its own location and
+    // rotation as the starting values. HP3's script computes a new view only when `bTicked` differs from
+    // `bViewUpdated` (once per tick); a view asked for twice in a tick is the one computed the first time.
+    let mut fresh = false;
+    let (loc, rot) = loop {
+        let mut args = [Value::Object(Some(pc)), get(vm, pc, "Location"), get(vm, pc, "Rotation")];
+        vm.event(pc, "PlayerCalcView", &mut args).ok()?;
+        let (loc, rot) = (args[1].fields().to_vec(), args[2].fields().to_vec());
+        let valid = loc.len() == 3 && rot.len() == 3 && !loc.iter().all(|v| v.as_float() == 0.0);
+        if valid {
+            break (loc, rot);
+        }
+        // Nothing usable yet (no tick has run since the last view): make the script compute one.
+        if fresh {
+            return None;
+        }
+        fresh = true;
+        let ticked = get(vm, pc, "bTicked").as_bool();
+        set(vm, pc, "bViewUpdated", Value::Bool(!ticked));
+    };
     let fov = match get(vm, pc, "FovAngle").as_float() {
         f if f > 1.0 && f < 179.0 => f,
         _ => 90.0,
@@ -494,6 +504,14 @@ pub fn player_view(vm: &mut Vm<'_>) -> Option<(glam::Vec3, [i32; 3], f32)> {
 
 /// Advances the level by `dt` seconds: actor ticks, timers, then state code.
 pub fn tick(vm: &mut Vm<'_>, dt: f32) {
+    // The step is scaled by the level's time dilation; while someone has paused the game only the menus run.
+    let dilation = world(vm).level_info.map(|li| get(vm, li, "TimeDilation").as_float()).filter(|d| *d > 0.0).unwrap_or(1.0);
+    let dt = dt * dilation;
+    if world(vm).level_info.is_some_and(|li| get(vm, li, "Pauser").as_obj().is_some()) {
+        follow_player(vm);
+        interactions::tick(vm, dt);
+        return;
+    }
     let actors = {
         let w = world(vm);
         w.time += dt;
