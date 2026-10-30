@@ -17,11 +17,26 @@ Milestones are from the plan (M0 to M12).
   object (12,446 default tags, all decoded); `hp3-run instances` builds the property values of all 68,554
   scripted objects placed in the 34 maps (986,581 tags, all decoded, every object reference resolved).
   Next: the interpreter.
-- M4 onwards: not started.
+- **M3 Script VM**: an interpreter over compiled expression trees (locals, out parameters, switch,
+  short-circuit operators, struct and array access, casts, virtual/final/native/delegate calls, `new`,
+  `foreach`, states with labels, latent `Sleep`). Every one of the 67,804 statements in the game's scripts
+  compiles; no opcode is unsupported. Core's natives are implemented (operators, math, strings, vectors,
+  rotators, states).
+- **M4 World boot, mostly**: `hp3-run level <HP3 folder> <map> [ticks]` loads a map into the VM, spawns the
+  game class from the config (`HGame.HGame`), runs begin-play and the player login, and ticks events, timers
+  and state code. `hp3-run levels <HP3 folder>` does this for every map: all 34 load, 33 log in a player
+  (Entry has none, as it should), and 2 seconds of play raise no script errors. The natives still hit need
+  the systems that come next: pathfinding (`FindPathToward`, `actorReachable`), traces, bone coordinates,
+  `SetOpacity`, `FinishRotation`, `Volume.Encompasses`. Sound, animation, collision and movement natives are
+  placeholders.
+- Known issue: the interpreter runs at about 0.5 µs per statement; Adv1 needs about 9 ms per tick, mostly in
+  the ambient creatures' scripts. A performance pass is planned (fewer value copies, faster property access).
+- M5 onwards: not started.
 
 ## Checking
 
 ```sh
 cargo run --release -p hp3-pkg -- check <HP3 folder>
-HP3_DIR=<HP3 folder> cargo test --release -p hp3-pkg
+HP3_DIR=<HP3 folder> cargo test --release
+cargo run --release -p hp3-run -- levels <HP3 folder>
 ```

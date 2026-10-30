@@ -15,6 +15,7 @@ fn main() -> ExitCode {
         Some("classes") if args.len() >= 2 => classes(Path::new(&args[1]), args.get(2).map(String::as_str)),
         Some("instances") if args.len() >= 2 => instances(Path::new(&args[1]), args.get(2).map(String::as_str)),
         Some("compile") if args.len() == 2 => compile_all(Path::new(&args[1])),
+        Some("levels") if args.len() >= 2 => levels(Path::new(&args[1]), args.get(2).and_then(|f| f.parse().ok()).unwrap_or(120)),
         Some("level") if args.len() >= 3 => level(Path::new(&args[1]), &args[2], args.get(3).and_then(|f| f.parse().ok()).unwrap_or(600)),
         Some("call") if args.len() >= 4 => call(Path::new(&args[1]), &args[2], &args[3], &args[4..]),
         _ => {
@@ -29,6 +30,67 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Runs every map for `frames` ticks and summarizes errors and missing natives across all of them.
+fn levels(root: &Path, frames: u32) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    use std::collections::BTreeMap;
+    let set = PackageSet::open(root)?;
+    let mut maps: Vec<String> = set
+        .files()
+        .iter()
+        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("unr")))
+        .map(|p| p.file_stem().unwrap().to_string_lossy().into_owned())
+        .collect();
+    maps.sort();
+    let mut missing_total: BTreeMap<String, (u64, usize)> = BTreeMap::new();
+    let mut errors_total: BTreeMap<String, usize> = BTreeMap::new();
+    for map in &maps {
+        let mut db = ClassDb::new(&set);
+        db.load_all_classes();
+        let mut vm = hp3_script::Vm::new(db);
+        let pkg = set.get(map)?;
+        let t = std::time::Instant::now();
+        let loaded = hp3_world::load(&mut vm, &pkg, hp3_core::Config::load(root));
+        if let Err(e) = loaded {
+            println!("{map}: load failed: {e}");
+            continue;
+        }
+        for _ in 0..frames {
+            hp3_world::tick(&mut vm, 1.0 / 60.0);
+        }
+        let w = hp3_world::world(&mut vm);
+        let (actors, errors, player) = (w.actors.len(), std::mem::take(&mut w.errors), w.player.is_some());
+        println!(
+            "{map:32} {actors:5} actors, player {}, {:4} errors, {:3} missing natives, {:?}",
+            if player { "yes" } else { "NO " },
+            errors.len(),
+            vm.missing.len(),
+            t.elapsed()
+        );
+        for e in errors {
+            let key = e.split_once(' ').map(|(_, r)| r.to_string()).unwrap_or(e);
+            *errors_total.entry(key).or_default() += 1;
+        }
+        for (n, c) in &vm.missing {
+            let e = missing_total.entry(n.clone()).or_default();
+            e.0 += c;
+            e.1 += 1;
+        }
+    }
+    let mut m: Vec<_> = missing_total.into_iter().collect();
+    m.sort_by(|a, b| b.1.1.cmp(&a.1.1).then(b.1.0.cmp(&a.1.0)));
+    println!("\nmissing natives (maps, calls):");
+    for (n, (c, maps)) in &m {
+        println!("  {maps:3} {c:8} {n}");
+    }
+    let mut e: Vec<_> = errors_total.into_iter().collect();
+    e.sort_by(|a, b| b.1.cmp(&a.1));
+    println!("\nscript errors:");
+    for (k, n) in e.iter().take(40) {
+        println!("  {n:6} {k}");
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Loads a map, runs begin-play and `frames` ticks at 60 Hz, and reports what went wrong.

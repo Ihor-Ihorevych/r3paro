@@ -254,6 +254,12 @@ impl<'s> Vm<'s> {
         format!("{class}.{}", self.db.names.get(def.name))
     }
 
+    /// Whether an object exists for scripts: references to objects that were never loaded (such as actors
+    /// deleted in the editor but still referenced by others) behave as `None`.
+    pub fn is_loaded(&self, o: ObjId) -> bool {
+        !matches!(self.db.objects.get(o).kind, ObjKind::Stub)
+    }
+
     /// The class of an object (the class itself for class objects).
     pub fn class_of(&self, obj: ObjId) -> Option<StructId> {
         let e = self.db.objects.get(obj);
@@ -413,7 +419,7 @@ impl<'s> Vm<'s> {
                 p
             }
             Expr::Context(obj, inner) => {
-                let o = self.eval(obj, frame, ctx)?.as_obj();
+                let o = self.eval(obj, frame, ctx)?.as_obj().filter(|&o| self.is_loaded(o));
                 match o {
                     Some(o) => self.place(inner, frame, Some(o))?,
                     None => {
@@ -444,7 +450,7 @@ impl<'s> Vm<'s> {
                 self.read(&p, frame)
             }
             Expr::Context(obj, inner) => {
-                let o = self.eval(obj, frame, ctx)?.as_obj();
+                let o = self.eval(obj, frame, ctx)?.as_obj().filter(|&o| self.is_loaded(o));
                 match o {
                     Some(o) => self.eval(inner, frame, Some(o))?,
                     None => {
