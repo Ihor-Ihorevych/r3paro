@@ -16,3 +16,4 @@ hp3-core.workspace = true
 hp3-script.workspace = true
 hp3-world = { path = "../../crates/hp3-world" }
 hp3-engine = { path = "../../crates/hp3-engine" }
+hp3-anim = { path = "../../crates/hp3-anim" }

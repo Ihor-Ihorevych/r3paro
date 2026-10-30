@@ -8,7 +8,7 @@ use hp3_assets::loader::{self, Loader, ObjKey};
 use hp3_package::{ObjRef, Package};
 use hp3_render::dynamic::{Dynamic, GpuMesh};
 use hp3_render::gpu::Renderer;
-use hp3_render::meshes;
+use hp3_render::meshes::{self, MeshGeom};
 use hp3_render::scene::rotation_matrix;
 use hp3_script::{ObjId, Value, Vm};
 use hp3_world::{get, world};
@@ -35,13 +35,94 @@ fn export_of(vm: &Vm<'_>, o: ObjId) -> Option<(Rc<Package>, usize)> {
     Some((vm.db.set.get(&pkg).ok()?, index))
 }
 
-/// Uploaded meshes, keyed by mesh and skins.
+/// An animated actor's own copy of its skeletal mesh, re-posed when its animation moves.
+struct Skinned {
+    mesh: ObjId,
+    skins: Vec<Option<ObjId>>,
+    gpu: Rc<GpuMesh>,
+    geom: MeshGeom,
+    asset: Rc<hp3_assets::Asset>,
+    skeleton: Rc<hp3_anim::Skeleton>,
+    /// Bone maps per animation set (by the set's address).
+    bone_maps: HashMap<usize, Vec<Option<usize>>>,
+    /// The (sequence, frame) last written, to skip unchanged poses.
+    last: Option<(Option<usize>, u32)>,
+}
+
+/// Uploaded meshes, keyed by mesh and skins; animated actors' own skinned copies.
 #[derive(Default)]
 pub struct MeshCache {
     meshes: HashMap<(ObjKey, Vec<Option<ObjKey>>), Option<Rc<GpuMesh>>>,
+    skinned: HashMap<ObjId, Skinned>,
+    skeletons: HashMap<ObjKey, Rc<hp3_anim::Skeleton>>,
+}
+
+fn skin_refs(vm: &Vm<'_>, mp: &Rc<Package>, skins: &[Option<ObjId>]) -> Vec<(Rc<Package>, ObjRef)> {
+    skins
+        .iter()
+        .map(|s| match s.and_then(|s| export_of(vm, s)) {
+            Some((p, i)) => (p, ObjRef::from_export(i)),
+            None => (mp.clone(), ObjRef::NONE),
+        })
+        .collect()
 }
 
 impl MeshCache {
+    /// A skeletal mesh posed by the actor's animation channel 0; `None` for other meshes.
+    #[allow(clippy::too_many_arguments)]
+    fn skinned(
+        &mut self,
+        vm: &mut Vm<'_>,
+        loader: &Loader<'_>,
+        r: &Renderer,
+        dynamic: &Dynamic,
+        actor: ObjId,
+        mesh: ObjId,
+        skins: &[Option<ObjId>],
+    ) -> Option<Rc<GpuMesh>> {
+        let (mp, mi) = export_of(vm, mesh)?;
+        let asset = loader.asset(&mp, mi)?;
+        let hp3_assets::Asset::SkeletalMesh(m) = &*asset else { return None };
+        let fresh = self.skinned.get(&actor).is_none_or(|s| s.mesh != mesh || s.skins != skins);
+        if fresh {
+            let skeleton = self
+                .skeletons
+                .entry(loader::key(&mp, mi))
+                .or_insert_with(|| Rc::new(hp3_anim::Skeleton::from_mesh(m, &mp)))
+                .clone();
+            let geom = meshes::build(loader, &mp, mi, &skin_refs(vm, &mp, skins))?;
+            let images = |k: &ObjKey| loader.image(&loader.set.get(&k.0).ok()?, k.1);
+            let gpu = Rc::new(dynamic.upload(r, &geom, &images));
+            self.skinned.insert(
+                actor,
+                Skinned { mesh, skins: skins.to_vec(), gpu, geom, asset: asset.clone(), skeleton, bone_maps: HashMap::new(), last: None },
+            );
+        }
+        let state = hp3_world::world(vm)
+            .anim
+            .actors
+            .get(&actor)
+            .map(|a| (a.set.clone(), a.channels.first().cloned()));
+        let s = self.skinned.get_mut(&actor)?;
+        let (set, channel) = state.unwrap_or((None, None));
+        let (seq, frame) = channel.map(|c| (c.sequence, c.frame)).unwrap_or((None, 0.0));
+        let key = (seq, frame.to_bits());
+        if s.last != Some(key) {
+            let hp3_assets::Asset::SkeletalMesh(m) = &*s.asset else { return None };
+            let skin = match &set {
+                Some(set) => {
+                    let map = s.bone_maps.entry(Rc::as_ptr(set) as usize).or_insert_with(|| set.bone_map(&s.skeleton));
+                    hp3_anim::pose(&s.skeleton, Some((set, map)), seq, frame)
+                }
+                None => hp3_anim::pose(&s.skeleton, None, None, 0.0),
+            };
+            let points = hp3_anim::skin_points(m, &skin);
+            dynamic.write_points(r, &s.gpu, &s.geom, &points);
+            s.last = Some(key);
+        }
+        Some(s.gpu.clone())
+    }
+
     fn get(
         &mut self,
         vm: &Vm<'_>,
@@ -105,7 +186,8 @@ pub fn actor_instances(
             Value::Array(v) => v.iter().map(Value::as_obj).collect(),
             _ => Vec::new(),
         };
-        let Some(gpu) = cache.get(vm, loader, r, dynamic, mesh, &skins) else { continue };
+        let skinned = if draw_type == DT_MESH { cache.skinned(vm, loader, r, dynamic, a, mesh, &skins) } else { None };
+        let Some(gpu) = skinned.or_else(|| cache.get(vm, loader, r, dynamic, mesh, &skins)) else { continue };
         let loc = vec3(&get(vm, a, "Location"));
         let rot: Vec<i32> = get(vm, a, "Rotation").fields().iter().map(Value::as_int).collect();
         let rot = [rot.first().copied().unwrap_or(0), rot.get(1).copied().unwrap_or(0), rot.get(2).copied().unwrap_or(0)];

@@ -11,6 +11,8 @@ use crate::value::{ObjId, ObjKey, Value};
 pub enum ObjKind {
     /// Referenced but not loaded yet.
     Stub,
+    /// A stub that could not be loaded (an actor deleted in the editor, an object of a class without script).
+    Missing,
     /// A class, state, function or struct.
     Struct(StructId),
     /// An instance of a script class.
@@ -56,6 +58,13 @@ impl ObjectTable {
             deleted: false,
         });
         id
+    }
+
+    /// The object of a struct that no package defines (a native-only class).
+    pub fn add_struct(&mut self, name: Name, id: StructId) -> ObjId {
+        let obj = ObjId(self.entries.len() as u32);
+        self.entries.push(ObjEntry { key: None, name, class: None, kind: ObjKind::Struct(id), deleted: false });
+        obj
     }
 
     pub fn get(&self, id: ObjId) -> &ObjEntry {

@@ -216,36 +216,13 @@ pub fn register(vm: &mut Vm<'_>) {
     vm.register("Actor.PlaySound", |_vm, _this, _a| Ok(Value::Empty));
     vm.register("Actor.PlayOwnedSound", |_vm, _this, _a| Ok(Value::Empty));
     vm.register("Actor.PlayMusic", |_vm, _this, _a| Ok(Value::Int(0)));
-    // Animation: records the sequence; FinishAnim waits one tick until skeletal animation exists.
-    vm.register("Actor.PlayAnim", |vm, this, a| {
-        if let Some(o) = this {
-            set(vm, o, "AnimSequence", Value::Name(a[0].as_name()));
-        }
-        Ok(Value::Bool(true))
-    });
-    vm.register("Actor.LoopAnim", |vm, this, a| {
-        if let Some(o) = this {
-            set(vm, o, "AnimSequence", Value::Name(a[0].as_name()));
-        }
-        Ok(Value::Bool(true))
-    });
-    vm.register("Actor.TweenAnim", |_vm, _this, _a| Ok(Value::Bool(true)));
-    vm.register("Actor.FinishAnim", |vm, this, _a| {
-        if let Some(o) = this {
-            vm.latent.insert(o, Latent::Sleep(0.0));
-        }
-        Ok(Value::Empty)
-    });
+    // Animation natives live in anim.rs.
     vm.register("Actor.FinishInterpolation", |vm, this, _a| {
         if let Some(o) = this {
             vm.latent.insert(o, Latent::Sleep(0.0));
         }
         Ok(Value::Empty)
     });
-    vm.register("Actor.IsAnimating", |_vm, _this, _a| Ok(Value::Bool(false)));
-    vm.register("Actor.HasAnim", |_vm, _this, _a| Ok(Value::Bool(true)));
-    vm.register("Actor.StopAnimating", |_vm, _this, _a| Ok(Value::Empty));
-    vm.register("Actor.GetAnimSequence", |vm, this, _a| Ok(this.map(|o| get(vm, o, "AnimSequence")).unwrap_or(Value::Name(Name::NONE))));
     // Level-wide linked lists of pawns and controllers.
     vm.register("Pawn.AddPawn", |vm, this, _a| {
         link(vm, this, "PawnList", "nextPawn");
@@ -325,7 +302,6 @@ pub fn register(vm: &mut Vm<'_>) {
     vm.register("PlayerController.ConsoleCommand", |_vm, _this, _a| Ok(Value::Str(String::new())));
     vm.register("LevelInfo.IsSoftwareRendering", |_vm, _this, _a| Ok(Value::Bool(false)));
     // Rendering-side effects with nothing to do headless.
-    vm.register("Actor.AnimBlendParams", |_vm, _this, _a| Ok(Value::Empty));
     vm.register("Actor.StopFeedbackEffect", |_vm, _this, _a| Ok(Value::Empty));
     vm.register("Projector.AttachProjector", |_vm, _this, _a| Ok(Value::Empty));
     vm.register("Projector.DetachProjector", |_vm, _this, _a| Ok(Value::Empty));
@@ -499,29 +475,16 @@ pub fn register(vm: &mut Vm<'_>) {
     vm.register("Actor.MakeNoise", |_vm, _this, _a| Ok(Value::Empty));
     vm.register("Actor.StopAllMusic", |_vm, _this, _a| Ok(Value::Empty));
     vm.register("LevelInfo.IsDemoBuild", |_vm, _this, _a| Ok(Value::Bool(false)));
-    vm.register("Actor.AttachToBone", |vm, this, a| {
-        if let Some(att) = obj_arg(a, 0) {
-            set(vm, att, "Base", Value::Object(this));
-        }
-        Ok(Value::Bool(true))
-    });
-    vm.register("Actor.GetAnimParams", |vm, this, a| {
-        if let Some(o) = this
-            && a.len() >= 4
-        {
-            a[1] = get(vm, o, "AnimSequence");
-            a[2] = Value::Float(0.0);
-            a[3] = Value::Float(1.0);
-        }
-        Ok(Value::Empty)
-    });
-    // Skin tint and animation timing: placeholders until rendering and animation exist.
+    // Skin tint: a placeholder until rendering uses it.
     vm.register("Actor.SetSkinColor", |_vm, _this, _a| Ok(Value::Empty));
-    vm.register("Actor.SetAnimTime", |_vm, _this, _a| Ok(Value::Empty));
-    vm.register("Actor.AnimBlendToAlpha", |_vm, _this, _a| Ok(Value::Empty));
     vm.register("Object.DynamicLoadObject", |vm, _this, a| {
         let path = a[0].as_str().to_string();
-        let found = crate::find_object(vm, &path);
+        // The class argument is a class object; its name picks among objects sharing the path.
+        let class = a.get(1).and_then(Value::as_obj).and_then(|c| match vm.db.objects.get(c).kind {
+            hp3_script::objects::ObjKind::Struct(s) => Some(vm.db.names.get(vm.db.structs[s.0 as usize].name).to_string()),
+            _ => None,
+        });
+        let found = crate::find_object_of(vm, &path, class.as_deref());
         if found.is_none() && !a.get(2).is_some_and(Value::as_bool) {
             vm.warn(format!("DynamicLoadObject: {path} not found"));
         }

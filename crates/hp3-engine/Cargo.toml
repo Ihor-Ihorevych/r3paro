@@ -13,3 +13,4 @@ hp3-script.workspace = true
 hp3-world = { path = "../hp3-world" }
 hp3-render = { path = "../hp3-render" }
 glam = "0.30"
+hp3-anim = { path = "../hp3-anim" }

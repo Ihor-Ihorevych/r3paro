@@ -113,8 +113,15 @@ impl<'s> Loader<'s> {
         };
         let data = pkg.data.get(mip.data_offset..mip.data_offset + mip.data_len)?;
         let (w, h) = (mip.width as usize, mip.height as usize);
-        let rgba = texture::decode_rgba(format, w, h, data, palette.as_ref())?;
+        let mut rgba = texture::decode_rgba(format, w, h, data, palette.as_ref())?;
         let masked = masked || (format == Format::P8 && palette.is_some_and(|p| p.colors.first().is_some_and(|c| c.a == 0)));
+        // Alpha is a cut-out only for masked textures; elsewhere it carries other data (specular, blending),
+        // which the renderer does not use yet.
+        if !masked {
+            for px in rgba.chunks_exact_mut(4) {
+                px[3] = 255;
+            }
+        }
         Some(Image { width: w as u32, height: h as u32, rgba, masked })
     }
 

@@ -427,6 +427,11 @@ dependencies = [
 [[package]]
 name = "hp3-anim"
 version = "0.1.0"
+dependencies = [
+ "glam",
+ "hp3-assets",
+ "hp3-package",
+]
 
 [[package]]
 name = "hp3-assets"
@@ -450,6 +455,7 @@ name = "hp3-engine"
 version = "0.1.0"
 dependencies = [
  "glam",
+ "hp3-anim",
  "hp3-assets",
  "hp3-package",
  "hp3-render",
@@ -531,6 +537,7 @@ name = "hp3-view"
 version = "0.1.0"
 dependencies = [
  "glam",
+ "hp3-anim",
  "hp3-assets",
  "hp3-core",
  "hp3-engine",
@@ -546,6 +553,7 @@ name = "hp3-world"
 version = "0.1.0"
 dependencies = [
  "glam",
+ "hp3-anim",
  "hp3-assets",
  "hp3-core",
  "hp3-package",

@@ -15,6 +15,8 @@ pub struct MeshBatch {
     pub texture: Option<ObjKey>,
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
+    /// Skeletal meshes: the mesh point each vertex is placed at, for re-posing.
+    pub points: Vec<u32>,
 }
 
 pub struct MeshGeom {
@@ -31,6 +33,17 @@ fn texture(loader: &Loader<'_>, pkg: &Rc<Package>, material: ObjRef) -> Option<O
 
 /// Builds the geometry of a static or skeletal mesh export; `skins` override section materials by index.
 pub fn build(loader: &Loader<'_>, pkg: &Rc<Package>, index: usize, skins: &[(Rc<Package>, ObjRef)]) -> Option<MeshGeom> {
+    build_posed(loader, pkg, index, skins, None)
+}
+
+/// Like `build`; for skeletal meshes, `points` replaces the reference positions (a skinned pose).
+pub fn build_posed(
+    loader: &Loader<'_>,
+    pkg: &Rc<Package>,
+    index: usize,
+    skins: &[(Rc<Package>, ObjRef)],
+    points: Option<&[Vec3]>,
+) -> Option<MeshGeom> {
     let asset = loader.asset(pkg, index)?;
     let skin = |i: usize| skins.get(i).filter(|(_, r)| !r.is_none()).and_then(|(p, r)| texture(loader, p, *r));
     match &*asset {
@@ -56,40 +69,45 @@ pub fn build(loader: &Loader<'_>, pkg: &Rc<Package>, index: usize, skins: &[(Rc<
                     indices.push(out);
                 }
                 let tex = skin(si).or_else(|| materials.get(si).copied().and_then(|m| texture(loader, pkg, m)));
-                batches.push(MeshBatch { texture: tex, vertices, indices });
+                batches.push(MeshBatch { texture: tex, vertices, indices, points: Vec::new() });
             }
             Some(MeshGeom { batches, local: Mat4::IDENTITY })
         }
         Asset::SkeletalMesh(m) => {
             let h = &m.header;
             // One batch per material, from the reference triangles.
-            let mut per_material: Vec<(Vec<Vertex>, Vec<u32>, std::collections::HashMap<u16, u32>)> = Vec::new();
+            let mut per_material: Vec<(Vec<Vertex>, Vec<u32>, std::collections::HashMap<u16, u32>, Vec<u32>)> = Vec::new();
             for t in &m.triangles {
                 let mi = t.material as usize;
                 while per_material.len() <= mi {
                     per_material.push(Default::default());
                 }
-                let (verts, idx, remap) = &mut per_material[mi];
+                let (verts, idx, remap, src) = &mut per_material[mi];
                 for &w in &t.wedges {
                     let next = verts.len() as u32;
                     let out = *remap.entry(w).or_insert_with(|| {
                         let wedge = m.wedges.get(w as usize);
-                        let p = wedge.and_then(|w| m.points.get(w.vertex as usize)).copied().unwrap_or_default();
+                        let vi = wedge.map(|w| w.vertex as usize).unwrap_or(0);
+                        let p = match points {
+                            Some(pts) => pts.get(vi).copied().unwrap_or(Vec3::ZERO),
+                            None => m.points.get(vi).map(|p| Vec3::new(p.x, p.y, p.z)).unwrap_or(Vec3::ZERO),
+                        };
                         let uv = wedge.map(|w| [w.u, w.v]).unwrap_or([0.0, 0.0]);
-                        verts.push(Vertex { position: [p.x, p.y, p.z], uv });
+                        verts.push(Vertex { position: p.to_array(), uv });
+                        src.push(vi as u32);
                         next
                     });
                     idx.push(out);
                 }
             }
             let mut batches = Vec::new();
-            for (mi, (vertices, indices, _)) in per_material.into_iter().enumerate() {
+            for (mi, (vertices, indices, _, points)) in per_material.into_iter().enumerate() {
                 if indices.is_empty() {
                     continue;
                 }
                 let tex_index = h.materials.get(mi).map(|m| m.1 as usize).unwrap_or(mi);
                 let tex = skin(mi).or_else(|| h.textures.get(tex_index).and_then(|t| texture(loader, pkg, *t)));
-                batches.push(MeshBatch { texture: tex, vertices, indices });
+                batches.push(MeshBatch { texture: tex, vertices, indices, points });
             }
             let scale = Vec3::new(h.mesh_scale.x, h.mesh_scale.y, h.mesh_scale.z);
             let origin = Vec3::new(h.mesh_origin.x, h.mesh_origin.y, h.mesh_origin.z);

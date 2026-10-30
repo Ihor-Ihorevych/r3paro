@@ -289,6 +289,11 @@ impl Package {
     /// Finds a top-level-or-nested export by its object name and outer chain (`Outer.Name`, package omitted).
     /// A `@Class` suffix restricts the match to exports of that class.
     pub fn find_export_path(&self, path: &str) -> Option<usize> {
+        self.find_export_path_where(path, |_| true)
+    }
+
+    /// Like `find_export_path`, keeping only exports for which `keep` holds.
+    pub fn find_export_path_where(&self, path: &str, keep: impl Fn(usize) -> bool) -> Option<usize> {
         let (path, class) = match path.split_once('@') {
             Some((p, c)) => (p, Some(c)),
             None => (path, None),
@@ -298,6 +303,9 @@ impl Package {
             if let Some(c) = class
                 && !self.export_class_name(i).eq_ignore_ascii_case(c)
             {
+                return false;
+            }
+            if !keep(i) {
                 return false;
             }
             let mut cur = ObjRef::from_export(i);

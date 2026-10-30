@@ -15,6 +15,7 @@ use std::path::PathBuf;
 
 pub use package::{Export, Import, ObjRef, Package};
 pub use reader::Reader;
+pub use set::builtin_super;
 pub use set::PackageSet;
 
 #[derive(Debug, thiserror::Error)]

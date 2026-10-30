@@ -68,7 +68,8 @@ pub struct LodModel {
 pub struct SkeletalMesh {
     pub header: LodMeshHeader,
     pub ref_skeleton: Vec<Bone>,
-    pub unknown: i32,
+    /// The animation set used when an actor links none (a `MeshAnimation`).
+    pub default_anim: hp3_package::ObjRef,
     pub skeletal_depth: i32,
     pub lod_models: Vec<LodModel>,
     pub points: Vec<Vec3>,
@@ -130,7 +131,7 @@ pub fn read_skeletal_mesh(r: &mut Reader<'_>) -> Result<SkeletalMesh> {
             parent: r.i32()?,
         })
     })?;
-    let unknown = r.ci()?;
+    let default_anim = hp3_package::ObjRef(r.ci()?);
     let skeletal_depth = r.i32()?;
     let _ = r.i32()?;
     let _ = r.array(|r| r.i32())?;
@@ -139,7 +140,7 @@ pub fn read_skeletal_mesh(r: &mut Reader<'_>) -> Result<SkeletalMesh> {
     Ok(SkeletalMesh {
         header,
         ref_skeleton,
-        unknown,
+        default_anim,
         skeletal_depth,
         lod_models,
         points: r.lazy_array(Vec3::read)?,

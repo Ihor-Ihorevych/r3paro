@@ -3,6 +3,7 @@
 //!
 //! The world lives in `Vm::ext`; natives reach it with `world(vm)`.
 
+pub mod anim;
 pub mod collision;
 pub mod input;
 pub mod natives;
@@ -43,6 +44,7 @@ pub struct World {
     pub collision: collision::Collision,
     /// Pairs of actors currently touching (lower id first).
     pub touching: std::collections::HashSet<(ObjId, ObjId)>,
+    pub anim: anim::Animation,
 }
 
 /// The world stored in the VM. Panics if no level is loaded.
@@ -113,6 +115,7 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Res
     let game_class = game_class.as_deref();
     let actor_class = vm.db.find("Actor").ok_or_else(|| VmError::Runtime("no Actor class".into()))?;
     natives::register(vm);
+    anim::register(vm);
     // Every scripted object of the map, so references between them resolve to live instances.
     let mut level_order = Vec::new();
     let mut level_model = None;
@@ -168,6 +171,7 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Res
         input: input::Input::from_config(&config),
         collision: collision::Collision::default(),
         touching: Default::default(),
+        anim: Default::default(),
         config,
     }));
     let collision = build_collision(vm, map, level_model, &actors);
@@ -233,6 +237,9 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     }
     physics::step(vm, dt);
     physics::update_touching(vm);
+    anim::update_movement(vm);
+    anim::tick(vm, dt);
+    anim::update_attachments(vm);
     for &a in &actors {
         if vm.db.objects.get(a).deleted {
             continue;
@@ -289,7 +296,7 @@ fn follow_player(vm: &mut Vm<'_>) {
 }
 
 /// Decodes the native data of an export with `hp3-assets`.
-fn native_asset(map: &Package, index: usize, chain: &[String]) -> Option<Asset> {
+pub(crate) fn native_asset(map: &Package, index: usize, chain: &[String]) -> Option<Asset> {
     let o = object::read_export(map, index, chain).ok()?;
     let base = map.exports[index].serial_offset + map.exports[index].serial_size - o.tail.len();
     let mut r = hp3_package::Reader::with_base(o.tail, base);
@@ -369,9 +376,18 @@ fn build_collision(vm: &mut Vm<'_>, map: &Rc<Package>, model: Option<ObjRef>, ac
 
 /// Finds an object by its full path (`Package.Group.Name`), loading classes as needed.
 pub fn find_object(vm: &mut Vm<'_>, path: &str) -> Option<ObjId> {
+    find_object_of(vm, path, None)
+}
+
+/// Like `find_object`, preferring an object that is a `class` (by class name, through its hierarchy) when
+/// several share the path, as a mesh and its animation set often do.
+pub fn find_object_of(vm: &mut Vm<'_>, path: &str, class: Option<&str>) -> Option<ObjId> {
     let (pkg_name, rest) = path.split_once('.')?;
     let pkg = vm.db.set.get(pkg_name).ok()?;
-    let index = pkg.find_export_path(rest)?;
+    let set = vm.db.set;
+    let index = class
+        .and_then(|c| pkg.find_export_path_where(rest, |i| set.export_chain(&pkg, i).iter().any(|n| n.eq_ignore_ascii_case(c))))
+        .or_else(|| pkg.find_export_path(rest))?;
     if pkg.exports[index].class.is_none() {
         let s = vm.db.load_struct(&pkg, index)?;
         return Some(vm.db.get(s).object);

@@ -20,6 +20,14 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let r = match args.first().map(String::as_str) {
         Some("shot") if args.len() >= 4 => shot(Path::new(&args[1]), &args[2], Path::new(&args[3]), args.get(4).map(String::as_str)),
+        Some("pose") if args.len() >= 5 => pose(
+            Path::new(&args[1]),
+            &args[2],
+            &args[3],
+            Path::new(&args[4]),
+            args.get(5).map(String::as_str),
+            args.get(6).and_then(|f| f.parse().ok()).unwrap_or(0.0),
+        ),
         Some("play") if args.len() >= 4 => play(Path::new(&args[1]), &args[2], Path::new(&args[3]), args.get(4).and_then(|t| t.parse().ok()).unwrap_or(60)),
         _ => {
             eprintln!("usage: hp3-view shot <HP3 folder> <map> <out.png> [x,y,z,pitch,yaw]\n       hp3-view play <HP3 folder> <map> <out.png> [ticks]");
@@ -78,6 +86,45 @@ fn shot(root: &Path, map: &str, out: &Path, cam: Option<&str>) -> Result<(), Box
     write_png(out, w, h, &rgba)
 }
 
+/// Renders one skeletal mesh posed at `frame` of a sequence of its default animation set.
+fn pose(root: &Path, package: &str, mesh: &str, out: &Path, seq: Option<&str>, frame: f32) -> Result<(), Box<dyn std::error::Error>> {
+    use hp3_assets::Asset;
+    let set = PackageSet::open(root)?;
+    let loader = Loader::new(&set);
+    let pkg = set.get(package)?;
+    let mi = pkg.find_export_path(&format!("{mesh}@SkeletalMesh")).ok_or("no such skeletal mesh")?;
+    let asset = loader.asset(&pkg, mi).ok_or("mesh does not decode")?;
+    let Asset::SkeletalMesh(m) = &*asset else { return Err("not a skeletal mesh".into()) };
+    let skel = hp3_anim::Skeleton::from_mesh(m, &pkg);
+    let anim = set.resolve(&pkg, m.default_anim).and_then(|(ap, ai)| match loader.asset(&ap, ai).as_deref() {
+        Some(Asset::MeshAnimation(a)) => Some(hp3_anim::AnimSet::new((**a).clone(), &ap)),
+        _ => None,
+    });
+    let (points, label) = match &anim {
+        Some(set_) => {
+            let map = set_.bone_map(&skel);
+            eprintln!("{} bones, {} mapped; {} sequences: {}", skel.len(), map.iter().flatten().count(), set_.sequences.len(),
+                set_.sequences.iter().map(|s| format!("{}({})", s.name, s.frames)).collect::<Vec<_>>().join(" "));
+            let si = seq.and_then(|s| set_.find(s));
+            let skin = hp3_anim::pose(&skel, Some((set_, &map)), si, frame);
+            (hp3_anim::skin_points(m, &skin), format!("{seq:?} frame {frame}"))
+        }
+        None => (hp3_anim::skin_points(m, &hp3_anim::pose(&skel, None, None, 0.0)), "reference".into()),
+    };
+    eprintln!("posing {label}");
+    let geom = hp3_render::meshes::build_posed(&loader, &pkg, mi, &[], Some(&points)).ok_or("no geometry")?;
+    let renderer = Renderer::new_headless()?;
+    let dynamic = Dynamic::new(&renderer);
+    let images = |k: &hp3_assets::loader::ObjKey| loader.image(&set.get(&k.0).ok()?, k.1);
+    let gpu = dynamic.upload(&renderer, &geom, &images);
+    let gpu_scene = renderer.upload_scene(&scene::Scene::default());
+    let camera = Camera { position: Vec3::new(180.0, 0.0, 10.0), rotation: [0, 32768, 0], fov_degrees: 70.0 };
+    let (w, h) = (800, 800);
+    let refs = [(&gpu, glam::Mat4::IDENTITY)];
+    let rgba = renderer.render_frame_to_rgba(w, h, |c, d| dynamic.draw(&renderer, &gpu_scene, &refs, &camera, c, d, 1.0));
+    write_png(out, w, h, &rgba)
+}
+
 fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn std::error::Error>> {
     let set = PackageSet::open(root)?;
     let loader = Loader::new(&set);
@@ -102,12 +149,24 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
     let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut cache);
     eprintln!("{} static batches, {} live actors drawn", scene.batches.len(), instances.len());
     let pc = hp3_world::world(&mut vm).player.ok_or("no player")?;
-    let pawn = hp3_world::get(&mut vm, pc, "Pawn").as_obj().ok_or("no pawn")?;
+    let mut pawn = hp3_world::get(&mut vm, pc, "Pawn").as_obj().ok_or("no pawn")?;
+    // HP3_VIEW_CLASS=<class>[:n] frames the n-th actor of that class instead of the player.
+    if let Ok(spec) = std::env::var("HP3_VIEW_CLASS") {
+        let (class, n) = spec.split_once(':').map(|(c, n)| (c.to_string(), n.parse().unwrap_or(0))).unwrap_or((spec.clone(), 0));
+        let actors = hp3_world::world(&mut vm).actors.clone();
+        let matching: Vec<_> = actors
+            .into_iter()
+            .filter(|&a| {
+                vm.db.objects.get(a).class.is_some_and(|c| vm.db.names.get(vm.db.structs[c.0 as usize].name).eq_ignore_ascii_case(&class))
+            })
+            .collect();
+        pawn = *matching.get(n).ok_or("no actor of that class")?;
+    }
     let p = hp3_world::physics::vec(&hp3_world::get(&mut vm, pawn, "Location"));
     let yaw = hp3_world::get(&mut vm, pawn, "Rotation").fields().get(1).map(Value::as_int).unwrap_or(0);
     let k = std::f32::consts::TAU / 65536.0;
     let back = Vec3::new((yaw as f32 * k).cos(), (yaw as f32 * k).sin(), 0.0);
-    let camera = Camera { position: p - back * 220.0 + Vec3::Z * 90.0, rotation: [-2500, yaw, 0], fov_degrees: 90.0 };
+    let camera = Camera { position: p - back * 160.0 + Vec3::Z * 50.0, rotation: [-1500, yaw, 0], fov_degrees: 90.0 };
     let (w, h) = (1280, 720);
     let gpu_scene = renderer.upload_scene(&scene);
     let refs: Vec<_> = instances.iter().map(|(m, t)| (m.as_ref(), *t)).collect();

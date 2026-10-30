@@ -39,6 +39,8 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 const STRIDE: u64 = 256;
 
 struct MeshDraw {
+    /// The `MeshGeom` batch this draw came from.
+    batch: usize,
     bind: wgpu::BindGroup,
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
@@ -139,7 +141,7 @@ impl Dynamic {
     /// Uploads a mesh, sharing textures with earlier uploads.
     pub fn upload(&self, r: &Renderer, geom: &MeshGeom, images: &dyn Fn(&ObjKey) -> Option<std::rc::Rc<Image>>) -> GpuMesh {
         let mut draws = Vec::new();
-        for b in &geom.batches {
+        for (bi, b) in geom.batches.iter().enumerate() {
             if b.indices.is_empty() {
                 continue;
             }
@@ -162,16 +164,33 @@ impl Dynamic {
             let vertices = r.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,
                 contents: bytemuck::cast_slice(&b.vertices),
-                usage: wgpu::BufferUsages::VERTEX,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             });
             let indices = r.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,
                 contents: bytemuck::cast_slice(&b.indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
-            draws.push(MeshDraw { bind, vertices, indices, count: b.indices.len() as u32 });
+            draws.push(MeshDraw { batch: bi, bind, vertices, indices, count: b.indices.len() as u32 });
         }
         GpuMesh { draws, local: geom.local }
+    }
+
+    /// Moves an uploaded skeletal mesh's vertices to posed `points` (indexed like the mesh's points).
+    pub fn write_points(&self, r: &Renderer, mesh: &GpuMesh, geom: &MeshGeom, points: &[glam::Vec3]) {
+        for d in &mesh.draws {
+            let Some(b) = geom.batches.get(d.batch) else { continue };
+            if b.points.len() != b.vertices.len() {
+                continue;
+            }
+            let verts: Vec<Vertex> = b
+                .vertices
+                .iter()
+                .zip(&b.points)
+                .map(|(v, &p)| Vertex { position: points.get(p as usize).map(|p| p.to_array()).unwrap_or(v.position), uv: v.uv })
+                .collect();
+            r.queue.write_buffer(&d.vertices, 0, bytemuck::cast_slice(&verts));
+        }
     }
 
     /// Draws the static scene and the meshes at their transforms (actor space to world) in one pass.

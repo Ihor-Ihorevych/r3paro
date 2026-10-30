@@ -35,7 +35,7 @@ Milestones are from the plan (M0 to M12).
   wgpu while its scripts run at 60 Hz. Keyboard and mouse go through the game's key bindings; the view is the
   game's own `PlayerCalcView`, or a camera behind the pawn while the game's camera is not running (a map loaded
   directly skips the menu and New Game flow that starts it). F1 toggles a free camera. Characters and other
-  live actors are drawn with their meshes and skins, in their reference pose (no skeletal animation yet);
+  live actors are drawn with their meshes and skins, skinned on the CPU each frame from their animation;
   static actors are baked into the level geometry. `hp3-view play <HP3 folder> <map> <out.png>` renders the
   same headless. Not yet: lighting, terrain rendering, skyboxes, emitters, translucency, HUD.
 - **M6 Movement, started**: swept-box collision against the level BSP, static mesh and terrain triangles and
@@ -43,9 +43,18 @@ Milestones are from the plan (M0 to M12).
   projectiles; touch events from collision cylinders; `Trace`, `FastTrace`, `TraceActors`. Holding W walks
   Harry until the wall stops him at the distance a trace measures. Movement values are not yet matched to the
   retail game.
+- **Animation (Phase 8), started**: skeletal poses sampled from HP3's animation sets (`hp3-anim`), one channel
+  per actor with looping, rate, `AnimEnd` and `FinishAnim`; pawns pick run/walk/idle animations from their
+  velocity and call the scripts' `PlayWaiting`/`PlayFalling`; bone attachments (`AttachToBone`, used for
+  students' hair and props), `GetBoneCoords`, `GetBoneRotation`, `LinkMesh`. Not yet: blending between
+  channels, tweening, notifies, root motion, bone controllers. `hp3-view pose` renders one mesh at a sequence
+  and frame.
+- Script objects: package objects (meshes, materials, sounds, notifies) are now loaded the first time a script
+  uses them, and native-only classes (`Mesh`, `SkeletalMesh`, `Sound`...) exist as classes, so casts and
+  `DynamicLoadObject(..., class'Mesh')` work.
 - M7 onwards: not started. The natives still hit across all maps are pathfinding and AI movement
-  (`FindPathToward`, `actorReachable`, `MoveTo`...), `SetOpacity`, `GetBoneCoords`, `FinishRotation` and
-  `Volume.Encompasses`.
+  (`FindPathToward`, `actorReachable`, `MoveTo`...), `SetOpacity`, `ParticleEmitter.Trigger`, `FinishRotation`
+  and `Volume.Encompasses`.
 
 ## Checking
 

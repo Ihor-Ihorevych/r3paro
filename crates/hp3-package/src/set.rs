@@ -14,8 +14,9 @@ use crate::{Error, Result};
 pub const PACKAGE_DIRS: &[&str] = &["System", "Maps", "Textures", "StaticMeshes", "Animations", "Sounds", "Music"];
 pub const PACKAGE_EXTS: &[&str] = &["u", "unr", "utx", "usx", "ukx", "uax", "umx"];
 
-/// Classes implemented entirely in native code: they have no class object in any package.
-fn builtin_super(class: &str) -> Option<&'static str> {
+/// Classes implemented entirely in native code: they have no class object in any package. Returns the parent
+/// class, `None` for `Object` and for unknown classes.
+pub fn builtin_super(class: &str) -> Option<&'static str> {
     let c = class.to_ascii_lowercase();
     Some(match c.as_str() {
         "object" => return None,
@@ -35,7 +36,7 @@ fn builtin_super(class: &str) -> Option<&'static str> {
         "level" | "pendinglevel" => "LevelBase",
         "lodmesh" => "Mesh",
         "skeletalmesh" | "vertmesh" => "LodMesh",
-        "staticmeshinstance" => "Object",
+        "staticmeshinstance" | "sound" | "music" => "Object",
         _ => return None,
     })
 }

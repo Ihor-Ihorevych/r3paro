@@ -131,6 +131,7 @@ pub struct ClassDb<'s> {
     pub structs: Vec<StructDef>,
     by_key: HashMap<(Rc<str>, usize), StructId>,
     package_names: HashMap<String, Rc<str>>,
+    native_classes: HashMap<String, Option<StructId>>,
     pub objects: ObjectTable,
     pub stats: LoadStats,
 }
@@ -143,6 +144,7 @@ impl<'s> ClassDb<'s> {
             structs: Vec::new(),
             by_key: HashMap::new(),
             package_names: HashMap::new(),
+            native_classes: HashMap::new(),
             objects: ObjectTable::default(),
             stats: LoadStats::default(),
         }
@@ -176,6 +178,12 @@ impl<'s> ClassDb<'s> {
         }
         match self.set.resolve(pkg, r) {
             Some((p, i)) => Some(self.obj_for(&p, i)),
+            // A native-only class (`class'Mesh'`): its synthetic class object.
+            None if r.import().and_then(|i| pkg.imports.get(i)).is_some_and(|imp| pkg.name(imp.class_name).eq_ignore_ascii_case("Class"))
+                && let Some(c) = self.native_class(pkg.ref_name(r)) =>
+            {
+                Some(self.get(c).object)
+            }
             None => {
                 self.stats.unresolved_objects += 1;
                 let s = format!("{}: unresolved {}", pkg.name, pkg.ref_path(r));
@@ -406,8 +414,58 @@ impl<'s> ClassDb<'s> {
     /// The class of an export, loaded.
     pub fn class_of(&mut self, pkg: &Rc<Package>, index: usize) -> Option<StructId> {
         let class = pkg.exports.get(index)?.class;
-        let (cp, ci) = self.set.resolve(pkg, class)?;
-        self.load_struct(&cp, ci)
+        match self.set.resolve(pkg, class) {
+            Some((cp, ci)) => self.load_struct(&cp, ci),
+            None if !class.is_none() => self.native_class(pkg.ref_name(class)),
+            None => None,
+        }
+    }
+
+    /// A class implemented only in native code (`Mesh`, `SkeletalMesh`, `Sound`...), which no package defines:
+    /// a class without properties whose parents come from the built-in hierarchy, so that casts and `IsA`
+    /// work on its objects. A script class of that name is returned instead when one exists.
+    pub fn native_class(&mut self, name: &str) -> Option<StructId> {
+        let lower = name.to_ascii_lowercase();
+        if let Some(c) = self.native_classes.get(&lower) {
+            return *c;
+        }
+        let found = match self.find(name) {
+            Some(id) => Some(id),
+            None => match hp3_package::builtin_super(name) {
+                Some(parent) => self.native_class(parent).map(|super_| {
+                    let n = self.names.intern(name);
+                    let id = StructId(self.structs.len() as u32);
+                    let object = self.objects.add_struct(n, id);
+                    let sd = self.get(super_);
+                    let def = StructDef {
+                        key: (Rc::from("<native>"), id.0 as usize),
+                        name: n,
+                        kind: StructKind::Class,
+                        super_: Some(super_),
+                        props: sd.props.clone(),
+                        by_name: sd.by_name.clone(),
+                        slots: sd.slots,
+                        defaults: sd.defaults.clone(),
+                        pkg: sd.pkg.clone(),
+                        export: sd.export,
+                        object,
+                        script: Rc::new(Vec::new()),
+                        script_size: 0,
+                        native_index: 0,
+                        function_flags: 0,
+                        operator_precedence: 0,
+                        state_info: (0, 0, 0, 0),
+                        functions: HashMap::new(),
+                        states: HashMap::new(),
+                    };
+                    self.structs.push(def);
+                    id
+                }),
+                None => None,
+            },
+        };
+        self.native_classes.insert(lower, found);
+        found
     }
 
     /// The property values of an export: its class's defaults with the export's own tags applied.

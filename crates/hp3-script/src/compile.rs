@@ -114,8 +114,11 @@ impl<'a, 'd> Compiler<'a, 'd> {
 
     fn struct_ref(&mut self, r: ObjRef) -> Option<StructId> {
         let pkg = self.pkg();
-        let (p, i) = self.db.set.resolve(&pkg, r)?;
-        self.db.load_struct(&p, i)
+        match self.db.set.resolve(&pkg, r) {
+            Some((p, i)) => self.db.load_struct(&p, i),
+            None if !r.is_none() => self.db.native_class(pkg.ref_name(r)),
+            None => None,
+        }
     }
 
     fn obj(&mut self, r: ObjRef) -> Option<ObjId> {

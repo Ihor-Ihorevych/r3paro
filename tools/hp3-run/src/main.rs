@@ -152,7 +152,43 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             println!("  pc.{n} = {:?}", hp3_world::get(&mut vm, pc, n));
         }
         if let Some(p) = pawn {
-            for n in ["Acceleration", "Velocity", "GroundSpeed", "AccelRate", "Controller"] {
+            if let Some(ch) = hp3_world::world(&mut vm).anim.actors.get(&p).and_then(|x| x.channels.first().cloned()) {
+                let set = hp3_world::anim::set_of(&mut vm, p);
+                let name = ch.sequence.and_then(|s| set.map(|set| set.sequences[s].name.clone()));
+                println!("  pawn anim channel 0: {name:?} frame {:.1} rate {:.1} looping {} playing {}", ch.frame, ch.rate, ch.looping, ch.playing);
+            }
+            if std::env::var("HP3_ATTACH_DEBUG").is_ok() {
+                let list: Vec<_> = hp3_world::world(&mut vm).anim.attachments.iter().map(|(k, v)| (*k, v.clone())).collect();
+                for (child, (parent, bone)) in list {
+                    let class = vm.db.objects.get(child).class.map(|c| vm.db.names.get(vm.db.structs[c.0 as usize].name).to_string()).unwrap_or_default();
+                    let mesh = hp3_world::get(&mut vm, child, "Mesh").as_obj().map(|m| hp3_script::natives::object_path(&vm, m));
+                    let sm = hp3_world::get(&mut vm, child, "StaticMesh").as_obj().map(|m| hp3_script::natives::object_path(&vm, m));
+                    let dt = hp3_world::get(&mut vm, child, "DrawType").as_byte();
+                    let ds = hp3_world::get(&mut vm, child, "DrawScale");
+                    let ds3 = hp3_world::get(&mut vm, child, "DrawScale3D");
+                    let rl = hp3_world::get(&mut vm, child, "RelativeLocation");
+                    println!("  attach {class} to {parent:?}.{bone}: dt {dt} mesh {mesh:?} sm {sm:?} scale {ds:?} {ds3:?} rel {rl:?}");
+                }
+            }
+            if std::env::var("HP3_ANIM_DEBUG").is_ok() {
+                let actors = hp3_world::world(&mut vm).actors.clone();
+                for a in actors {
+                    if hp3_world::get(&mut vm, a, "DrawType").as_byte() != 2 || vm.db.objects.get(a).deleted {
+                        continue;
+                    }
+                    let class = vm.db.objects.get(a).class.map(|c| vm.db.names.get(vm.db.structs[c.0 as usize].name).to_string()).unwrap_or_default();
+                    let ch = hp3_world::world(&mut vm).anim.actors.get(&a).and_then(|x| x.channels.first().cloned());
+                    let seq = hp3_world::get(&mut vm, a, "AnimSequence");
+                    let phys = hp3_world::get(&mut vm, a, "Physics").as_byte();
+                    let state = vm.state_of(a).map(|s| vm.db.names.get(vm.db.structs[s.0 as usize].name).to_string());
+                    let upd = hp3_world::get(&mut vm, a, "bPhysicsAnimUpdate").as_bool();
+                    println!("  anim {class:<28} phys {phys} state {state:?} AnimSequence {seq:?} physanim {upd} ch0 {:?}", ch.map(|c| (c.sequence, c.frame as i32, c.playing)));
+                }
+            }
+            if let Some(m) = hp3_world::get(&mut vm, p, "Mesh").as_obj() {
+                println!("  pawn mesh {}", hp3_script::natives::object_path(&vm, m));
+            }
+            for n in ["Acceleration", "Velocity", "GroundSpeed", "AccelRate", "Controller", "AnimSequence"] {
                 println!("  pawn.{n} = {:?}", hp3_world::get(&mut vm, p, n));
             }
             if let Some(c) = hp3_world::get(&mut vm, p, "Controller").as_obj() {
@@ -201,7 +237,8 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
         let mut p: Vec<_> = vm.profile_counts.iter().map(|(f, n)| (*n, *f)).collect();
         p.sort_by(|a, b| b.0.cmp(&a.0));
         println!("statements per function:");
-        for (n, f) in p.iter().take(20) {
+        let top = std::env::var("HP3_PROFILE").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+        for (n, f) in p.iter().take(top) {
             println!("  {n:10} {}", vm.function_path(*f));
         }
     }
@@ -215,7 +252,8 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             println!("  {l}");
         }
     }
-    for (l, n) in logs.iter().take(20) {
+    let shown = std::env::var("HP3_LOG_LINES").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+    for (l, n) in logs.iter().take(shown) {
         println!("  {n:5} {l}");
     }
     Ok(ExitCode::SUCCESS)

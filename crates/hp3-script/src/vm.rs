@@ -137,6 +137,8 @@ pub struct Vm<'s> {
     pub profile: bool,
     /// Log every state change.
     pub trace_states: bool,
+    /// `Engine.Actor`, when loaded: actors are never loaded lazily.
+    actor_class: Option<StructId>,
     pub profile_counts: HashMap<StructId, u64>,
     function_cache: HashMap<(StructId, Name), Option<StructId>>,
     /// Skip unimplemented natives instead of failing, counting them in `missing`.
@@ -155,7 +157,9 @@ impl<'s> Vm<'s> {
                 native_decls.entry(s.native_index).or_insert(StructId(i as u32));
             }
         }
+        let actor_class = db.find("Actor");
         Vm {
+            actor_class,
             db,
             code: HashMap::new(),
             native_decls,
@@ -260,7 +264,43 @@ impl<'s> Vm<'s> {
     /// Whether an object exists for scripts: references to objects that were never loaded (such as actors
     /// deleted in the editor but still referenced by others) behave as `None`.
     pub fn is_loaded(&self, o: ObjId) -> bool {
-        !matches!(self.db.objects.get(o).kind, ObjKind::Stub)
+        !matches!(self.db.objects.get(o).kind, ObjKind::Stub | ObjKind::Missing)
+    }
+
+    /// Loads a package object the first time scripts use it (meshes, materials, sounds, notifies...), with its
+    /// tagged properties over its class defaults. Actors are not loaded here: they exist only once the world
+    /// spawns them from its map, so a stub actor is one deleted in the editor. Returns whether it exists.
+    pub fn ensure_loaded(&mut self, o: ObjId) -> bool {
+        match self.db.objects.get(o).kind {
+            ObjKind::Stub => {}
+            ObjKind::Missing => return false,
+            _ => return true,
+        }
+        let actor = self.actor_class;
+        let loaded = self.db.objects.get(o).key.clone().and_then(|(pkg, index)| {
+            let p = self.db.set.get(&pkg).ok()?;
+            let class = self.db.class_of(&p, index)?;
+            if actor.is_some_and(|a| self.is_child_of(class, a)) {
+                return None;
+            }
+            let values = self.db.instance_values(&p, index)?;
+            let outer = p.exports[index].outer;
+            let outer = if outer.is_none() { None } else { self.db.resolve_obj(&p, outer) };
+            Some((values, outer))
+        });
+        match loaded {
+            Some(((class, values), outer)) => {
+                let e = self.db.objects.get_mut(o);
+                e.class = Some(class);
+                e.kind = ObjKind::Instance { values, state: None };
+                self.set_intrinsics(o, outer);
+                true
+            }
+            None => {
+                self.db.objects.get_mut(o).kind = ObjKind::Missing;
+                false
+            }
+        }
     }
 
     /// The class of an object (the class itself for class objects).
@@ -443,7 +483,7 @@ impl<'s> Vm<'s> {
                 p
             }
             Expr::Context(obj, inner) => {
-                let o = self.eval(obj, frame, ctx)?.as_obj().filter(|&o| self.is_loaded(o));
+                let o = self.eval(obj, frame, ctx)?.as_obj().filter(|&o| self.ensure_loaded(o));
                 match o {
                     Some(o) => self.place(inner, frame, Some(o))?,
                     None => {
@@ -474,7 +514,7 @@ impl<'s> Vm<'s> {
                 self.read(&p, frame)
             }
             Expr::Context(obj, inner) => {
-                let o = self.eval(obj, frame, ctx)?.as_obj().filter(|&o| self.is_loaded(o));
+                let o = self.eval(obj, frame, ctx)?.as_obj().filter(|&o| self.ensure_loaded(o));
                 match o {
                     Some(o) => self.eval(inner, frame, Some(o))?,
                     None => {
@@ -532,6 +572,9 @@ impl<'s> Vm<'s> {
             }
             Expr::DynamicCast(class, inner) | Expr::MetaCast(class, inner) => {
                 let v = self.eval(inner, frame, ctx)?;
+                if let Some(o) = v.as_obj() {
+                    self.ensure_loaded(o);
+                }
                 let ok = match (v.as_obj(), class) {
                     (Some(o), Some(c)) => {
                         let target = if matches!(e, Expr::MetaCast(..)) {
