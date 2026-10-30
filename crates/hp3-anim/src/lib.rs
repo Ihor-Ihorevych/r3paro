@@ -130,7 +130,7 @@ fn key<T: Copy>(v: &[T], k: usize) -> Option<T> {
 }
 
 /// A track's pose at `t` frames into a motion of `length` frames.
-fn sample_track(track: &Track, t: f32, length: f32) -> Option<BonePose> {
+fn sample_track(track: &Track, t: f32, length: f32, looping: bool) -> Option<BonePose> {
     let rot0 = key(&track.rotations, 0)?;
     let pos0 = key(&track.positions, 0)?;
     if track.times.len() <= 1 {
@@ -140,10 +140,15 @@ fn sample_track(track: &Track, t: f32, length: f32) -> Option<BonePose> {
     let (i0, i1, alpha) = if next == 0 {
         (0, 0, 0.0)
     } else if next >= track.times.len() {
-        // Past the last key: blend toward the first for looping motions.
         let last = track.times.len() - 1;
-        let span = (length - track.times[last]).max(1e-4);
-        (last, 0, ((t - track.times[last]) / span).clamp(0.0, 1.0))
+        if looping {
+            // Past the last key of a loop: blend toward the first.
+            let span = (length - track.times[last]).max(1e-4);
+            (last, 0, ((t - track.times[last]) / span).clamp(0.0, 1.0))
+        } else {
+            // A one-shot holds its last key.
+            (last, last, 0.0)
+        }
     } else {
         let (a, b) = (track.times[next - 1], track.times[next]);
         (next - 1, next, ((t - a) / (b - a).max(1e-4)).clamp(0.0, 1.0))
@@ -214,10 +219,23 @@ pub struct Layer {
     pub frame: f32,
     pub alpha: f32,
     pub root: Option<usize>,
+    pub looping: bool,
+}
+
+/// The base pose: a sequence at a frame, possibly still crossfading in from what played before it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Base {
+    pub sequence: Option<usize>,
+    pub frame: f32,
+    pub looping: bool,
+    /// The sequence, frame and looping of the pose being faded away from, while a tween runs.
+    pub from: Option<(Option<usize>, f32, bool)>,
+    /// How far the fade has got: 0 is still the old pose, 1 the new one.
+    pub weight: f32,
 }
 
 /// The poses a sequence gives each bone at `frame`; `None` for bones it does not animate.
-fn sampled(set: &AnimSet, map: &[Option<usize>], seq: usize, frame: f32) -> Vec<Option<BonePose>> {
+fn sampled(set: &AnimSet, map: &[Option<usize>], seq: usize, frame: f32, looping: bool) -> Vec<Option<BonePose>> {
     let mut out = vec![None; map.len()];
     if let Some(s) = set.sequences.get(seq)
         && let Some(motion) = set.anim.motions.get(s.motion)
@@ -230,7 +248,7 @@ fn sampled(set: &AnimSet, map: &[Option<usize>], seq: usize, frame: f32) -> Vec<
         for (bone, anim_bone) in map.iter().enumerate() {
             let Some(ab) = anim_bone else { continue };
             if let Some(track) = motion.tracks.get(*ab) {
-                out[bone] = sample_track(track, t, length);
+                out[bone] = sample_track(track, t, length, looping);
                 if bone == 0
                     && locomotion
                     && !track.positions.is_empty()
@@ -268,19 +286,51 @@ pub fn bones_layered(
     layers: &[Layer],
     turns: &[(usize, Mat4)],
 ) -> Vec<Mat4> {
+    let base = Base { sequence: seq, frame, looping: true, from: None, weight: 1.0 };
+    bones_blended(skel, set, &base, layers, turns)
+}
+
+/// Bone-to-mesh matrices for a base pose (crossfading from an earlier one when it has a tween) with `layers`
+/// blended over it, in order.
+pub fn bones_blended(
+    skel: &Skeleton,
+    set: Option<(&AnimSet, &[Option<usize>])>,
+    base: &Base,
+    layers: &[Layer],
+    turns: &[(usize, Mat4)],
+) -> Vec<Mat4> {
     let mut poses = skel.reference.clone();
     if let Some((set, map)) = set {
-        if let Some(seq) = seq {
-            for (bone, p) in sampled(set, map, seq, frame).into_iter().enumerate() {
-                if let Some(p) = p {
-                    poses[bone] = p;
+        let new = base.sequence.map(|s| sampled(set, map, s, base.frame, base.looping));
+        match base.from {
+            Some((from_seq, from_frame, from_looping)) if base.weight < 1.0 => {
+                let old = from_seq.map(|s| sampled(set, map, s, from_frame, from_looping));
+                let w = base.weight.clamp(0.0, 1.0);
+                for bone in 0..poses.len() {
+                    let reference = skel.reference[bone];
+                    let a = old.as_ref().and_then(|v| v[bone]).unwrap_or(reference);
+                    let b = new.as_ref().and_then(|v| v[bone]).unwrap_or(reference);
+                    let mut q = b.rotation;
+                    if a.rotation.dot(q) < 0.0 {
+                        q = -q;
+                    }
+                    poses[bone] = BonePose { rotation: a.rotation.slerp(q, w), position: a.position.lerp(b.position, w) };
+                }
+            }
+            _ => {
+                if let Some(new) = &new {
+                    for (bone, p) in new.iter().enumerate() {
+                        if let Some(p) = p {
+                            poses[bone] = *p;
+                        }
+                    }
                 }
             }
         }
         for l in layers {
             let (Some(ls), true) = (l.sequence, l.alpha > 0.001) else { continue };
             let alpha = l.alpha.min(1.0);
-            for (bone, p) in sampled(set, map, ls, l.frame).into_iter().enumerate() {
+            for (bone, p) in sampled(set, map, ls, l.frame, l.looping).into_iter().enumerate() {
                 let Some(p) = p else { continue };
                 if l.root.is_some_and(|r| !under(&skel.parents, bone, r)) {
                     continue;
@@ -318,6 +368,18 @@ pub fn pose_with(
     turns: &[(usize, Mat4)],
 ) -> Vec<Mat4> {
     pose_layered(skel, set, seq, frame, &[], turns)
+}
+
+/// Skin matrices for a base pose (with its tween) and layers; see `bones_blended`.
+pub fn pose_blended(
+    skel: &Skeleton,
+    set: Option<(&AnimSet, &[Option<usize>])>,
+    base: &Base,
+    layers: &[Layer],
+    turns: &[(usize, Mat4)],
+) -> Vec<Mat4> {
+    let world = bones_blended(skel, set, base, layers, turns);
+    world.iter().zip(&skel.inv_reference_world).map(|(w, inv)| *w * *inv).collect()
 }
 
 /// Like `pose_with`, with layers blended over the base sequence.

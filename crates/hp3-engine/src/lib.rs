@@ -312,13 +312,21 @@ impl MeshCache {
         let s = self.skinned.get_mut(&actor)?;
         let (set, channels, turns) = state.unwrap_or((None, Vec::new(), Vec::new()));
         let (seq, frame) = channels.first().map(|c| (c.sequence, c.frame)).unwrap_or((None, 0.0));
+        let base = channels.first().map(|c| hp3_anim::Base {
+            sequence: c.sequence,
+            frame: c.frame,
+            looping: c.looping,
+            from: c.from.filter(|_| c.tween_t < c.tween_total),
+            weight: c.tween_weight(),
+        });
+        let tween_bits = base.map_or(0, |b| if b.from.is_some() { b.weight.to_bits() as u64 + 1 } else { 0 });
         // Other channels with a sequence and some strength are blended over the base, limited to their bone.
         let mut layers: Vec<hp3_anim::Layer> = Vec::new();
         let mut layer_hash: u64 = 0;
         for c in channels.iter().skip(1) {
             if c.sequence.is_some() && c.alpha > 0.001 {
                 let root = c.bone.as_deref().and_then(|b| s.skeleton.find(b));
-                layers.push(hp3_anim::Layer { sequence: c.sequence, frame: c.frame, alpha: c.alpha, root });
+                layers.push(hp3_anim::Layer { sequence: c.sequence, frame: c.frame, alpha: c.alpha, root, looping: c.looping });
                 layer_hash = layer_hash
                     .wrapping_mul(1_000_003)
                     .wrapping_add(c.sequence.unwrap_or(0) as u64 + 1)
@@ -328,14 +336,14 @@ impl MeshCache {
         }
         // Bone controllers change the pose too: they are part of what was last written.
         let turn_sum: i64 = turns.iter().map(|t| t.1.iter().map(|&v| v as i64).sum::<i64>() + (t.2 * 1000.0) as i64).sum();
-        let key = (seq, frame.to_bits() ^ (turn_sum as u32), layer_hash);
+        let key = (seq, frame.to_bits() ^ (turn_sum as u32), layer_hash ^ tween_bits.wrapping_mul(0x9E37_79B9));
         if s.last != Some(key) {
             let hp3_assets::Asset::SkeletalMesh(m) = &*s.asset else { return None };
             let skin = match &set {
                 Some(set) => {
                     let map = s.bone_maps.entry(Rc::as_ptr(set) as usize).or_insert_with(|| set.bone_map(&s.skeleton));
                     let t = hp3_world::anim::turns_for(&s.skeleton, &turns);
-                    hp3_anim::pose_layered(&s.skeleton, Some((set, map)), seq, frame, &layers, &t)
+                    hp3_anim::pose_blended(&s.skeleton, Some((set, map)), &base.unwrap_or_default(), &layers, &t)
                 }
                 None => hp3_anim::pose(&s.skeleton, None, None, 0.0),
             };

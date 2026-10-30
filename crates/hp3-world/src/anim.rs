@@ -33,6 +33,20 @@ pub struct Channel {
     /// The script set this channel's blending (`AnimBlendParams`/`AnimBlendToAlpha`); otherwise it acts at full
     /// strength over the whole body while its animation plays.
     pub scripted_blend: bool,
+    /// While a new sequence fades in: what played before (sequence, frame, looping), how long the fade takes
+    /// and how long it has run.
+    pub from: Option<(Option<usize>, f32, bool)>,
+    pub tween_total: f32,
+    pub tween_t: f32,
+    /// A `TweenAnim`: only the fade to the sequence's first pose; it ends with `AnimEnd`.
+    pub tween_only: bool,
+}
+
+impl Channel {
+    /// How far the fade-in has got, 0 (still the old pose) to 1 (done).
+    pub fn tween_weight(&self) -> f32 {
+        if self.tween_total <= 0.0 { 1.0 } else { (self.tween_t / self.tween_total).clamp(0.0, 1.0) }
+    }
 }
 
 #[derive(Default)]
@@ -70,6 +84,8 @@ pub struct Animation {
     bone_maps: HashMap<(ObjId, usize), Rc<Vec<Option<usize>>>>,
     /// Actors attached to another actor's bone (lower-case bone name).
     pub attachments: HashMap<ObjId, (ObjId, String)>,
+    /// `FinishAnim` waits: (who waits, whose channel, which channel).
+    pub waiters: Vec<(ObjId, ObjId, usize)>,
 }
 
 /// Loads an animation set object (`MeshAnimation`).
@@ -210,7 +226,7 @@ fn channel_mut<'a>(vm: &'a mut Vm<'_>, actor: ObjId, index: usize) -> &'a mut Ch
 }
 
 /// Starts a sequence on a channel. Returns false when the actor has no such sequence.
-fn play(vm: &mut Vm<'_>, actor: ObjId, seq: Name, rate: f32, channel: usize, looping: bool) -> bool {
+fn play(vm: &mut Vm<'_>, actor: ObjId, seq: Name, rate: f32, tween: f32, channel: usize, looping: bool) -> bool {
     let Some(set) = set_of(vm, actor) else {
         if std::env::var("HP3_ANIM_TRACE").is_ok() {
             eprintln!("anim: {actor:?} has no animation set for {}", vm.db.names.get(seq));
@@ -234,7 +250,20 @@ fn play(vm: &mut Vm<'_>, actor: ObjId, seq: Name, rate: f32, channel: usize, loo
         ch.rate = base * rate;
         return true;
     }
-    *ch = Channel { sequence: Some(si), frame: 0.0, rate: base * rate, looping, playing: true, ..ch.clone() };
+    // The pose it leaves is faded away from over the tween time.
+    let from = (tween > 0.0).then_some((ch.sequence, ch.frame, ch.looping));
+    *ch = Channel {
+        sequence: Some(si),
+        frame: 0.0,
+        rate: base * rate,
+        looping,
+        playing: true,
+        from,
+        tween_total: tween.max(0.0),
+        tween_t: 0.0,
+        tween_only: false,
+        ..ch.clone()
+    };
     if channel == 0 {
         set_script_view(vm, actor, seq, 0.0, base * rate);
     }
@@ -268,6 +297,17 @@ pub fn tick_actor(vm: &mut Vm<'_>, actor: ObjId, dt: f32) {
                     let step = if ch.blend_rate > 0.0 { ch.blend_rate * dt } else { f32::MAX };
                     ch.alpha = if ch.alpha < ch.target_alpha { (ch.alpha + step).min(ch.target_alpha) } else { (ch.alpha - step).max(ch.target_alpha) };
                 }
+                if ch.tween_t < ch.tween_total {
+                    ch.tween_t += dt;
+                }
+                if ch.tween_only {
+                    if ch.tween_t >= ch.tween_total {
+                        ch.tween_only = false;
+                        ch.playing = false;
+                        ended.push(ci);
+                    }
+                    continue;
+                }
                 let Some(si) = ch.sequence else { continue };
                 if !ch.playing {
                     continue;
@@ -296,19 +336,21 @@ pub fn tick_actor(vm: &mut Vm<'_>, actor: ObjId, dt: f32) {
             let frames = anims.sequences[si].frames.max(1) as f32;
             set(vm, a, "AnimFrame", Value::Float(ch0.frame / frames));
         }
-        if (ended.contains(&0) || looped) && matches!(vm.latent.get(&a), Some(Latent::Other("anim"))) {
-            vm.finish_latent(a);
-        }
         for ci in ended {
             if std::env::var("HP3_ANIM_TRACE").is_ok() {
                 let c = get(vm, a, "Controller").as_obj();
                 eprintln!("anim: AnimEnd {a:?} channel {ci} controller {c:?}");
             }
-            fire(vm, a, "AnimEnd", &mut [Value::Int(ci as i32)]);
-            // A pawn's controller hears its animations end too (scripted and cutscene controllers wait on it).
-            if let Some(c) = get(vm, a, "Controller").as_obj() {
-                fire(vm, c, "AnimEnd", &mut [Value::Int(ci as i32)]);
+            // A pawn's controller gets the event when it handles it; otherwise the pawn does, never both.
+            match get(vm, a, "Controller").as_obj() {
+                Some(c) if handles_anim_end(vm, c) => {
+                    fire(vm, c, "AnimEnd", &mut [Value::Int(ci as i32)]);
+                }
+                _ => {
+                    fire(vm, a, "AnimEnd", &mut [Value::Int(ci as i32)]);
+                }
             }
+            wake_anim_waiters(vm, a, ci);
         }
     }
 }
@@ -344,7 +386,7 @@ pub fn update_movement(vm: &mut Vm<'_>) {
                     let seq = movement[index];
                     let base = get(vm, a, "BaseMovementRate").as_float().max(1.0);
                     if seq != Name::NONE {
-                        play(vm, a, seq, speed / base, 0, true);
+                        play(vm, a, seq, speed / base, 0.1, 0, true);
                     }
                 } else if in_movement || current.sequence.is_none() {
                     fire(vm, a, "PlayWaiting", &mut []);
@@ -368,6 +410,32 @@ fn get_indexed(vm: &mut Vm<'_>, a: ObjId, name: &str, index: usize) -> Value {
     vm.db.objects.values(a).and_then(|v| v.get(slot + index).cloned()).unwrap_or_default()
 }
 
+fn tween_arg(a: &[Value], i: usize) -> f32 {
+    match a.get(i) {
+        None | Some(Value::Empty) => 0.0,
+        Some(v) => v.as_float().max(0.0),
+    }
+}
+
+/// Whether a controller handles `AnimEnd` itself: its current state or class defines the event beyond the
+/// engine's empty one.
+fn handles_anim_end(vm: &mut Vm<'_>, c: ObjId) -> bool {
+    let Some(n) = vm.db.names.find("AnimEnd") else { return false };
+    let Some(f) = vm.find_function(Some(c), None, n) else { return false };
+    !vm.function_path(f).to_ascii_lowercase().starts_with("engine.")
+}
+
+/// Ends the waits of `FinishAnim` calls on this actor's channel.
+fn wake_anim_waiters(vm: &mut Vm<'_>, target: ObjId, channel: usize) {
+    let waiting: Vec<ObjId> = world(vm).anim.waiters.iter().filter(|w| w.1 == target && w.2 == channel).map(|w| w.0).collect();
+    world(vm).anim.waiters.retain(|w| !(w.1 == target && w.2 == channel));
+    for w in waiting {
+        if matches!(vm.latent.get(&w), Some(Latent::Other("anim"))) {
+            vm.finish_latent(w);
+        }
+    }
+}
+
 fn channel_arg(a: &[Value], i: usize) -> usize {
     a.get(i).map(|v| v.as_int().max(0) as usize).unwrap_or(0)
 }
@@ -383,33 +451,49 @@ pub fn register(vm: &mut Vm<'_>) {
     // PlayAnim(Sequence, optional Rate, optional TweenTime, optional Channel)
     vm.register("Actor.PlayAnim", |vm, this, a| {
         let Some(o) = this else { return Ok(Value::Bool(false)) };
-        Ok(Value::Bool(play(vm, o, a[0].as_name(), rate_arg(a, 1), channel_arg(a, 3), false)))
+        Ok(Value::Bool(play(vm, o, a[0].as_name(), rate_arg(a, 1), tween_arg(a, 2), channel_arg(a, 3), false)))
     });
     vm.register("Actor.LoopAnim", |vm, this, a| {
         let Some(o) = this else { return Ok(Value::Bool(false)) };
-        Ok(Value::Bool(play(vm, o, a[0].as_name(), rate_arg(a, 1), channel_arg(a, 3), true)))
+        Ok(Value::Bool(play(vm, o, a[0].as_name(), rate_arg(a, 1), tween_arg(a, 2), channel_arg(a, 3), true)))
     });
-    // TweenAnim(Sequence, Time, optional Channel): holds the first frame for the tween time.
+    // TweenAnim(Sequence, Time, optional Channel): fade from the current pose to the sequence's first pose over
+    // Time, then `AnimEnd`.
     vm.register("Actor.TweenAnim", |vm, this, a| {
         let Some(o) = this else { return Ok(Value::Bool(false)) };
-        let ok = play(vm, o, a[0].as_name(), 1.0, channel_arg(a, 2), false);
+        let time = a.get(1).map(Value::as_float).unwrap_or(0.0).max(0.0);
+        let ci = channel_arg(a, 2);
+        let ok = play(vm, o, a[0].as_name(), 1.0, time, ci, false);
         if ok {
-            let time = a.get(1).map(Value::as_float).unwrap_or(0.0);
-            let ch = channel_mut(vm, o, channel_arg(a, 2));
+            let ch = channel_mut(vm, o, ci);
             ch.rate = 0.0;
-            ch.playing = time > 0.0;
-            if time <= 0.0 {
-                ch.playing = false;
+            ch.frame = 0.0;
+            ch.tween_only = true;
+            ch.playing = true;
+            if ch.tween_total <= 0.0 {
+                // No fade asked for: it is over at once.
+                ch.tween_total = 0.0001;
             }
         }
         Ok(Value::Bool(ok))
     });
-    vm.register("Actor.FinishAnim", |vm, this, _a| {
-        if let Some(o) = this {
-            let playing = world(vm).anim.actors.get(&o).and_then(|x| x.channels.first()).is_some_and(|c| c.playing);
-            if playing {
-                vm.latent.insert(o, Latent::Other("anim"));
+    // FinishAnim(optional Channel): wait for the channel's animation to end. Called on a controller it waits on
+    // its pawn; a loop is stopped so it ends with its current cycle.
+    vm.register("Actor.FinishAnim", |vm, this, a| {
+        let Some(o) = this else { return Ok(Value::Empty) };
+        let ci = channel_arg(a, 0);
+        let target = if world(vm).anim.actors.contains_key(&o) { Some(o) } else { get(vm, o, "Pawn").as_obj() };
+        let Some(t) = target else { return Ok(Value::Empty) };
+        let playing = match world(vm).anim.actors.get_mut(&t).and_then(|x| x.channels.get_mut(ci)) {
+            Some(ch) if ch.playing && ch.sequence.is_some() => {
+                ch.looping = false;
+                true
             }
+            _ => false,
+        };
+        if playing {
+            world(vm).anim.waiters.push((o, t, ci));
+            vm.latent.insert(o, Latent::Other("anim"));
         }
         Ok(Value::Empty)
     });
