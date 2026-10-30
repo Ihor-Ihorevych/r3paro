@@ -536,10 +536,10 @@ fn add_actors(b: &mut Batcher<'_, '_>, map: &Rc<Package>, include: &dyn Fn(usize
             let location = f("Location").and_then(loader::tag_vec3).unwrap_or_default();
             let rotation = f("Rotation").and_then(loader::tag_rotator).unwrap_or_default();
             if chain.iter().any(|c| c.eq_ignore_ascii_case("PlayerStart")) {
-                return Some((None, location, rotation, 1.0, GVec3::ONE, Vec::new(), true));
+                return Some((None, location, rotation, 1.0, GVec3::ONE, Vec::new(), true, None));
             }
             if chain.first().is_some_and(|c| c.eq_ignore_ascii_case("SkyZoneInfo")) {
-                return Some((None, location, rotation, -1.0, GVec3::ONE, Vec::new(), false));
+                return Some((None, location, rotation, -1.0, GVec3::ONE, Vec::new(), false, None));
             }
             let mesh = f("StaticMesh").and_then(|t| t.as_obj())?;
             if f("bHidden").is_some_and(|t| t.bool_value) {
@@ -556,9 +556,10 @@ fn add_actors(b: &mut Batcher<'_, '_>, map: &Rc<Package>, include: &dyn Fn(usize
                     (n > 0).then(|| r.ci().ok().map(ObjRef)).flatten()
                 })
                 .collect();
-            Some((Some(mesh), location, rotation, scale, scale3d, skins, false))
+            let instance = f("StaticMeshInstance").and_then(|t| t.as_obj());
+            Some((Some(mesh), location, rotation, scale, scale3d, skins, false, instance))
         });
-        let Some(Some((mesh, location, rotation, scale, scale3d, skins, is_start))) = info else { continue };
+        let Some(Some((mesh, location, rotation, scale, scale3d, skins, is_start, instance))) = info else { continue };
         let pos = GVec3::new(location.x, location.y, location.z);
         if mesh.is_none() && scale < 0.0 {
             b.scene.sky = Some(pos);
@@ -576,6 +577,11 @@ fn add_actors(b: &mut Batcher<'_, '_>, map: &Rc<Package>, include: &dyn Fn(usize
         let Some(asset) = b.loader.asset(&sp, si) else { continue };
         let Asset::StaticMesh(sm) = &*asset else { continue };
         let materials = b.loader.static_mesh_materials(&sp, si);
+        // Lighting baked by the editor for this placement: one color per mesh vertex (shadows included).
+        let baked = instance.and_then(|r| b.loader.set.resolve(map, r)).and_then(|(ip, ii)| b.loader.asset(&ip, ii)).and_then(|a| match &*a {
+            Asset::StaticMeshInstance(smi) if smi.colors.len() == sm.vertices.len() => Some(smi.colors.clone()),
+            _ => None,
+        });
         let transform = Mat4::from_translation(pos) * rotation_matrix(rotation) * Mat4::from_scale(scale3d * scale);
         let uvs = sm.uv_streams.first().map(|s| s.uvs.as_slice()).unwrap_or(&[]);
         for (si_, section) in sm.sections.iter().enumerate() {
@@ -597,14 +603,18 @@ fn add_actors(b: &mut Batcher<'_, '_>, map: &Rc<Package>, include: &dyn Fn(usize
                     let v = sv.map(|v| v.position).unwrap_or_default();
                     let p = transform.transform_point3(GVec3::new(v.x, v.y, v.z));
                     let uv = uvs.get(vi as usize).copied().unwrap_or([0.0, 0.0]);
-                    let color = match lighting {
-                        Some(l) => {
+                    let color = match (lighting, &baked) {
+                        (Some(l), Some(colors)) => {
+                            let c = colors[vi as usize];
+                            ((l.ambient + GVec3::new(c.r as f32, c.g as f32, c.b as f32) / 255.0) * 0.5).to_array()
+                        }
+                        (Some(l), None) => {
                             let nv = sv.map(|v| v.normal).unwrap_or_default();
                             let normal = normal_matrix.transform_vector3(GVec3::new(nv.x, nv.y, nv.z)).normalize_or(GVec3::Z);
                             // Static mesh normals are not trusted yet: either side of a face takes light.
                             (l.at(p, normal).max(l.at(p, -normal)) * 0.5).to_array()
                         }
-                        None => [0.5, 0.5, 0.5],
+                        (None, _) => [0.5, 0.5, 0.5],
                     };
                     batch.vertices.push(Vertex { position: p.to_array(), uv, light_uv: [0.0, 0.0], color });
                     next

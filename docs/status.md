@@ -37,7 +37,8 @@ Milestones are from the plan (M0 to M12).
   live actors are drawn with their meshes and skins, skinned on the CPU each frame from their animation;
   static actors are baked into the level geometry. `hp3-view play <HP3 folder> <map> <out.png>` renders the
   same headless. Static lighting: BSP lightmaps are built at load from the map's lights and their stored shadow
-  bitmaps plus each zone's ambient light (`AmbientVector`); static meshes are lit per vertex (no shadows yet)
+  bitmaps plus each zone's ambient light (`AmbientVector`); static meshes use their editor-baked vertex colors
+  (`StaticMeshInstance`, shadows included) plus ambient, or computed vertex light when they have none,
   and live actors as a whole by the lights around them. The light model is an approximation, not yet matched
   to HP3's renderer; `HP3_UNLIT=1` turns lighting off. Terrain: every layer of each terrain, textured by its
   stored `TerrainMatrix` and blended over the ones below by its alpha map, lit per vertex, with holes from
