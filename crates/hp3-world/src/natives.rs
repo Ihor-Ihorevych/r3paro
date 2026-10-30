@@ -20,6 +20,44 @@ fn given(a: &[Value], i: usize) -> bool {
     !matches!(a.get(i), None | Some(Value::Empty))
 }
 
+/// Gives an actor a new base (what it stands on or hangs from), or none. The old base hears `Detach` and the new
+/// one `Attach` (unless it is world geometry), and the actor itself `BaseChange` when `notify` is set. A base that
+/// would sit on its own child is refused. A bone attachment ends when the base changes.
+pub fn set_base(vm: &mut Vm<'_>, o: ObjId, new_base: Option<ObjId>, notify: bool) {
+    let mut up = new_base;
+    for _ in 0..64 {
+        match up {
+            Some(x) if x == o => return,
+            Some(x) => up = get(vm, x, "Base").as_obj(),
+            None => break,
+        }
+    }
+    let old = get(vm, o, "Base").as_obj();
+    if new_base != old {
+        if let Some(b) = old
+            && !get(vm, b, "bWorldGeometry").as_bool()
+        {
+            fire(vm, b, "Detach", &mut [Value::Object(Some(o))]);
+        }
+        set(vm, o, "Base", Value::Object(new_base));
+        if world(vm).anim.attachments.get(&o).map(|(parent, _)| Some(*parent)) != Some(new_base) {
+            world(vm).anim.attachments.remove(&o);
+        }
+        if let Some(b) = new_base
+            && !get(vm, b, "bWorldGeometry").as_bool()
+        {
+            fire(vm, b, "Attach", &mut [Value::Object(Some(o))]);
+        }
+        if notify {
+            fire(vm, o, "BaseChange", &mut []);
+        }
+    }
+    let on_world = new_base.is_none_or(|b| get(vm, b, "bWorldGeometry").as_bool());
+    if on_world {
+        set(vm, o, "AttachmentBone", Value::Name(Name::NONE));
+    }
+}
+
 /// Creates an actor of `class`: defaults, owner, tag, location, rotation, then the begin-play events.
 pub fn spawn(vm: &mut Vm<'_>, spawner: Option<ObjId>, a: &[Value]) -> Result<Value, VmError> {
     let Some(class_obj) = obj_arg(a, 0) else { return Ok(Value::Object(None)) };
@@ -50,9 +88,14 @@ pub fn spawn(vm: &mut Vm<'_>, spawner: Option<ObjId>, a: &[Value]) -> Result<Val
     if let Some(owner) = obj_arg(a, 1) {
         fire(vm, owner, "GainedChild", &mut [Value::Object(Some(obj))]);
     }
-    for e in ["Spawned", "PreBeginPlay", "BeginPlay", "PostBeginPlay", "SetInitialState"] {
+    for e in ["Spawned", "PreBeginPlay", "BeginPlay", "PostBeginPlay", "AddAnimNotifys", "SetInitialState"] {
+        if e == "AddAnimNotifys" && (vm.db.objects.get(obj).deleted || get(vm, obj, "Mesh").as_obj().is_none()) {
+            continue;
+        }
         fire(vm, obj, e, &mut []);
     }
+    // Born inside something: it touches it at once.
+    crate::touch::settle(vm, obj);
     Ok(Value::Object(Some(obj)))
 }
 
@@ -209,6 +252,15 @@ pub fn register(vm: &mut Vm<'_>) {
     vm.register("Actor.SetLocation", |vm, this, a| {
         if let Some(o) = this {
             set(vm, o, "Location", a[0].clone());
+            crate::touch::settle(vm, o);
+        }
+        Ok(Value::Bool(true))
+    });
+    // A teleport: where the actor ends up is what touches, with nothing swept on the way.
+    vm.register("Actor.FarMoveActor", |vm, this, a| {
+        if let Some(o) = this {
+            set(vm, o, "Location", a[0].clone());
+            crate::touch::settle(vm, o);
         }
         Ok(Value::Bool(true))
     });
@@ -218,10 +270,22 @@ pub fn register(vm: &mut Vm<'_>) {
         }
         Ok(Value::Bool(true))
     });
+    // A change of physics: modes that do not rest on something (falling, flying, projectile, trailer, movers...)
+    // let go of the actor's base, and a stopped or only rotating actor loses its velocity. The movement-animation
+    // driver notices a change to falling and tells the script.
     vm.register("Actor.SetPhysics", |vm, this, a| {
         if let Some(o) = this {
-            // The movement-animation driver notices a change to falling and tells the script.
-            set(vm, o, "Physics", Value::Byte(a[0].as_byte()));
+            let new = a[0].as_byte();
+            if get(vm, o, "Physics").as_byte() != new {
+                set(vm, o, "Physics", Value::Byte(new));
+                if matches!(new, 2 | 3 | 4 | 6 | 7 | 8 | 10 | 11 | 13 | 14) && get(vm, o, "Base").as_obj().is_some() {
+                    set_base(vm, o, None, false);
+                }
+                if matches!(new, 0 | 5) {
+                    set(vm, o, "Velocity", crate::physics::value(glam::Vec3::ZERO));
+                    set(vm, o, "Acceleration", crate::physics::value(glam::Vec3::ZERO));
+                }
+            }
         }
         Ok(Value::Empty)
     });
@@ -232,6 +296,7 @@ pub fn register(vm: &mut Vm<'_>) {
                     set(vm, o, p, Value::Bool(a[i].as_bool()));
                 }
             }
+            crate::touch::settle(vm, o);
         }
         Ok(Value::Empty)
     });
@@ -239,6 +304,7 @@ pub fn register(vm: &mut Vm<'_>) {
         if let Some(o) = this {
             set(vm, o, "CollisionRadius", Value::Float(a[0].as_float()));
             set(vm, o, "CollisionHeight", Value::Float(a[1].as_float()));
+            crate::touch::settle(vm, o);
         }
         Ok(Value::Bool(true))
     });
@@ -262,7 +328,8 @@ pub fn register(vm: &mut Vm<'_>) {
     });
     vm.register("Actor.SetBase", |vm, this, a| {
         if let Some(o) = this {
-            set(vm, o, "Base", Value::Object(obj_arg(a, 0)));
+            let notify = given(a, 2) && a[2].as_bool();
+            set_base(vm, o, obj_arg(a, 0), notify);
         }
         Ok(Value::Empty)
     });
@@ -305,17 +372,36 @@ pub fn register(vm: &mut Vm<'_>) {
         }
         Ok(Value::Empty)
     });
-    // Moves without collision until the collision code exists.
+    // `Move`: straight by the delta. An actor that collides with the world is stopped by it (the result says
+    // whether it got all the way); every other actor goes through. `MoveSmooth` slides along what stops it.
     vm.register("Actor.Move", |vm, this, a| {
+        let mut moved_fully = true;
         if let Some(o) = this {
-            let loc = get(vm, o, "Location");
-            let (l, d) = (loc.fields(), a[0].fields());
-            if l.len() == 3 && d.len() == 3 {
-                let v: Vec<Value> = (0..3).map(|i| Value::Float(l[i].as_float() + d[i].as_float())).collect();
-                set(vm, o, "Location", Value::Struct(v.into()));
+            let delta = crate::physics::vec(&a[0]);
+            if get(vm, o, "bCollideWorld").as_bool() {
+                moved_fully = crate::physics::move_actor(vm, o, delta).is_none();
+            } else {
+                let loc = crate::physics::vec(&get(vm, o, "Location"));
+                set(vm, o, "Location", crate::physics::value(loc + delta));
             }
+            crate::touch::settle(vm, o);
         }
-        Ok(Value::Bool(true))
+        Ok(Value::Bool(moved_fully))
+    });
+    vm.register("Actor.MoveSmooth", |vm, this, a| {
+        let mut moved = true;
+        if let Some(o) = this {
+            let delta = crate::physics::vec(&a[0]);
+            let before = crate::physics::vec(&get(vm, o, "Location"));
+            if get(vm, o, "bCollideWorld").as_bool() {
+                crate::physics::move_and_slide(vm, o, delta);
+            } else {
+                set(vm, o, "Location", crate::physics::value(before + delta));
+            }
+            moved = crate::physics::vec(&get(vm, o, "Location")).distance_squared(before) > 1e-6 || delta.length_squared() < 1e-8;
+            crate::touch::settle(vm, o);
+        }
+        Ok(Value::Bool(moved))
     });
     vm.register("Actor.SetRelativeLocation", |vm, this, a| {
         if let Some(o) = this {

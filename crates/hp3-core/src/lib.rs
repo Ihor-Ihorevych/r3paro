@@ -16,6 +16,8 @@ pub struct Config {
     /// Localization file extension, e.g. `int` or `rus`.
     pub language: String,
     localized: HashMap<String, Option<Ini>>,
+    /// The other ini files of the System folder (`Spells.ini`...), by lower-case name without the extension.
+    named: HashMap<String, Ini>,
 }
 
 impl Config {
@@ -28,7 +30,36 @@ impl Config {
         let ini = find("Default.ini").and_then(|p| Ini::load(&p).ok()).unwrap_or_default();
         let user = find("User.ini").and_then(|p| Ini::load(&p).ok()).unwrap_or_default();
         let language = ini.get("Engine.Engine", "Language").unwrap_or("int").to_ascii_lowercase();
-        Config { system, ini, user, language, localized: HashMap::new() }
+        let mut named = HashMap::new();
+        if let Ok(entries) = std::fs::read_dir(&system) {
+            for path in entries.flatten().map(|e| e.path()) {
+                let is_ini = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("ini"));
+                let stem = path.file_stem().map(|s| s.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+                if is_ini && !matches!(stem.as_str(), "default" | "user" | "defuser" | "defunrealed") {
+                    if let Ok(i) = Ini::load(&path) {
+                        named.insert(stem, i);
+                    }
+                }
+            }
+        }
+        Config { system, ini, user, language, localized: HashMap::new(), named }
+    }
+
+    /// A value from the ini file a class's `config(File)` names. `System` (and no name) is the main
+    /// configuration; any other name is that file of the System folder.
+    pub fn get_in(&self, file: &str, section: &str, key: &str) -> Option<&str> {
+        match file.to_ascii_lowercase().as_str() {
+            "" | "none" | "system" | "user" | "default" => self.get(section, key),
+            f => self.named.get(f).and_then(|i| i.get(section, key)),
+        }
+    }
+
+    /// Every value of a repeated key in a class's config file.
+    pub fn get_all_in(&self, file: &str, section: &str, key: &str) -> Vec<&str> {
+        match file.to_ascii_lowercase().as_str() {
+            "" | "none" | "system" | "user" | "default" => self.get_all(section, key),
+            f => self.named.get(f).map(|i| i.get_all(section, key)).unwrap_or_default(),
+        }
     }
 
     /// A configuration value: `User.ini` first, then `Default.ini`.

@@ -117,7 +117,7 @@ pub fn move_actor(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<Hit> {
 }
 
 /// Moves along `delta`, sliding along what it hits (at most twice).
-fn move_and_slide(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<Hit> {
+pub(crate) fn move_and_slide(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<Hit> {
     let mut remaining = delta;
     let mut first = None;
     for _ in 0..3 {
@@ -433,97 +433,6 @@ fn turn_to_desired(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     let turn = diff.clamp(-step.max(1), step.max(1));
     out[1] = Value::Int((cur + turn) & 0xFFFF);
     set(vm, a, "Rotation", Value::Struct(out.into()));
-}
-
-/// Collision cylinders overlap: horizontal distance under the radii's sum and vertical under the heights'.
-fn cylinders_overlap(a: (Vec3, f32, f32), b: (Vec3, f32, f32)) -> bool {
-    let d = a.0 - b.0;
-    (d.x * d.x + d.y * d.y).sqrt() < a.1 + b.1 && d.z.abs() < a.2 + b.2
-}
-
-/// Updates who touches whom for non-static colliding actors, firing `Touch` and `UnTouch` on both sides and
-/// keeping each actor's `Touching` array current.
-pub fn update_touching(vm: &mut Vm<'_>) {
-    let actors = std::mem::take(&mut world(vm).actors);
-    let s = Slots::get(vm);
-    let mut colliders = Vec::new();
-    for &a in &actors {
-        if vm.db.objects.get(a).deleted || !crate::read(vm, a, s.collide).as_bool() {
-            continue;
-        }
-        let (r, h) = (crate::read(vm, a, s.radius).as_float(), crate::read(vm, a, s.height).as_float());
-        if r <= 0.0 && h <= 0.0 {
-            continue;
-        }
-        let moving = crate::read(vm, a, s.physics).as_byte() != PHYS_NONE && !crate::read(vm, a, s.is_static).as_bool();
-        colliders.push((a, crate::read_vec(vm, a, s.location), r, h, moving));
-    }
-    world(vm).actors = actors;
-    // Colliders bucketed by position; each moving one is tested against its neighbourhood only.
-    const CELL: f32 = 512.0;
-    let cell = |p: Vec3| ((p.x / CELL).floor() as i32, (p.y / CELL).floor() as i32);
-    let mut grid: hp3_script::fx::FxHashMap<(i32, i32), Vec<usize>> = Default::default();
-    let mut max_radius: f32 = 0.0;
-    for (i, c) in colliders.iter().enumerate() {
-        grid.entry(cell(c.1)).or_default().push(i);
-        max_radius = max_radius.max(c.2);
-    }
-    let mut now: hp3_script::fx::FxHashSet<(ObjId, ObjId)> = Default::default();
-    for (i, m) in colliders.iter().enumerate() {
-        if !m.4 {
-            continue;
-        }
-        let reach = m.2 + max_radius;
-        let (x0, y0) = cell(m.1 - Vec3::splat(reach));
-        let (x1, y1) = cell(m.1 + Vec3::splat(reach));
-        for cx in x0..=x1 {
-            for cy in y0..=y1 {
-                let Some(list) = grid.get(&(cx, cy)) else { continue };
-                for &j in list {
-                    if i == j {
-                        continue;
-                    }
-                    let o = &colliders[j];
-                    if cylinders_overlap((m.1, m.2, m.3), (o.1, o.2, o.3)) {
-                        let pair = if m.0 < o.0 { (m.0, o.0) } else { (o.0, m.0) };
-                        now.insert(pair);
-                    }
-                }
-            }
-        }
-    }
-    let before = std::mem::take(&mut world(vm).touching);
-    for &(a, b) in now.difference(&before) {
-        add_touching(vm, a, b);
-        add_touching(vm, b, a);
-        fire(vm, a, "Touch", &mut [Value::Object(Some(b))]);
-        fire(vm, b, "Touch", &mut [Value::Object(Some(a))]);
-    }
-    for &(a, b) in before.difference(&now) {
-        remove_touching(vm, a, b);
-        remove_touching(vm, b, a);
-        fire(vm, a, "UnTouch", &mut [Value::Object(Some(b))]);
-        fire(vm, b, "UnTouch", &mut [Value::Object(Some(a))]);
-    }
-    world(vm).touching = now;
-}
-
-fn add_touching(vm: &mut Vm<'_>, a: ObjId, other: ObjId) {
-    let mut list = match get(vm, a, "Touching") {
-        Value::Array(v) => v,
-        _ => Vec::new(),
-    };
-    if !list.iter().any(|v| v.as_obj() == Some(other)) {
-        list.push(Value::Object(Some(other)));
-        set(vm, a, "Touching", Value::Array(list));
-    }
-}
-
-fn remove_touching(vm: &mut Vm<'_>, a: ObjId, other: ObjId) {
-    if let Value::Array(mut list) = get(vm, a, "Touching") {
-        list.retain(|v| v.as_obj() != Some(other));
-        set(vm, a, "Touching", Value::Array(list));
-    }
 }
 
 /// Runs one physics step for every moving actor.

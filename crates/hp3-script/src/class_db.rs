@@ -70,6 +70,8 @@ pub struct StructDef {
     pub export: usize,
     /// Its entry in the object table.
     pub object: ObjId,
+    /// For classes: the file its `config` properties come from (`config(Spells)` is `Spells.ini`).
+    pub config_name: Name,
     pub script: Rc<Vec<Token>>,
     pub script_size: u32,
     /// For functions.
@@ -228,9 +230,11 @@ impl<'s> ClassDb<'s> {
         let o = object::read_export(pkg, index, &chain).ok()?;
         let mut function = (0u16, 0u32, 0u8);
         let mut state_info = (0, 0, 0, 0);
+        let mut config_name = Name::NONE;
         let (structure, kind, class_defaults) = match &o.body {
-            Body::Class { structure, defaults, state, .. } => {
+            Body::Class { structure, defaults, state, class, .. } => {
                 state_info = (state.probe_mask, state.ignore_mask, state.label_table_offset, state.state_flags);
+                config_name = self.name_of(pkg, class.config_name);
                 (structure.clone(), StructKind::Class, Some(defaults.clone()))
             }
             Body::State { structure, state } => {
@@ -274,6 +278,7 @@ impl<'s> ClassDb<'s> {
             pkg: pkg.clone(),
             export: index,
             object,
+            config_name,
             script: Rc::new(structure.script.clone()),
             script_size: structure.script_size,
             native_index: function.0,
@@ -449,6 +454,7 @@ impl<'s> ClassDb<'s> {
                         pkg: sd.pkg.clone(),
                         export: sd.export,
                         object,
+                        config_name: sd.config_name,
                         script: Rc::new(Vec::new()),
                         script_size: 0,
                         native_index: 0,

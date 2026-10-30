@@ -18,6 +18,7 @@ pub mod interactions;
 pub mod natives;
 pub mod particles;
 pub mod physics;
+pub mod touch;
 
 use hp3_script::fx::FxHashMap as HashMap;
 use std::rc::Rc;
@@ -56,8 +57,8 @@ pub struct World {
     pub config: hp3_core::Config,
     pub input: input::Input,
     pub collision: collision::Collision,
-    /// Pairs of actors currently touching (lower id first).
-    pub touching: hp3_script::fx::FxHashSet<(ObjId, ObjId)>,
+    /// Who touches whom, and the index that finds neighbours quickly.
+    pub touch: touch::Touch,
     pub anim: anim::Animation,
     pub nav: nav::Navigation,
     /// Opacity set by `SetOpacity` (1 when absent).
@@ -326,7 +327,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, c
         spawned: 0,
         input: input::Input::from_config(&config),
         collision: collision::Collision::default(),
-        touching: Default::default(),
+        touch: Default::default(),
         anim: Default::default(),
         nav: Default::default(),
         opacity: Default::default(),
@@ -383,6 +384,10 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, c
     }
     for &a in &actors {
         fire(vm, a, "PostBeginPlay", &mut []);
+        // Actors with a mesh now register the script events their animations raise.
+        if get(vm, a, "Mesh").as_obj().is_some() {
+            fire(vm, a, "AddAnimNotifys", &mut []);
+        }
     }
     for &a in &actors {
         fire(vm, a, "SetInitialState", &mut []);
@@ -635,7 +640,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         lap(vm, "actors: physics", &mut clock, profile);
     }
     mark(vm, "actors");
-    physics::update_touching(vm);
+    touch::frame_pass(vm);
     mark(vm, "touching");
     anim::update_movement(vm, dt);
     mark(vm, "movement anims");
@@ -738,6 +743,7 @@ pub fn destroy_actor(vm: &mut Vm<'_>, o: ObjId) -> bool {
         return false;
     }
     fire(vm, o, "Destroyed", &mut []);
+    touch::forget(vm, o);
     vm.db.objects.get_mut(o).deleted = true;
     let w = world(vm);
     w.actors.retain(|&x| x != o);

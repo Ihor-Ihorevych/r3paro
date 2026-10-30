@@ -87,6 +87,16 @@ impl MoverShape {
         self.to_local = to_world.inverse();
     }
 
+    /// How far the mover's triangles reach from its origin.
+    pub fn reach(&self) -> f32 {
+        self.radius
+    }
+
+    /// Whether a box centered at `at` overlaps the mover's triangles.
+    pub fn overlaps(&self, at: Vec3, extent: Vec3) -> bool {
+        self.trace(at + Vec3::Z * 0.1, at, extent).is_some_and(|h| h.time <= 0.0)
+    }
+
     fn trace(&self, start: Vec3, end: Vec3, extent: Vec3) -> Option<Hit> {
         let origin = self.to_world.w_axis.truncate();
         let reach = self.radius + extent.length() + start.distance(end);
@@ -213,6 +223,11 @@ impl Collision {
             }
         }
         best
+    }
+
+    /// The mover of `actor`, when that actor is one.
+    pub fn mover(&self, actor: ObjId) -> Option<&MoverShape> {
+        self.movers.iter().find(|m| m.actor == actor)
     }
 
     /// Whether a box at `at` overlaps solid geometry.

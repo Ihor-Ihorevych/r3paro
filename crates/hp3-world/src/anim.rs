@@ -40,6 +40,8 @@ pub struct Channel {
     pub tween_t: f32,
     /// A `TweenAnim`: only the fade to the sequence's first pose; it ends with `AnimEnd`.
     pub tween_only: bool,
+    /// `EnableChannelNotify(channel, false)`: the channel raises neither sequence notifies nor `AnimEnd`.
+    pub ignore_notify: bool,
 }
 
 impl Channel {
@@ -57,6 +59,8 @@ pub struct ActorAnim {
     pub bone_turns: Vec<(String, [i32; 3], f32)>,
     /// State of the movement-animation driver for this pawn.
     pub movement: MovementState,
+    /// The channel whose notify was raised last (`GetNotifyChannel`).
+    pub last_notify_channel: usize,
 }
 
 /// An actor's bone controller rotations as (bone index, matrix) for a skeleton.
@@ -88,6 +92,28 @@ pub struct Animation {
     pub attachments: HashMap<ObjId, (ObjId, String)>,
     /// `FinishAnim` waits: (who waits, whose channel, which channel).
     pub waiters: Vec<(ObjId, ObjId, usize)>,
+    /// Script events a sequence raises on its actor as it plays: per animation set (by identity) and sequence,
+    /// the place in the sequence (0 to 1) and the event name. Every actor playing from the set raises them.
+    notifies: HashMap<(usize, usize), Vec<(f32, Name)>>,
+}
+
+/// Identity of an animation set, for the notify table.
+fn set_key(set: &Rc<AnimSet>) -> usize {
+    Rc::as_ptr(set) as *const () as usize
+}
+
+/// Frames a channel passes while it moves from `old` by `step` in a sequence of `frames`: the stretches
+/// (from, to] where its notifies fire. A looping sequence that wraps passes the end and then the start.
+fn passed_stretches(old: f32, step: f32, frames: f32, looping: bool) -> [(f32, f32); 2] {
+    let new = old + step;
+    if new < frames || frames <= 0.0 {
+        [(old, new), (0.0, -1.0)]
+    } else if looping {
+        // The second stretch includes frame 0 itself, hence the small step below zero.
+        [(old, frames), (-0.001, new % frames)]
+    } else {
+        [(old, frames), (0.0, -1.0)]
+    }
 }
 
 /// Loads an animation set object (`MeshAnimation`).
@@ -293,7 +319,10 @@ pub fn tick_actor(vm: &mut Vm<'_>, actor: ObjId, dt: f32) {
         let Some(anims) = world(vm).anim.actors.get(&a).and_then(|x| x.set.clone()) else { continue };
         let mut ended = Vec::new();
         let mut looped = false;
-        if let Some(actor) = world(vm).anim.actors.get_mut(&a) {
+        let mut raised: Vec<(Name, usize)> = Vec::new();
+        let key = set_key(&anims);
+        let Animation { actors, notifies, .. } = &mut world(vm).anim;
+        if let Some(actor) = actors.get_mut(&a) {
             for (ci, ch) in actor.channels.iter_mut().enumerate() {
                 if ci > 0 && ch.alpha != ch.target_alpha {
                     let step = if ch.blend_rate > 0.0 { ch.blend_rate * dt } else { f32::MAX };
@@ -315,6 +344,16 @@ pub fn tick_actor(vm: &mut Vm<'_>, actor: ObjId, dt: f32) {
                     continue;
                 }
                 let frames = anims.sequences[si].frames as f32;
+                if let Some(list) = notifies.get(&(key, si)).filter(|_| !ch.ignore_notify) {
+                    for (from, to) in passed_stretches(ch.frame, ch.rate * dt, frames, ch.looping) {
+                        for &(at, event) in list {
+                            let f = at * frames;
+                            if f > from && f <= to {
+                                raised.push((event, ci));
+                            }
+                        }
+                    }
+                }
                 ch.frame += ch.rate * dt;
                 if ch.frame >= frames {
                     if ch.looping {
@@ -338,10 +377,23 @@ pub fn tick_actor(vm: &mut Vm<'_>, actor: ObjId, dt: f32) {
             let frames = anims.sequences[si].frames.max(1) as f32;
             set(vm, a, "AnimFrame", Value::Float(ch0.frame / frames));
         }
+        for (event, channel) in raised {
+            let name = vm.db.names.get(event).to_string();
+            world(vm).anim.actors.entry(a).or_default().last_notify_channel = channel;
+            if std::env::var("HP3_ANIM_TRACE").is_ok() {
+                eprintln!("anim: notify {name} on {a:?}");
+            }
+            fire(vm, a, &name, &mut []);
+        }
         for ci in ended {
             if std::env::var("HP3_ANIM_TRACE").is_ok() {
                 let c = get(vm, a, "Controller").as_obj();
                 eprintln!("anim: AnimEnd {a:?} channel {ci} controller {c:?}");
+            }
+            let silenced = world(vm).anim.actors.get(&a).and_then(|x| x.channels.get(ci)).is_some_and(|c| c.ignore_notify);
+            if silenced {
+                wake_anim_waiters(vm, a, ci);
+                continue;
             }
             // A pawn's controller gets the event when it handles it; otherwise the pawn does, never both.
             match get(vm, a, "Controller").as_obj() {
@@ -720,7 +772,51 @@ pub fn register(vm: &mut Vm<'_>) {
         }
         Ok(Value::Empty)
     });
-    vm.register("Actor.GetAnimSequence", |vm, this, _a| Ok(this.map(|o| get(vm, o, "AnimSequence")).unwrap_or(Value::Name(Name::NONE))));
+    // GetAnimSequence / GetAnimRate / GetAnimTime / GetAnimFrame (optional Channel): what a channel plays, its
+    // speed as a multiple of the sequence's own, how far along it is (0 to 1) and at which frame.
+    vm.register("Actor.GetAnimSequence", |vm, this, a| {
+        let Some(o) = this else { return Ok(Value::Name(Name::NONE)) };
+        let ci = channel_arg(a, 0);
+        let (Some(set), Some(si)) = (set_of(vm, o), world(vm).anim.actors.get(&o).and_then(|x| x.channels.get(ci)).and_then(|c| c.sequence)) else {
+            return Ok(Value::Name(Name::NONE));
+        };
+        Ok(Value::Name(vm.db.names.intern(&set.sequences[si].name)))
+    });
+    vm.register("Actor.GetAnimRate", |vm, this, a| {
+        let Some(o) = this else { return Ok(Value::Float(0.0)) };
+        let ci = channel_arg(a, 0);
+        let (Some(set), Some(c)) = (set_of(vm, o), world(vm).anim.actors.get(&o).and_then(|x| x.channels.get(ci)).cloned()) else {
+            return Ok(Value::Float(0.0));
+        };
+        let base = c.sequence.map(|si| set.sequences[si].rate).filter(|r| *r > 0.0).unwrap_or(1.0);
+        Ok(Value::Float(if c.playing { c.rate / base } else { 0.0 }))
+    });
+    vm.register("Actor.GetAnimTime", |vm, this, a| {
+        let Some(o) = this else { return Ok(Value::Float(0.0)) };
+        let ci = channel_arg(a, 0);
+        let (Some(set), Some(c)) = (set_of(vm, o), world(vm).anim.actors.get(&o).and_then(|x| x.channels.get(ci)).cloned()) else {
+            return Ok(Value::Float(0.0));
+        };
+        let frames = c.sequence.map(|si| set.sequences[si].frames.max(1) as f32).unwrap_or(1.0);
+        Ok(Value::Float((c.frame / frames).clamp(0.0, 1.0)))
+    });
+    vm.register("Actor.GetAnimFrame", |vm, this, a| {
+        let Some(o) = this else { return Ok(Value::Float(0.0)) };
+        let ci = channel_arg(a, 0);
+        Ok(Value::Float(world(vm).anim.actors.get(&o).and_then(|x| x.channels.get(ci)).map(|c| c.frame).unwrap_or(0.0)))
+    });
+    vm.register("Actor.EnableChannelNotify", |vm, this, a| {
+        if let Some(o) = this {
+            let ci = channel_arg(a, 0);
+            let on = a.get(1).is_none_or(|v| matches!(v, Value::Empty) || v.as_bool() || v.as_int() != 0);
+            channel_mut(vm, o, ci).ignore_notify = !on;
+        }
+        Ok(Value::Empty)
+    });
+    vm.register("Actor.GetNotifyChannel", |vm, this, _a| {
+        let last = this.and_then(|o| world(vm).anim.actors.get(&o)).map(|x| x.last_notify_channel).unwrap_or(0);
+        Ok(Value::Int(last as i32))
+    });
     // SetAnimTime / SetAnimRate (HP3): set a channel's position or speed.
     vm.register("Actor.SetAnimTime", |vm, this, a| {
         if let Some(o) = this {
@@ -893,6 +989,40 @@ pub fn register(vm: &mut Vm<'_>) {
             }
         }
         Ok(Value::Empty)
+    });
+    // `AddNotify(AnimSet, Sequence, Frame, EventName)`: the sequence raises the event on its actor at that frame.
+    // Adding the same one twice changes nothing.
+    vm.register("Actor.AddNotify", |vm, _this, a| {
+        let (Some(anim), Some(seq)) = (a.first().and_then(Value::as_obj), a.get(1)) else { return Ok(Value::Empty) };
+        let Some(set) = load_set(vm, anim) else { return Ok(Value::Empty) };
+        let name = vm.db.names.get(seq.as_name()).to_string();
+        let Some(si) = set.find(&name) else { return Ok(Value::Empty) };
+        let frames = set.sequences[si].frames as f32;
+        if frames <= 0.0 {
+            return Ok(Value::Empty);
+        }
+        let at = (a.get(2).map(Value::as_float).unwrap_or(0.0) / frames).clamp(0.0, 1.0);
+        let event = a.get(3).map(Value::as_name).unwrap_or(Name::NONE);
+        let list = world(vm).anim.notifies.entry((set_key(&set), si)).or_default();
+        if !list.iter().any(|&(t, e)| e == event && (t - at).abs() < 0.0001) {
+            list.push((at, event));
+            if std::env::var("HP3_ANIM_TRACE").is_ok() {
+                eprintln!("anim: notify {name} at {at:.3} -> {} (set {:#x})", vm.db.names.get(event), set_key(&set));
+            }
+        }
+        Ok(Value::Empty)
+    });
+    vm.register("Actor.AddNotifyObj", |_vm, _this, _a| Ok(Value::Empty));
+    // The animation set an actor plays a named sequence from.
+    vm.register("Actor.GetAnimObjectByName", |vm, this, a| {
+        let Some(o) = this else { return Ok(Value::Object(None)) };
+        let Some(set) = set_of(vm, o) else { return Ok(Value::Object(None)) };
+        let name = vm.db.names.get(a.first().map(Value::as_name).unwrap_or(Name::NONE)).to_string();
+        if set.find(&name).is_none() {
+            return Ok(Value::Object(None));
+        }
+        let object = world(vm).anim.sets.iter().find(|(_, s)| s.as_ref().is_some_and(|s| Rc::ptr_eq(s, &set))).map(|(&k, _)| k);
+        Ok(Value::Object(object))
     });
     vm.register("Actor.LinkSkelAnim", |vm, this, a| {
         if let (Some(o), Some(anim)) = (this, a.first().and_then(Value::as_obj)) {

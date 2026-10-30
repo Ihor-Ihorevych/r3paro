@@ -133,8 +133,10 @@ fn section(vm: &Vm<'_>, class: StructId) -> String {
 pub fn apply(vm: &mut Vm<'_>, config: &Config) -> usize {
     let mut classes: Vec<StructId> =
         (0..vm.db.structs.len()).map(|i| StructId(i as u32)).filter(|&c| vm.db.get(c).kind == StructKind::Class).collect();
-    // Parents first, so a class missing a key inherits what its parent read.
+    // Parents first, so a class that did not set a value of its own takes what its parent read.
     classes.sort_by_key(|&c| depth(vm, c));
+    // The defaults as the scripts left them, to tell a value a class set itself from one it inherited.
+    let scripted: std::collections::HashMap<StructId, Vec<Value>> = classes.iter().map(|&c| (c, vm.db.get(c).defaults.clone())).collect();
     let mut set = 0;
     for class in classes {
         let props: Vec<_> = vm.db.get(class).props.iter().filter(|p| p.flags & (CPF_CONFIG | CPF_GLOBAL_CONFIG) != 0).cloned().collect();
@@ -143,23 +145,29 @@ pub fn apply(vm: &mut Vm<'_>, config: &Config) -> usize {
         }
         let own_section = section(vm, class);
         for prop in props {
-            let sec = if prop.flags & CPF_GLOBAL_CONFIG != 0 { section(vm, prop.owner) } else { own_section.clone() };
+            let global = prop.flags & CPF_GLOBAL_CONFIG != 0;
+            let sec = if global { section(vm, prop.owner) } else { own_section.clone() };
+            // The file is the one the class (for a global property, the declaring class) names with `config(...)`.
+            let file_class = if global { prop.owner } else { class };
+            let file = vm.db.names.get(vm.db.get(file_class).config_name).to_string();
             let key = vm.db.names.get(prop.name).to_string();
-            // Inherited first: the parent's (already configured) value.
+            // A value the class did not set itself (it still equals what its parent's scripts say) follows the
+            // parent's configured value; one it set in its own defaults stays.
             if let Some(parent) = vm.db.get(class).super_
                 && vm.db.get(parent).prop(prop.name).is_some()
             {
                 for i in 0..prop.dim {
-                    let v = vm.db.get(parent).defaults.get(prop.slot + i).cloned();
-                    if let Some(v) = v {
-                        vm.db.structs[class.0 as usize].defaults[prop.slot + i] = v;
+                    let slot = prop.slot + i;
+                    let inherited = scripted.get(&class).and_then(|d| d.get(slot)) == scripted.get(&parent).and_then(|d| d.get(slot));
+                    if inherited && let Some(v) = vm.db.get(parent).defaults.get(slot).cloned() {
+                        vm.db.structs[class.0 as usize].defaults[slot] = v;
                     }
                 }
             }
             let mut values: Vec<(usize, Value)> = Vec::new();
             match &prop.ty {
                 PropType::Array(inner) => {
-                    let texts: Vec<String> = config.get_all(&sec, &key).into_iter().map(str::to_string).collect();
+                    let texts: Vec<String> = config.get_all_in(&file, &sec, &key).into_iter().map(str::to_string).collect();
                     if !texts.is_empty() {
                         let items: Vec<Value> = texts.iter().filter_map(|t| parse(vm, inner, t)).collect();
                         values.push((0, Value::Array(items)));
@@ -168,9 +176,9 @@ pub fn apply(vm: &mut Vm<'_>, config: &Config) -> usize {
                 ty => {
                     for i in 0..prop.dim {
                         let text = if prop.dim > 1 {
-                            config.get(&sec, &format!("{key}[{i}]")).or_else(|| (i == 0).then(|| config.get(&sec, &key)).flatten())
+                            config.get_in(&file, &sec, &format!("{key}[{i}]")).or_else(|| (i == 0).then(|| config.get_in(&file, &sec, &key)).flatten())
                         } else {
-                            config.get(&sec, &key)
+                            config.get_in(&file, &sec, &key)
                         };
                         if let Some(text) = text.map(str::to_string)
                             && let Some(v) = parse(vm, ty, &text)
