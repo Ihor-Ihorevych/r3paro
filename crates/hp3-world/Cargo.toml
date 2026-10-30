@@ -14,3 +14,4 @@ hp3-core.workspace = true
 log.workspace = true
 glam = "0.30"
 hp3-anim = { path = "../hp3-anim" }
+fontdue = "0.9"

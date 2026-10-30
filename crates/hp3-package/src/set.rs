@@ -36,7 +36,7 @@ pub fn builtin_super(class: &str) -> Option<&'static str> {
         "level" | "pendinglevel" => "LevelBase",
         "lodmesh" => "Mesh",
         "skeletalmesh" | "vertmesh" => "LodMesh",
-        "staticmeshinstance" | "sound" | "music" => "Object",
+        "staticmeshinstance" | "sound" | "music" | "font" => "Object",
         _ => return None,
     })
 }

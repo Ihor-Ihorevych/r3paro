@@ -222,6 +222,62 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                     println!("    log: {l}");
                 }
             }
+            // HP3_CLICK=x,y clicks the menu at that point of a 1280x720 screen.
+            if let Ok(c) = std::env::var("HP3_CLICK") {
+                let _ = hp3_world::canvas::render(&mut vm, 1280, 720);
+                let v: Vec<f32> = c.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                hp3_world::gui::mouse_move(&mut vm, v[0], v[1]);
+                hp3_world::gui::mouse_button(&mut vm, true);
+                hp3_world::gui::mouse_button(&mut vm, false);
+                for _ in 0..30 {
+                    hp3_world::tick(&mut vm, 1.0 / 60.0);
+                }
+                let _ = hp3_world::canvas::render(&mut vm, 1280, 720);
+                let gui = hp3_world::world(&mut vm).viewport.gui.unwrap();
+                let ac = hp3_world::get(&mut vm, gui, "ActiveControl");
+                println!("    active control after click: {ac:?}");
+            }
+            if std::env::var("HP3_GUI_DEBUG").is_ok()
+                && let Some(gui) = hp3_world::world(&mut vm).viewport.gui
+            {
+                fn dump(vm: &mut hp3_script::Vm<'_>, o: hp3_script::ObjId, depth: usize) {
+                    let class = vm.db.objects.get(o).class.map(|c| vm.db.names.get(vm.db.structs[c.0 as usize].name).to_string()).unwrap_or_default();
+                    let mut info = String::new();
+                    for n in ["WinLeft", "WinTop", "Caption", "MenuState", "bAcceptsInput", "RenderWeight", "__OnClick__Delegate"] {
+                        let v = hp3_world::get(vm, o, n);
+                        let v = match v {
+                            hp3_script::Value::Empty => continue,
+                            hp3_script::Value::Object(Some(x)) => hp3_script::natives::object_path(vm, x),
+                            other => format!("{other:?}"),
+                        };
+                        info.push_str(&format!(" {n}={v}"));
+                    }
+                    println!("    {}{class}{info}", "  ".repeat(depth));
+                    if let hp3_script::Value::Array(c) = hp3_world::get(vm, o, "Controls") {
+                        for x in c.iter().filter_map(hp3_script::Value::as_obj) {
+                            dump(vm, x, depth + 1);
+                        }
+                    }
+                }
+                if let hp3_script::Value::Array(styles) = hp3_world::get(&mut vm, gui, "StyleStack") {
+                    for st in styles.iter().filter_map(hp3_script::Value::as_obj).take(40) {
+                        let key = hp3_world::get(&mut vm, st, "KeyName").as_str().to_string();
+                        if key != "HPSolidBoxFE" {
+                            continue;
+                        }
+                        let slot = hp3_world::slot(&mut vm, st, "Fonts").unwrap();
+                        let fonts: Vec<String> = (0..5).map(|i| vm.db.objects.values(st).unwrap()[slot + i].as_obj().map(|f| hp3_script::natives::object_path(&vm, f)).unwrap_or_default()).collect();
+                        let ns = hp3_world::slot(&mut vm, st, "FontNames").unwrap();
+                        let names: Vec<String> = (0..5).map(|i| vm.db.objects.values(st).unwrap()[ns + i].as_str().to_string()).collect();
+                        println!("    style {key}: fonts {fonts:?} names {names:?}");
+                    }
+                }
+                if let hp3_script::Value::Array(pages) = hp3_world::get(&mut vm, gui, "MenuStack") {
+                    for p in pages.iter().filter_map(hp3_script::Value::as_obj) {
+                        dump(&mut vm, p, 0);
+                    }
+                }
+            }
             if std::env::var("HP3_ATTACH_DEBUG").is_ok() {
                 let list: Vec<_> = hp3_world::world(&mut vm).anim.attachments.iter().map(|(k, v)| (*k, v.clone())).collect();
                 for (child, (parent, bone)) in list {

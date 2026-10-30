@@ -75,7 +75,16 @@ Milestones are from the plan (M0 to M12).
 - **HUD**: each frame the HUD's `PostRender` draws through the `Canvas` natives (tiles, text with HP3's fonts,
   sizes, wrapping) into 2D quads drawn over the scene with Unreal's blend styles. HP3's HUD items rest hidden
   in their `Idle` state until the game fades them in (`HP3_SHOW_HUD=1` in `hp3-view play` shows them all).
-  Not yet: menus (GUI), native TTF fonts, 3D actors in the HUD.
+  Not yet: 3D actors in the HUD.
+- **Menus**: the player's viewport objects (`Player`, `InteractionMaster`, console, `HPGUIController`) are made
+  at login and the controller initialized. The game starts on its local map with the front end
+  (`HP3_MENU=<page>` opens any page). The GUI's native side is reimplemented: automated controls instanced
+  from their templates (delegates rebound to the new owner), layout, drawing of pages, images, labels,
+  buttons and GFX buttons through styles and fonts, mouse hover and clicks calling the scripts' delegates,
+  keys to the page. Languages HP3's bitmap fonts do not cover (Russian...) use system TrueType fonts
+  (`SAPFont.<language>`, rasterized with fontdue; `HP3_FONT` overrides the file). Masked palettised textures
+  treat index 0 as transparent. The front end and the New Game page work; starting the game needs level
+  travel. Not yet: lists, edit boxes, sliders, combo boxes, tabs, timers.
 - Fixed: auto states are flagged 0x2 (0x1 is "editable"); every actor now starts in its class's auto state.
 - M7 onwards: not started.
 

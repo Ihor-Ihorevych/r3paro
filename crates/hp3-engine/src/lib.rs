@@ -142,6 +142,18 @@ pub fn map_inputs(vm: &mut Vm<'_>, loader: &Loader<'_>, map: &Package, lit: bool
 #[derive(Default)]
 pub struct HudCache {
     textures: HashMap<ObjId, Option<(ObjKey, f32, f32)>>,
+    /// Textures made at run time (native font pages), under keys of the `<runtime>` package.
+    runtime: HashMap<ObjKey, Rc<hp3_assets::loader::Image>>,
+}
+
+impl HudCache {
+    /// The image behind an overlay texture key: a runtime texture or a package texture with its alpha.
+    pub fn image(&self, loader: &Loader<'_>, k: &ObjKey) -> Option<Rc<hp3_assets::loader::Image>> {
+        if let Some(i) = self.runtime.get(k) {
+            return Some(i.clone());
+        }
+        loader.image_with_alpha(&loader.set.get(&k.0).ok()?, k.1)
+    }
 }
 
 /// The HUD of this frame as overlay quads (and the key-to-image lookup the overlay needs).
@@ -153,6 +165,13 @@ pub fn hud_quads(vm: &mut Vm<'_>, loader: &Loader<'_>, cache: &mut HudCache, wid
     for t in tiles {
         // Tiles without a material (or one that does not resolve to a texture) draw nothing, as in Unreal.
         let Some(material) = t.material else { continue };
+        if !cache.textures.contains_key(&material)
+            && let Some(img) = world(vm).native_fonts.images.get(&material).cloned()
+        {
+            let k: ObjKey = ("<runtime>".to_string(), material.0 as usize);
+            cache.textures.insert(material, Some((k.clone(), img.width as f32, img.height as f32)));
+            cache.runtime.insert(k, img);
+        }
         let tex = Some(material).and_then(|m| {
             cache
                 .textures

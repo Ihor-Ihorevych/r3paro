@@ -131,6 +131,15 @@ impl<'s> Loader<'s> {
         let (w, h) = (mip.width as usize, mip.height as usize);
         let mut rgba = texture::decode_rgba(format, w, h, data, palette.as_ref())?;
         let masked = masked || (format == Format::P8 && palette.is_some_and(|p| p.colors.first().is_some_and(|c| c.a == 0)));
+        // Masked palettised textures: index 0 is transparent whatever its color (often a key color).
+        if masked && format == Format::P8 {
+            for (i, &index) in data.iter().take(w * h).enumerate() {
+                if index == 0 {
+                    // Clear the key color too, so filtering does not bleed it into the edges.
+                    rgba[i * 4..i * 4 + 4].copy_from_slice(&[0, 0, 0, 0]);
+                }
+            }
+        }
         // Alpha is a cut-out only for masked textures; elsewhere it carries other data (specular, blending),
         // which the renderer does not use yet.
         if !masked && !keep_alpha {

@@ -37,6 +37,17 @@ pub struct Tile {
     pub style: u8,
 }
 
+/// The Windows-1251 code of a Cyrillic character.
+fn cp1251(c: char) -> Option<u8> {
+    let u = c as u32;
+    Some(match u {
+        0x0410..=0x044F => (u - 0x0410 + 0xC0) as u8,
+        0x0401 => 0xA8,
+        0x0451 => 0xB8,
+        _ => return None,
+    })
+}
+
 /// A font ready to lay out text: glyphs, the material of each page, the code-to-glyph remap.
 pub struct FontInfo {
     font: Font,
@@ -49,7 +60,11 @@ impl FontInfo {
     fn glyph(&self, c: char) -> Option<&hp3_assets::font::Glyph> {
         let code = c as u32;
         let index = if self.font.is_remapped != 0 || code > 255 {
-            *self.remap.get(&(code.min(0xffff) as u16))? as usize
+            match self.remap.get(&(code.min(0xffff) as u16)) {
+                Some(&i) => i as usize,
+                // Fonts without a remap keep Cyrillic at its Windows-1251 position.
+                None => cp1251(c)? as usize,
+            }
         } else {
             code as usize
         };
@@ -72,6 +87,14 @@ pub struct CanvasState {
 fn font_info(vm: &mut Vm<'_>, font: ObjId) -> Option<Rc<FontInfo>> {
     if let Some(f) = world(vm).canvas.fonts.get(&font) {
         return f.clone();
+    }
+    if let Some(nf) = world(vm).native_fonts.fonts.get(&font).cloned() {
+        let (f, page) = (&nf.0, nf.1);
+        let remap = f.remap.iter().copied().collect();
+        let height = f.glyphs.iter().map(|g| g.height).max().unwrap_or(0) as f32;
+        let info = Some(Rc::new(FontInfo { font: f.clone(), pages: vec![Some(page)], remap, height }));
+        world(vm).canvas.fonts.insert(font, info.clone());
+        return info;
     }
     let info = (|| {
         let (pkg, index) = vm.db.objects.get(font).key.clone()?;
@@ -152,6 +175,47 @@ fn wrap(vm: &mut Vm<'_>, canvas: ObjId, text: &str, width: f32, eol: &str) -> Ve
     out
 }
 
+/// A tile with an explicit color and style (GUI drawing, which does not go through the canvas state).
+#[allow(clippy::too_many_arguments)]
+pub fn tile(vm: &mut Vm<'_>, material: Option<ObjId>, rect: [f32; 4], uv: [f32; 4], color: [u8; 4], style: u8) {
+    world(vm).canvas.tiles.push(Tile {
+        material,
+        x: rect[0],
+        y: rect[1],
+        w: rect[2],
+        h: rect[3],
+        u: uv[0],
+        v: uv[1],
+        ul: uv[2],
+        vl: uv[3],
+        color,
+        style,
+    });
+}
+
+/// Width and height of a line of text in a font object.
+pub fn measure(vm: &mut Vm<'_>, font: ObjId, text: &str) -> (f32, f32) {
+    match font_info(vm, font) {
+        Some(f) => (f.width(text), f.height),
+        None => (0.0, 0.0),
+    }
+}
+
+/// Draws a line of text in a font object at (x, y), clipped at `right`.
+pub fn text(vm: &mut Vm<'_>, font: ObjId, s: &str, x: f32, y: f32, right: f32, color: [u8; 4]) {
+    let Some(f) = font_info(vm, font) else { return };
+    let mut cx = x;
+    for c in s.chars() {
+        let Some(g) = f.glyph(c).copied() else { continue };
+        if cx + g.width as f32 > right + 0.5 {
+            break;
+        }
+        let page = f.pages.get(g.texture as usize).copied().flatten();
+        tile(vm, page, [cx, y, g.width as f32, g.height as f32], [g.u as f32, g.v as f32, g.width as f32, g.height as f32], color, STY_ALPHA);
+        cx += (g.width + f.font.kerning) as f32;
+    }
+}
+
 /// Draws one frame of the HUD into the tile list for a `width` x `height` screen.
 pub fn render(vm: &mut Vm<'_>, width: u32, height: u32) -> Vec<Tile> {
     world(vm).canvas.tiles.clear();
@@ -171,9 +235,16 @@ pub fn render(vm: &mut Vm<'_>, width: u32, height: u32) -> Vec<Tile> {
     fire(vm, canvas, "Reset", &mut []);
     set(vm, canvas, "ClipX", Value::Float(width as f32));
     set(vm, canvas, "ClipY", Value::Float(height as f32));
+    crate::interactions::pre_render(vm, canvas);
     if let Some(hud) = get(vm, pc, "myHUD").as_obj() {
         fire(vm, hud, "PostRender", &mut [Value::Object(Some(canvas))]);
     }
+    // Interactions (the GUI's menus, the console) draw over the HUD.
+    fire(vm, canvas, "Reset", &mut []);
+    set(vm, canvas, "ClipX", Value::Float(width as f32));
+    set(vm, canvas, "ClipY", Value::Float(height as f32));
+    crate::interactions::post_render(vm, canvas);
+    crate::gui::render(vm, canvas, width, height);
     std::mem::take(&mut world(vm).canvas.tiles)
 }
 
@@ -290,6 +361,12 @@ pub fn register(vm: &mut Vm<'_>) {
             a[1] = Value::Array(lines.into_iter().map(Value::Str).collect());
         }
         Ok(Value::Empty)
+    });
+    // CreateNativeFont(FontName, Height, ...): a system font.
+    vm.register("Canvas.CreateNativeFont", |vm, _this, a| {
+        let name = a.first().map(|v| v.as_str().to_string()).unwrap_or_default();
+        let px = a.get(1).map(Value::as_int).unwrap_or(16).max(1) as u32;
+        Ok(Value::Object(crate::fonts::create(vm, &name, px)))
     });
     // 3D in the HUD (actors, portals, lines): not drawn yet.
     for name in ["Canvas.DrawActor", "Canvas.DrawActorOnHud", "Canvas.DrawPortal", "HUD.Draw3DLine"] {

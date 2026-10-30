@@ -46,6 +46,22 @@ fn key_name(sc: Scancode) -> Option<String> {
     })
 }
 
+/// Unreal key codes of the keys menus use.
+fn menu_key(sc: Scancode) -> Option<u8> {
+    Some(match sc {
+        Scancode::Return | Scancode::KpEnter => 0x0d,
+        Scancode::Escape => 0x1b,
+        Scancode::Space => 0x20,
+        Scancode::Left => 0x25,
+        Scancode::Up => 0x26,
+        Scancode::Right => 0x27,
+        Scancode::Down => 0x28,
+        Scancode::Tab => 0x09,
+        Scancode::Backspace => 0x08,
+        _ => return None,
+    })
+}
+
 fn mouse_name(b: MouseButton) -> Option<&'static str> {
     match b {
         MouseButton::Left => Some("LeftMouse"),
@@ -172,10 +188,36 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
     let mut frames = 0u32;
     let mut fps_timer = Instant::now();
     let mut free_camera = false;
+    let mut in_menu = false;
     'main: loop {
+        // Menus take the mouse as a visible cursor; play takes it relative.
+        let menu = hp3_world::gui::menu_open(&mut vm);
+        if menu != in_menu {
+            in_menu = menu;
+            sdl.mouse().set_relative_mouse_mode(&window, !menu);
+        }
         for event in events.poll_iter() {
             match event {
-                Event::Quit { .. } | Event::KeyDown { keycode: Some(Keycode::Escape), .. } => break 'main,
+                Event::Quit { .. } => break 'main,
+                Event::KeyDown { scancode: Some(sc), repeat, .. } if in_menu => {
+                    if let Some(k) = menu_key(sc) {
+                        hp3_world::gui::key(&mut vm, k, if repeat { 2 } else { 1 }, 0.0);
+                    }
+                }
+                Event::KeyUp { scancode: Some(sc), .. } if in_menu => {
+                    if let Some(k) = menu_key(sc) {
+                        hp3_world::gui::key(&mut vm, k, 3, 0.0);
+                    }
+                }
+                Event::MouseMotion { x, y, .. } if in_menu => {
+                    // Window coordinates to the render target's pixels.
+                    let (ww, _) = window.size();
+                    let scale = width as f32 / ww.max(1) as f32;
+                    hp3_world::gui::mouse_move(&mut vm, x * scale, y * scale);
+                }
+                Event::MouseButtonDown { mouse_btn: MouseButton::Left, .. } if in_menu => hp3_world::gui::mouse_button(&mut vm, true),
+                Event::MouseButtonUp { mouse_btn: MouseButton::Left, .. } if in_menu => hp3_world::gui::mouse_button(&mut vm, false),
+                Event::KeyDown { keycode: Some(Keycode::Escape), .. } => break 'main,
                 Event::KeyDown { scancode: Some(Scancode::F1), repeat: false, .. } => free_camera = !free_camera,
                 Event::KeyDown { scancode: Some(sc), repeat: false, .. } if !free_camera => {
                     if let Some(k) = key_name(sc) {
@@ -268,7 +310,7 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
         let refs: Vec<_> = instances.iter().map(|(m, t, l)| (m.as_ref(), *t, *l)).collect();
         let cmd = dynamic.draw(&renderer, &gpu_scene, &refs, &camera, &view, &depth, width as f32 / height as f32);
         let quads = hp3_engine::hud_quads(&mut vm, &loader, &mut hud_cache, width, height);
-        let images = |k: &hp3_assets::loader::ObjKey| loader.image_with_alpha(&loader.set.get(&k.0).ok()?, k.1);
+        let images = |k: &hp3_assets::loader::ObjKey| hud_cache.image(&loader, k);
         let hud = overlay.draw(&renderer, &quads, &images, &view, width, height);
         renderer.queue.submit([cmd, hud]);
         frame.present();

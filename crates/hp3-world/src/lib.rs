@@ -7,8 +7,11 @@ pub mod anim;
 pub mod canvas;
 pub mod collision;
 pub mod config;
+pub mod fonts;
 pub mod nav;
+pub mod gui;
 pub mod input;
+pub mod interactions;
 pub mod natives;
 pub mod physics;
 
@@ -56,6 +59,8 @@ pub struct World {
     /// Opacity set by `SetOpacity` (1 when absent).
     pub opacity: HashMap<ObjId, f32>,
     pub canvas: canvas::CanvasState,
+    pub viewport: interactions::Viewport,
+    pub native_fonts: fonts::NativeFonts,
     actor_slots: HashMap<&'static str, Option<usize>>,
     /// Time per tick phase, when `HP3_TICK_PROFILE` is set.
     pub tick_profile: std::collections::BTreeMap<&'static str, std::time::Duration>,
@@ -160,6 +165,8 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Res
     anim::register(vm);
     nav::register(vm);
     canvas::register(vm);
+    interactions::register(vm);
+    gui::register(vm);
     let configured = config::apply(vm, &config);
     if std::env::var_os("HP3_CONFIG_DEBUG").is_some() {
         eprintln!("config: {configured} class default values read from the ini files");
@@ -225,6 +232,8 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Res
         nav: Default::default(),
         opacity: Default::default(),
         canvas: Default::default(),
+        viewport: Default::default(),
+        native_fonts: Default::default(),
         tick_profile: Default::default(),
         actor_slots: Default::default(),
         config,
@@ -257,7 +266,8 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Res
         let pc = fire(vm, g, "Login", &mut args).as_obj();
         if let Some(pc) = pc {
             world(vm).player = Some(pc);
-            // The engine gives the local player's controller its input object.
+            // The engine gives the local player's controller its viewport (console, GUI) and input object.
+            interactions::init(vm, pc);
             fire(vm, pc, "InitInputSystem", &mut []);
             fire(vm, g, "PostLogin", &mut [Value::Object(Some(pc))]);
         }
@@ -270,6 +280,15 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Res
             }
             fire(vm, pc, "TravelPostAccept", &mut []);
             init_camera_settings(vm, pc);
+            // The game starts on its local map with the front end (after the intro movies, not played yet);
+            // HP3_MENU=<Package.Class> opens a page on any map.
+            let local = world(vm).config.get("URL", "LocalMap").map(|m| m.trim_end_matches(".unr").to_ascii_lowercase());
+            let page = std::env::var("HP3_MENU").ok().or_else(|| {
+                (local.as_deref() == Some(map.name.to_ascii_lowercase().as_str())).then(|| "HGame.HPPageFrontend".to_string())
+            });
+            if let Some(page) = page {
+                interactions::open_menu(vm, &page);
+            }
         }
     }
     Ok(())
@@ -345,6 +364,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         input::apply(vm, pc);
         fire(vm, pc, "PlayerTick", &mut [Value::Float(dt)]);
     }
+    interactions::tick(vm, dt);
     mark(vm, "player");
     nav::tick(vm, dt);
     mark(vm, "nav");

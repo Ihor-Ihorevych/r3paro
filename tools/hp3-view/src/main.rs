@@ -154,6 +154,21 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
             hp3_world::tick(&mut vm, 1.0 / 60.0);
         }
     }
+    // HP3_CLICK=x,y[;x,y...] clicks the menus at those points (of the output size) before rendering.
+    if let Ok(clicks) = std::env::var("HP3_CLICK") {
+        for c in clicks.split(';') {
+            let _ = hp3_world::canvas::render(&mut vm, 1280, 720);
+            let v: Vec<f32> = c.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            if v.len() == 2 {
+                hp3_world::gui::mouse_move(&mut vm, v[0], v[1]);
+                hp3_world::gui::mouse_button(&mut vm, true);
+                hp3_world::gui::mouse_button(&mut vm, false);
+            }
+            for _ in 0..30 {
+                hp3_world::tick(&mut vm, 1.0 / 60.0);
+            }
+        }
+    }
     let statics = hp3_engine::static_exports(&mut vm, &pkg);
     // HP3_UNLIT=1 draws everything at full brightness.
     let inputs = hp3_engine::map_inputs(&mut vm, &loader, &pkg, std::env::var_os("HP3_UNLIT").is_none());
@@ -210,14 +225,15 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
     let gpu_scene = renderer.upload_scene(&scene);
     let refs: Vec<_> = instances.iter().map(|(m, t, l)| (m.as_ref(), *t, *l)).collect();
     // The HUD over the scene (HP3_NO_HUD=1 leaves it out).
+    let mut hud_cache = hp3_engine::HudCache::default();
     let quads = if std::env::var_os("HP3_NO_HUD").is_none() {
-        hp3_engine::hud_quads(&mut vm, &loader, &mut hp3_engine::HudCache::default(), w, h)
+        hp3_engine::hud_quads(&mut vm, &loader, &mut hud_cache, w, h)
     } else {
         Vec::new()
     };
     eprintln!("{} HUD quads", quads.len());
     let overlay = hp3_render::overlay::Overlay::new(&renderer);
-    let images = |k: &hp3_assets::loader::ObjKey| loader.image_with_alpha(&set.get(&k.0).ok()?, k.1);
+    let images = |k: &hp3_assets::loader::ObjKey| hud_cache.image(&loader, k);
     let rgba = renderer.render_frames_to_rgba(w, h, |color, depth| {
         vec![
             dynamic.draw(&renderer, &gpu_scene, &refs, &camera, color, depth, w as f32 / h as f32),
