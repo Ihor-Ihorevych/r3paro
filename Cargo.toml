@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "tools/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://example.invalid/hp3-engine"
+publish = false
+
+[workspace.dependencies]
+hp3-core = { path = "crates/hp3-core" }
+hp3-package = { path = "crates/hp3-package" }
+hp3-script = { path = "crates/hp3-script" }
+hp3-assets = { path = "crates/hp3-assets" }
+thiserror = "2"
+log = "0.4"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+debug = 1

@@ -1,0 +1,17 @@
+/target
+# Game data and anything derived from it never goes into the repository.
+*.u
+*.unr
+*.utx
+*.uax
+*.ukx
+*.usx
+*.umx
+*.bik
+*.ogg
+*.int
+*.rus
+*.exe
+*.dll
+/out/
+/scripts/
