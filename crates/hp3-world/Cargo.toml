@@ -12,3 +12,4 @@ hp3-assets.workspace = true
 hp3-script.workspace = true
 hp3-core.workspace = true
 log.workspace = true
+glam = "0.30"

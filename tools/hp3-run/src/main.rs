@@ -105,7 +105,32 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
     let t = std::time::Instant::now();
     hp3_world::load(&mut vm, &pkg, hp3_core::Config::load(root))?;
     let load_time = t.elapsed();
+    if let Some(pc) = hp3_world::world(&mut vm).player
+        && let Some(pawn) = hp3_world::get(&mut vm, pc, "Pawn").as_obj()
+    {
+        let loc = hp3_world::physics::vec(&hp3_world::get(&mut vm, pawn, "Location"));
+        let w = hp3_world::world(&mut vm);
+        println!("collision: {} triangles", w.collision.triangle_count());
+        for (what, d) in [("down", -glam::Vec3::Z * 2000.0), ("up", glam::Vec3::Z * 2000.0), ("forward", glam::Vec3::X * 4000.0)] {
+            let hit = w.collision.trace(loc, loc + d, glam::Vec3::ZERO, Some(pawn));
+            println!("  trace {what} from pawn at {loc}: {:?}", hit.map(|h| (h.time * d.length(), h.normal, h.actor.is_some())));
+        }
+        let r = hp3_world::get(&mut vm, pawn, "CollisionRadius").as_float();
+        let hgt = hp3_world::get(&mut vm, pawn, "CollisionHeight").as_float();
+        let ext = glam::Vec3::new(r, r, hgt);
+        let w = hp3_world::world(&mut vm);
+        for (what, d) in [("down", -glam::Vec3::Z * 200.0), ("forward", glam::Vec3::X * 4000.0)] {
+            let hit = w.collision.trace(loc, loc + d, ext, Some(pawn));
+            println!("  box {ext} trace {what}: {:?}", hit.map(|h| (h.time * d.length(), h.normal, h.actor.is_some())));
+        }
+    }
     let steps_after_load = vm.steps;
+    // Keys held for the whole run, e.g. HP3_HOLD=W,D.
+    if let Ok(keys) = std::env::var("HP3_HOLD") {
+        for k in keys.split(',') {
+            hp3_world::world(&mut vm).input.key_down(k.trim());
+        }
+    }
     let t = std::time::Instant::now();
     for _ in 0..frames {
         hp3_world::tick(&mut vm, 1.0 / 60.0);
@@ -117,6 +142,33 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
         "{map}: {actors} actors ({spawned} spawned), begin-play {load_time:?} ({steps_after_load} statements),          {frames} ticks {tick_time:?} ({} statements)",
         vm.steps - steps_after_load
     );
+    if let Some(pc) = hp3_world::world(&mut vm).player {
+        let class = vm.db.objects.get(pc).class.map(|c| vm.db.names.get(vm.db.get(c).name).to_string());
+        let pawn = hp3_world::get(&mut vm, pc, "Pawn").as_obj();
+        let state = vm.state_of(pc).map(|s| vm.db.names.get(vm.db.get(s).name).to_string());
+        println!("player controller {class:?} in state {state:?}");
+        for n in ["aBaseY", "aForward", "aStrafe", "bMovePawn", "bUpdatePosition", "bCanMove", "Pawn"] {
+            println!("  pc.{n} = {:?}", hp3_world::get(&mut vm, pc, n));
+        }
+        if let Some(p) = pawn {
+            for n in ["Acceleration", "Velocity", "GroundSpeed", "AccelRate", "Controller"] {
+                println!("  pawn.{n} = {:?}", hp3_world::get(&mut vm, p, n));
+            }
+            if let Some(c) = hp3_world::get(&mut vm, p, "Controller").as_obj() {
+                let cc = vm.db.objects.get(c).class.map(|c| vm.db.names.get(vm.db.get(c).name).to_string());
+                let st = vm.state_of(c).map(|s| vm.db.names.get(vm.db.get(s).name).to_string());
+                println!("  pawn's controller is {cc:?} in state {st:?}");
+            }
+            println!("  pc.PlayerInput = {:?}", hp3_world::get(&mut vm, pc, "PlayerInput"));
+            let pclass = vm.db.objects.get(p).class.map(|c| vm.db.names.get(vm.db.get(c).name).to_string());
+            let loc = hp3_world::get(&mut vm, p, "Location");
+            let phys = hp3_world::get(&mut vm, p, "Physics");
+            let pstate = vm.state_of(p).map(|s| vm.db.names.get(vm.db.get(s).name).to_string());
+            println!("pawn {pclass:?} at {loc:?}, physics {phys:?}, state {pstate:?}");
+        } else {
+            println!("no pawn");
+        }
+    }
     let mut grouped: BTreeMap<String, usize> = BTreeMap::new();
     for e in &errors {
         let key = e.split_once(' ').map(|(_, r)| r.to_string()).unwrap_or_else(|| e.clone());

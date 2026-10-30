@@ -82,6 +82,14 @@ impl Ini {
         }
     }
 
+    /// Every entry of a section in file order, as (key as written, value).
+    pub fn entries(&self, section: &str) -> Vec<(&str, &str)> {
+        self.sections
+            .get(&section.to_ascii_lowercase())
+            .map(|v| v.iter().map(|e| (e.1.as_str(), e.2.as_str())).collect())
+            .unwrap_or_default()
+    }
+
     pub fn has_section(&self, section: &str) -> bool {
         self.sections.contains_key(&section.to_ascii_lowercase())
     }

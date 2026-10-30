@@ -11,3 +11,4 @@ hp3-package.workspace = true
 hp3-script.workspace = true
 hp3-core.workspace = true
 hp3-world = { path = "../../crates/hp3-world" }
+glam = "0.30"

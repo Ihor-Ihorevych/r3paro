@@ -33,7 +33,8 @@ pub fn spawn(vm: &mut Vm<'_>, spawner: Option<ObjId>, a: &[Value]) -> Result<Val
     let class_name = vm.db.get(class).name;
     let name = format!("{}{}", vm.db.names.get(class_name), 1000 + n);
     let name = vm.db.names.intern(&name);
-    let obj = vm.new_object(class, name);
+    let level = world(vm).level_info;
+    let obj = vm.new_object_in(class, name, level);
     let (loc, rot) = match spawner {
         Some(s) => (get(vm, s, "Location"), get(vm, s, "Rotation")),
         None => (Value::Empty, Value::Empty),
@@ -42,7 +43,6 @@ pub fn spawn(vm: &mut Vm<'_>, spawner: Option<ObjId>, a: &[Value]) -> Result<Val
     set(vm, obj, "Rotation", if given(a, 4) { a[4].clone() } else { rot });
     set(vm, obj, "Owner", Value::Object(obj_arg(a, 1)));
     set(vm, obj, "Tag", Value::Name(if given(a, 2) { a[2].as_name() } else { class_name }));
-    let level = world(vm).level_info;
     set(vm, obj, "Level", Value::Object(level));
     let instigator = spawner.map(|s| get(vm, s, "Instigator")).unwrap_or_default();
     set(vm, obj, "Instigator", instigator);

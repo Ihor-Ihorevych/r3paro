@@ -313,8 +313,29 @@ impl<'s> Vm<'s> {
 
     /// Creates an instance of a class with its default values.
     pub fn new_object(&mut self, class: StructId, name: Name) -> ObjId {
+        self.new_object_in(class, name, None)
+    }
+
+    /// Creates an instance of a class with its default values inside `outer`.
+    pub fn new_object_in(&mut self, class: StructId, name: Name, outer: Option<ObjId>) -> ObjId {
         let values = self.db.get(class).defaults.clone();
-        self.db.objects.add(name, class, values)
+        let id = self.db.objects.add(name, class, values);
+        self.set_intrinsics(id, outer);
+        id
+    }
+
+    /// Fills the properties every object has in script (`Outer`, `Name`, `Class`) from the object table.
+    pub fn set_intrinsics(&mut self, obj: ObjId, outer: Option<ObjId>) {
+        let Some(class) = self.db.objects.get(obj).class else { return };
+        let name = self.db.objects.get(obj).name;
+        let class_obj = self.db.get(class).object;
+        for (prop, value) in [("Outer", Value::Object(outer)), ("Name", Value::Name(name)), ("Class", Value::Object(Some(class_obj)))] {
+            let Some(n) = self.db.names.find(prop) else { continue };
+            let Some(slot) = self.db.get(class).prop(n).map(|p| p.slot) else { continue };
+            if let Some(v) = self.db.objects.values_mut(obj).and_then(|v| v.get_mut(slot)) {
+                *v = value;
+            }
+        }
     }
 
     // ---- places ----
@@ -572,6 +593,10 @@ impl<'s> Vm<'s> {
                     Some(Expr::Nothing) | None => Value::Empty,
                     Some(n) => self.eval(n, frame, ctx)?,
                 };
+                let outer = match args.first() {
+                    Some(Expr::Nothing) | None => None,
+                    Some(o) => self.eval(o, frame, ctx)?.as_obj(),
+                };
                 match class.and_then(|c| self.class_of(c)) {
                     Some(c) => {
                         let n = match name {
@@ -579,7 +604,7 @@ impl<'s> Vm<'s> {
                             Value::Name(n) => n,
                             _ => self.db.get(c).name,
                         };
-                        Value::Object(Some(self.new_object(c, n)))
+                        Value::Object(Some(self.new_object_in(c, n, outer)))
                     }
                     None => Value::Object(None),
                 }

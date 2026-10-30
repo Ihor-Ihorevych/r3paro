@@ -3,7 +3,10 @@
 //!
 //! The world lives in `Vm::ext`; natives reach it with `world(vm)`.
 
+pub mod collision;
+pub mod input;
 pub mod natives;
+pub mod physics;
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -36,6 +39,8 @@ pub struct World {
     pub errors: Vec<String>,
     pub spawned: usize,
     pub config: hp3_core::Config,
+    pub input: input::Input,
+    pub collision: collision::Collision,
 }
 
 /// The world stored in the VM. Panics if no level is loaded.
@@ -78,6 +83,9 @@ fn instantiate(vm: &mut Vm<'_>, pkg: &Rc<Package>, index: usize) -> Option<ObjId
     let e = vm.db.objects.get_mut(id);
     e.class = Some(class);
     e.kind = ObjKind::Instance { values, state: None };
+    let outer = pkg.exports[index].outer;
+    let outer = if outer.is_none() { None } else { vm.db.resolve_obj(pkg, outer) };
+    vm.set_intrinsics(id, outer);
     Some(id)
 }
 
@@ -105,6 +113,7 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Res
     natives::register(vm);
     // Every scripted object of the map, so references between them resolve to live instances.
     let mut level_order = Vec::new();
+    let mut level_model = None;
     for i in 0..map.exports.len() {
         if map.exports[i].class.is_none() {
             continue;
@@ -122,6 +131,7 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Res
             let mut r = hp3_package::Reader::with_base(o.tail, base);
             if let Some(Ok(Asset::Level(level))) = hp3_assets::read_native("Level", map, &mut r) {
                 level_order = level.actors.clone();
+                level_model = Some(level.model);
             }
         }
         instantiate(vm, map, i);
@@ -153,8 +163,12 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Res
         slots: HashMap::new(),
         errors: Vec::new(),
         spawned: 0,
+        input: input::Input::from_config(&config),
+        collision: collision::Collision::default(),
         config,
     }));
+    let collision = build_collision(vm, map, level_model, &actors);
+    world(vm).collision = collision;
     // The game exists before the level's actors begin play; they read Level.Game.
     if let Some(gc) = game_class.and_then(|g| find_object(vm, g)) {
         let game = natives::spawn(vm, level_info, &[Value::Object(Some(gc))])?.as_obj();
@@ -181,8 +195,11 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Res
         let pc = fire(vm, g, "Login", &mut args).as_obj();
         if let Some(pc) = pc {
             world(vm).player = Some(pc);
+            // The engine gives the local player's controller its input object.
+            fire(vm, pc, "InitInputSystem", &mut []);
             fire(vm, g, "PostLogin", &mut [Value::Object(Some(pc))]);
         }
+        follow_player(vm);
     }
     Ok(())
 }
@@ -198,6 +215,13 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         let t = world(vm).time;
         set(vm, li, "TimeSeconds", Value::Float(t));
     }
+    // The player's controller reads input and moves first, as the local player does.
+    follow_player(vm);
+    if let Some(pc) = world(vm).player {
+        input::apply(vm, pc);
+        fire(vm, pc, "PlayerTick", &mut [Value::Float(dt)]);
+    }
+    physics::step(vm, dt);
     for &a in &actors {
         if vm.db.objects.get(a).deleted {
             continue;
@@ -232,6 +256,104 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
             }
         }
     }
+}
+
+/// Keeps `World::player` on the controller that possesses the player's pawn: HP3 hands the pawn to another
+/// controller after login, which then needs its input object.
+fn follow_player(vm: &mut Vm<'_>) {
+    let Some(pc) = world(vm).player else { return };
+    let Some(pawn) = get(vm, pc, "Pawn").as_obj() else { return };
+    let Some(owner) = get(vm, pawn, "Controller").as_obj() else { return };
+    if owner == pc || vm.db.objects.get(owner).deleted {
+        return;
+    }
+    let Some(pcc) = vm.db.find("PlayerController") else { return };
+    let is_player = vm.db.objects.get(owner).class.is_some_and(|c| vm.is_child_of(c, pcc));
+    if is_player {
+        world(vm).player = Some(owner);
+        if get(vm, owner, "PlayerInput").as_obj().is_none() {
+            fire(vm, owner, "InitInputSystem", &mut []);
+        }
+    }
+}
+
+/// Decodes the native data of an export with `hp3-assets`.
+fn native_asset(map: &Package, index: usize, chain: &[String]) -> Option<Asset> {
+    let o = object::read_export(map, index, chain).ok()?;
+    let base = map.exports[index].serial_offset + map.exports[index].serial_size - o.tail.len();
+    let mut r = hp3_package::Reader::with_base(o.tail, base);
+    hp3_assets::read_native(o.native_class, map, &mut r)?.ok()
+}
+
+fn vec_of(v: &Value) -> glam::Vec3 {
+    physics::vec(v)
+}
+
+/// Collision geometry of a level: its BSP, the triangles of blocking static meshes, and terrain.
+fn build_collision(vm: &mut Vm<'_>, map: &Rc<Package>, model: Option<ObjRef>, actors: &[ObjId]) -> collision::Collision {
+    use glam::{Mat3, Vec3};
+    let model = model.and_then(|m| vm.db.set.resolve(map, m)).and_then(|(p, i)| {
+        let chain = vm.db.set.export_chain(&p, i);
+        match native_asset(&p, i, &chain)? {
+            Asset::Model(m) => Some(Rc::new(*m)),
+            _ => None,
+        }
+    });
+    let mut col = collision::Collision::new(model);
+    for &a in actors {
+        let mesh = get(vm, a, "StaticMesh").as_obj();
+        let blocks = get(vm, a, "bCollideActors").as_bool()
+            && (get(vm, a, "bBlockActors").as_bool() || get(vm, a, "bBlockPlayers").as_bool());
+        if let Some(mesh) = mesh.filter(|_| blocks) {
+            let Some((mkey_pkg, mkey_idx)) = vm.db.objects.get(mesh).key.clone() else { continue };
+            let Ok(mp) = vm.db.set.get(&mkey_pkg) else { continue };
+            let chain = vm.db.set.export_chain(&mp, mkey_idx);
+            let Some(Asset::StaticMesh(sm)) = native_asset(&mp, mkey_idx, &chain) else { continue };
+            let loc = vec_of(&get(vm, a, "Location"));
+            let rot = get(vm, a, "Rotation");
+            let r: Vec<i32> = rot.fields().iter().map(Value::as_int).collect();
+            let axes = hp3_script::natives::rot_axes([r.first().copied().unwrap_or(0), r.get(1).copied().unwrap_or(0), r.get(2).copied().unwrap_or(0)]);
+            let basis = Mat3::from_cols(Vec3::from(axes[0]), Vec3::from(axes[1]), Vec3::from(axes[2]));
+            let scale = get(vm, a, "DrawScale").as_float();
+            let scale = if scale == 0.0 { 1.0 } else { scale };
+            let s3 = match get(vm, a, "DrawScale3D") {
+                Value::Struct(f) if f.len() == 3 => vec_of(&Value::Struct(f)),
+                _ => Vec3::ONE,
+            };
+            let to_world = |v: &hp3_assets::Vec3| loc + basis * (Vec3::new(v.x, v.y, v.z) * s3 * scale);
+            let pos: Vec<Vec3> = sm.vertices.iter().map(|v| to_world(&v.position)).collect();
+            if !sm.collision_triangles.is_empty() {
+                for t in &sm.collision_triangles {
+                    let [a0, b0, c0] = t.vertices.map(|i| pos.get(i as usize).copied().unwrap_or(Vec3::ZERO));
+                    col.add_triangle([a0, b0, c0], Some(a));
+                }
+            } else {
+                for t in sm.indices.chunks_exact(3) {
+                    let [a0, b0, c0] = [t[0], t[1], t[2]].map(|i| pos.get(i as usize).copied().unwrap_or(Vec3::ZERO));
+                    col.add_triangle([a0, b0, c0], Some(a));
+                }
+            }
+        }
+    }
+    // Terrain: two triangles per heightmap quad, in world space.
+    for i in 0..map.exports.len() {
+        if !map.export_class_name(i).eq_ignore_ascii_case("TerrainInfo") {
+            continue;
+        }
+        let chain = vm.db.set.export_chain(map, i);
+        let Some(Asset::Terrain(t)) = native_asset(map, i, &chain) else { continue };
+        let (w, h) = (t.heightmap_x as usize, t.heightmap_y as usize);
+        let v = |x: usize, y: usize| t.vertices.get(y * w + x).map(|p| Vec3::new(p.x, p.y, p.z));
+        for y in 0..h.saturating_sub(1) {
+            for x in 0..w.saturating_sub(1) {
+                if let (Some(a0), Some(b0), Some(c0), Some(d0)) = (v(x, y), v(x + 1, y), v(x, y + 1), v(x + 1, y + 1)) {
+                    col.add_triangle([a0, b0, d0], None);
+                    col.add_triangle([a0, d0, c0], None);
+                }
+            }
+        }
+    }
+    col
 }
 
 /// Finds an object by its full path (`Package.Group.Name`), loading classes as needed.

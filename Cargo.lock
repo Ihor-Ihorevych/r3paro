@@ -502,6 +502,7 @@ dependencies = [
 name = "hp3-run"
 version = "0.1.0"
 dependencies = [
+ "glam",
  "hp3-core",
  "hp3-package",
  "hp3-script",
@@ -531,6 +532,7 @@ dependencies = [
 name = "hp3-world"
 version = "0.1.0"
 dependencies = [
+ "glam",
  "hp3-assets",
  "hp3-core",
  "hp3-package",
