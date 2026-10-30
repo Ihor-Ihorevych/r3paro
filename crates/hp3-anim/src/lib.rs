@@ -242,22 +242,10 @@ fn sampled(set: &AnimSet, map: &[Option<usize>], seq: usize, frame: f32, looping
     {
         let length = motion.track_time.max(1.0);
         let t = (frame / s.frames as f32).clamp(0.0, 1.0) * length;
-        // Walking and running cycles sway their root bone from side to side, in place; the character's
-        // physics moves it, so the root keeps the cycle's average horizontal position.
-        let locomotion = s.name.starts_with("run") || s.name.starts_with("walk");
         for (bone, anim_bone) in map.iter().enumerate() {
             let Some(ab) = anim_bone else { continue };
             if let Some(track) = motion.tracks.get(*ab) {
                 out[bone] = sample_track(track, t, length, looping);
-                if bone == 0
-                    && locomotion
-                    && !track.positions.is_empty()
-                    && let Some(p) = &mut out[bone]
-                {
-                    let n = track.positions.len() as f32;
-                    p.position.x = track.positions.iter().map(|v| v.x).sum::<f32>() / n;
-                    p.position.y = track.positions.iter().map(|v| v.y).sum::<f32>() / n;
-                }
             }
         }
     }

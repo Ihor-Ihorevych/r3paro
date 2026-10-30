@@ -27,8 +27,10 @@ This is permitted by `CLEANROOM.md` (item 5) and confirmed by the maintainer. It
   FinishRotation waits.
 - Phase B (done): tweened animation changes, one-shots hold their last pose, TweenAnim, FinishAnim by channel,
   AnimEnd to one receiver.
-- Next: animation notifies and the HP3 channel natives; movement animation on channels 2-11 (replacing
-  `update_movement`); walking rules (accel cap, friction, sub-steps, ledges, floor `Base`); falling and landing
+- Movement animation (done): the engine keeps the walk/run/strafe channels (4-7) and turn-in-place channels (2-3)
+  playing and fades them by acceleration direction at one shared pace; it sends the script `ChangeAnimation`,
+  `PlayJump`, `PlayFalling` and `PlayLandingAnimation`. The invented root lock and the `SetPhysics` hack are gone.
+- Next: animation notifies and the HP3 channel natives, AnimEnd on every loop of a channel; walking rules (accel cap, friction, sub-steps, ledges, floor `Base`); falling and landing
   events; collision rules (`bBlockActors` both ways, cylinders, `Bump`, `Attach`/`Detach`/`BaseChange`); movers
   (OldPos interpolation, push/carry, `KeyFrameReached`); `Mount` ledge climbing; MoveTo arrival and slow-down.
 

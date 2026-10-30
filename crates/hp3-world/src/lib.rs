@@ -620,7 +620,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     mark(vm, "actors");
     physics::update_touching(vm);
     mark(vm, "touching");
-    anim::update_movement(vm);
+    anim::update_movement(vm, dt);
     mark(vm, "movement anims");
     anim::update_attachments(vm);
     mark(vm, "animation");

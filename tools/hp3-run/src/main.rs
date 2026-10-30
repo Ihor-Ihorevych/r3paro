@@ -285,8 +285,9 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             let vyaw = (vel.y.atan2(vel.x) * 65536.0 / std::f32::consts::TAU).round() as i32 & 0xFFFF;
             let anim = hp3_world::get(&mut vm, p, "AnimSequence").as_name();
             let cam_yaw = hp3_world::get(&mut vm, pc, "Camera").as_obj().map(|c| yaw(hp3_world::get(&mut vm, c, "rCurrRotation"))).unwrap_or(0);
+            let phys = hp3_world::get(&mut vm, p, "Physics").as_byte();
             println!(
-                "pawnlog {frame}: pawn yaw {} vel yaw {vyaw} speed {:.0} view yaw {} camera yaw {cam_yaw} anim {}",
+                "pawnlog {frame}: phys {phys} pawn yaw {} vel yaw {vyaw} speed {:.0} view yaw {} camera yaw {cam_yaw} anim {}",
                 yaw(pr),
                 vel.truncate().length(),
                 yaw(cr),

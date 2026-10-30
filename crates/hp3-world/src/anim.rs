@@ -55,6 +55,8 @@ pub struct ActorAnim {
     pub channels: Vec<Channel>,
     /// Bone controllers (`SetBoneRotation`): lower-case bone name to (pitch, yaw, roll) and weight.
     pub bone_turns: Vec<(String, [i32; 3], f32)>,
+    /// State of the movement-animation driver for this pawn.
+    pub movement: MovementState,
 }
 
 /// An actor's bone controller rotations as (bone index, matrix) for a skeleton.
@@ -355,10 +357,42 @@ pub fn tick_actor(vm: &mut Vm<'_>, actor: ObjId, dt: f32) {
     }
 }
 
-/// Pawns with `bPhysicsAnimUpdate`: the movement animation follows velocity (forward, back, left or right of
-/// `MovementAnims`, at speed / `BaseMovementRate`); standing still hands over to the script's `PlayWaiting`,
-/// falling to `PlayFalling`.
-pub fn update_movement(vm: &mut Vm<'_>) {
+/// Animation channels the movement driver owns (the script's own animations use channel 0 and 12 upward).
+const TURN_RIGHT_CH: usize = 2;
+const TURN_LEFT_CH: usize = 3;
+const MOVE_FIRST_CH: usize = 4;
+const MOVE_LAST_CH: usize = 7;
+
+/// What the movement driver remembers about a pawn between ticks.
+#[derive(Default)]
+pub struct MovementState {
+    started: bool,
+    old_physics: u8,
+    was_on_ground: bool,
+    was_crouched: bool,
+    was_walking: bool,
+    was_moving: bool,
+    old_yaw: f32,
+}
+
+fn fade_channels(vm: &mut Vm<'_>, a: ObjId, from: usize, to_inclusive: usize, target: f32, per_second: f32) {
+    for ci in from..=to_inclusive {
+        let ch = channel_mut(vm, a, ci);
+        ch.target_alpha = target;
+        ch.blend_rate = per_second;
+    }
+}
+
+fn natural_rate(anims: &AnimSet, vm: &mut Vm<'_>, a: ObjId, ci: usize) -> f32 {
+    let seq = world(vm).anim.actors.get(&a).and_then(|x| x.channels.get(ci)).and_then(|c| c.sequence);
+    seq.and_then(|s| anims.sequences.get(s)).map_or(30.0, |s| s.rate.max(1.0))
+}
+
+/// Pawns whose movement animation the engine drives (`bPhysicsAnimUpdate`): the walk/run animations of the four
+/// directions and the turn-in-place animations are kept playing on their own channels and faded in and out
+/// by how the pawn is moving; the script's own animation (channel 0) is left alone. The script is told of
+/// the changes it should react to (`ChangeAnimation`, `PlayJump`, `PlayFalling`, `PlayLandingAnimation`).
+pub fn update_movement(vm: &mut Vm<'_>, dt: f32) {
     let Some(pawn_class) = vm.db.find("Pawn") else { return };
     let actors = world(vm).actors.clone();
     for a in actors {
@@ -366,42 +400,187 @@ pub fn update_movement(vm: &mut Vm<'_>) {
         if vm.db.objects.get(a).deleted || !vm.is_child_of(class, pawn_class) || !get(vm, a, "bPhysicsAnimUpdate").as_bool() {
             continue;
         }
-        let Some(anims) = set_of(vm, a) else { continue };
-        let physics = get(vm, a, "Physics").as_byte();
-        let vel = crate::physics::vec(&get(vm, a, "Velocity"));
-        let current = world(vm).anim.actors.get(&a).and_then(|x| x.channels.first().cloned()).unwrap_or_default();
-        let movement: Vec<Name> = (0..4).map(|i| get_indexed(vm, a, "MovementAnims", i).as_name()).collect();
-        let current_name = current.sequence.map(|s| anims.sequences[s].name.clone());
-        let in_movement = current_name.as_ref().is_some_and(|n| movement.iter().any(|m| vm.db.names.get(*m).eq_ignore_ascii_case(n)));
-        match physics {
-            crate::physics::PHYS_WALKING => {
-                let speed = (vel.x * vel.x + vel.y * vel.y).sqrt();
-                if speed > 10.0 {
-                    let yaw = get(vm, a, "Rotation").fields().get(1).map(Value::as_int).unwrap_or(0) as f32;
-                    let k = std::f32::consts::TAU / 65536.0;
-                    let fwd = glam::Vec2::new((yaw * k).cos(), (yaw * k).sin());
-                    let dir = glam::Vec2::new(vel.x, vel.y) / speed;
-                    let (f, r) = (dir.dot(fwd), fwd.perp_dot(dir));
-                    let index = if f.abs() >= r.abs() { if f >= 0.0 { 0 } else { 1 } } else if r > 0.0 { 2 } else { 3 };
-                    let seq = movement[index];
-                    let base = get(vm, a, "BaseMovementRate").as_float().max(1.0);
-                    if seq != Name::NONE {
-                        play(vm, a, seq, speed / base, 0.1, 0, true);
-                    }
-                } else if in_movement || current.sequence.is_none() {
-                    fire(vm, a, "PlayWaiting", &mut []);
-                }
+        if get(vm, a, "bTearOff").as_bool() {
+            continue;
+        }
+        drive_movement(vm, a, dt.max(1.0 / 240.0));
+    }
+}
+
+fn drive_movement(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
+    let Some(anims) = set_of(vm, a) else { return };
+    let blend_time = get(vm, a, "BlendChangeTime").as_float().max(0.02);
+    let per_second = 1.0 / blend_time;
+    let movement: Vec<Name> = (0..4).map(|i| get_indexed(vm, a, "MovementAnims", i).as_name()).collect();
+    let turn_right = get(vm, a, "TurnRightAnim").as_name();
+    let turn_left = get(vm, a, "TurnLeftAnim").as_name();
+
+    // First time: get the movement channels playing, invisible until something fades them in.
+    if !world(vm).anim.actors.get(&a).is_some_and(|x| x.movement.started) {
+        for (ci, name) in [(TURN_RIGHT_CH, turn_right), (TURN_LEFT_CH, turn_left)].into_iter().chain((0..4).map(|i| (MOVE_FIRST_CH + i, movement[i]))) {
+            if name != Name::NONE {
+                play(vm, a, name, 1.0, 0.1, ci, true);
             }
-            crate::physics::PHYS_FALLING if in_movement || current.sequence.is_none() => {
+            let ch = channel_mut(vm, a, ci);
+            ch.alpha = 0.0;
+            ch.target_alpha = 0.0;
+            ch.scripted_blend = true;
+        }
+        let yaw = get(vm, a, "Rotation").fields().get(1).map_or(0, Value::as_int) as f32;
+        let physics = get_physics(vm, a);
+        let m = &mut world(vm).anim.actors.entry(a).or_default().movement;
+        m.started = true;
+        m.old_physics = physics;
+        m.was_on_ground = physics == crate::physics::PHYS_WALKING;
+        m.old_yaw = yaw;
+    }
+
+    // Changes of state the script should know about.
+    let physics = get_physics(vm, a);
+    let crouched = get(vm, a, "bIsCrouched").as_bool();
+    let walking = get(vm, a, "bIsWalking").as_bool();
+    let vel = crate::physics::vec(&get(vm, a, "Velocity"));
+    let (old_physics, was_on_ground, was_crouched, was_walking) = {
+        let m = &world(vm).anim.actors.entry(a).or_default().movement;
+        (m.old_physics, m.was_on_ground, m.was_crouched, m.was_walking)
+    };
+    let falling = physics == crate::physics::PHYS_FALLING;
+    if crouched != was_crouched || walking != was_walking {
+        fire(vm, a, "ChangeAnimation", &mut []);
+    }
+    if (old_physics == crate::physics::PHYS_FALLING) != falling {
+        if falling {
+            if was_on_ground && vel.z > 0.0 {
+                fire(vm, a, "PlayJump", &mut []);
+            } else {
                 fire(vm, a, "PlayFalling", &mut []);
             }
-            // Pawns parked without physics (inactive NPCs) still stand idle.
-            _ if current.sequence.is_none() => {
-                fire(vm, a, "PlayWaiting", &mut []);
-            }
-            _ => {}
+        } else if physics == crate::physics::PHYS_WALKING {
+            fire(vm, a, "PlayLandingAnimation", &mut [Value::Float(vel.z)]);
         }
     }
+    if physics != old_physics && !falling {
+        fire(vm, a, "ChangeAnimation", &mut []);
+    }
+    {
+        let m = &mut world(vm).anim.actors.entry(a).or_default().movement;
+        m.old_physics = physics;
+        m.was_on_ground = physics == crate::physics::PHYS_WALKING;
+        m.was_crouched = crouched;
+        m.was_walking = walking;
+    }
+
+    // Nothing of this while falling, or just after the script asked for a pause in blending.
+    let now = world(vm).time;
+    if falling || now < get(vm, a, "MovementBlendStartTime").as_float() {
+        fade_channels(vm, a, TURN_RIGHT_CH, MOVE_LAST_CH, 0.0, per_second);
+        return;
+    }
+
+    let accel = crate::physics::vec(&get(vm, a, "Acceleration")) + crate::physics::vec(&get(vm, a, "ConstantAcceleration"));
+    let flat_speed2 = vel.x * vel.x + vel.y * vel.y;
+    if accel.length_squared() > 1e-6 && flat_speed2 >= 25.0 {
+        fade_channels(vm, a, TURN_RIGHT_CH, TURN_LEFT_CH, 0.0, per_second);
+        world(vm).anim.actors.entry(a).or_default().movement.was_moving = true;
+        // Where the pawn is accelerating, relative to where it faces.
+        let yaw = get(vm, a, "Rotation").fields().get(1).map_or(0, Value::as_int) as f32 * std::f32::consts::TAU / 65536.0;
+        let look = glam::Vec3::new(yaw.cos(), yaw.sin(), 0.0);
+        let left = look.cross(glam::Vec3::Z).normalize_or_zero();
+        let dir = accel.normalize_or_zero();
+        let (forward_pct, left_pct) = (look.dot(dir), left.dot(dir));
+        let mut forward_sq: f32 = if forward_pct != 0.0 { 1.0 } else { 0.0 };
+        let mut left_sq = left_pct * left_pct;
+        if forward_sq > 0.0 && left_sq > 0.1 {
+            let bias = get(vm, a, if forward_pct > 0.0 { "ForwardStrafeBias" } else { "BackwardStrafeBias" }).as_float();
+            left_sq += bias * (1.0 - left_sq);
+        }
+        forward_sq = forward_sq.min(1.0);
+        left_sq = left_sq.min(1.0);
+
+        // The channels in use, and their sequences kept current (a change of the script's movement set fades over).
+        let (fwd_ch, other_fwd) = if forward_pct >= 0.0 { (MOVE_FIRST_CH, MOVE_FIRST_CH + 1) } else { (MOVE_FIRST_CH + 1, MOVE_FIRST_CH) };
+        let (side_ch, other_side) = if left_pct >= 0.0 { (MOVE_FIRST_CH + 2, MOVE_FIRST_CH + 3) } else { (MOVE_FIRST_CH + 3, MOVE_FIRST_CH + 2) };
+        for i in 0..4 {
+            let ci = MOVE_FIRST_CH + i;
+            let current = world(vm).anim.actors.get(&a).and_then(|x| x.channels.get(ci)).and_then(|c| c.sequence);
+            let want = anims.find(vm.db.names.get(movement[i]));
+            if movement[i] != Name::NONE && want.is_some() && want != current {
+                play(vm, a, movement[i], 1.0, blend_time, ci, true);
+            }
+        }
+        // They all play at one pace: the pawn's top speed against the rate the animations were made for, at the
+        // natural frame rate of the animations in use.
+        let ground = get(vm, a, "GroundSpeed").as_float();
+        let top = if walking { ground * get(vm, a, "WalkingPct").as_float().max(0.05) } else { ground };
+        let base_rate = get(vm, a, "BaseMovementRate").as_float().max(1.0);
+        let mut frame_rate = 0.0;
+        let mut used = 0.0;
+        if forward_pct != 0.0 {
+            frame_rate += natural_rate(&anims, vm, a, fwd_ch);
+            used += 1.0;
+        }
+        if left_pct != 0.0 {
+            frame_rate += natural_rate(&anims, vm, a, side_ch);
+            used += 1.0;
+        }
+        let pace = if used > 0.0 { top / base_rate * frame_rate / used } else { 0.0 };
+        fade_channels(vm, a, fwd_ch, fwd_ch, forward_sq, per_second);
+        fade_channels(vm, a, other_fwd, other_fwd, 0.0, per_second);
+        fade_channels(vm, a, side_ch, side_ch, left_sq, per_second);
+        fade_channels(vm, a, other_side, other_side, 0.0, per_second);
+        // Keep them all on the same point of the cycle as the first.
+        let lead = world(vm).anim.actors.get(&a).and_then(|x| x.channels.get(MOVE_FIRST_CH)).map(|c| (c.frame, c.sequence)).unwrap_or((0.0, None));
+        let lead_fraction = lead.1.and_then(|s| anims.sequences.get(s)).map_or(0.0, |s| lead.0 / s.frames.max(1) as f32);
+        for ci in MOVE_FIRST_CH..=MOVE_LAST_CH {
+            let frames = world(vm).anim.actors.get(&a).and_then(|x| x.channels.get(ci)).and_then(|c| c.sequence).and_then(|s| anims.sequences.get(s)).map(|s| s.frames);
+            let ch = channel_mut(vm, a, ci);
+            ch.rate = pace;
+            ch.playing = true;
+            if ci != MOVE_FIRST_CH
+                && let Some(n) = frames
+            {
+                ch.frame = lead_fraction * n.max(1) as f32;
+            }
+        }
+        return;
+    }
+
+    // Standing still: the script's animation shows through; the pawn may turn on the spot.
+    if std::mem::take(&mut world(vm).anim.actors.entry(a).or_default().movement.was_moving) && !falling {
+        fire(vm, a, "ChangeAnimation", &mut []);
+    }
+    fade_channels(vm, a, MOVE_FIRST_CH, MOVE_LAST_CH, 0.0, per_second);
+    let yaw = (get(vm, a, "Rotation").fields().get(1).map_or(0, Value::as_int) & 0xFFFF) as f32;
+    let old_yaw = world(vm).anim.actors.entry(a).or_default().movement.old_yaw;
+    let mut turned = yaw - old_yaw;
+    if turned > 32768.0 {
+        turned -= 65536.0;
+    } else if turned < -32768.0 {
+        turned += 65536.0;
+    }
+    world(vm).anim.actors.entry(a).or_default().movement.old_yaw = yaw;
+    if physics == crate::physics::PHYS_WALKING || physics == crate::physics::PHYS_SWIMMING {
+        let turn_rate = turned / dt;
+        for (ci, name, active) in [(TURN_RIGHT_CH, turn_right, turn_rate > 1000.0), (TURN_LEFT_CH, turn_left, turn_rate < -1000.0)] {
+            if !active || name == Name::NONE {
+                fade_channels(vm, a, ci, ci, 0.0, per_second);
+                continue;
+            }
+            let current = world(vm).anim.actors.get(&a).and_then(|x| x.channels.get(ci)).and_then(|c| c.sequence);
+            if anims.find(vm.db.names.get(name)) != current {
+                play(vm, a, name, 1.0, 0.0, ci, true);
+            }
+            let natural = natural_rate(&anims, vm, a, ci);
+            fade_channels(vm, a, ci, ci, 1.0, per_second);
+            let ch = channel_mut(vm, a, ci);
+            ch.rate = natural * turn_rate.abs() / 16384.0;
+            ch.playing = true;
+        }
+    }
+}
+
+fn get_physics(vm: &mut Vm<'_>, a: ObjId) -> u8 {
+    get(vm, a, "Physics").as_byte()
 }
 
 /// Element `index` of a static array property.

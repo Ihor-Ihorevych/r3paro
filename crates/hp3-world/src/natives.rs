@@ -220,16 +220,8 @@ pub fn register(vm: &mut Vm<'_>) {
     });
     vm.register("Actor.SetPhysics", |vm, this, a| {
         if let Some(o) = this {
-            let (old, new) = (get(vm, o, "Physics").as_byte(), a[0].as_byte());
-            set(vm, o, "Physics", Value::Byte(new));
-            // A pawn that starts to fall is told so (its script plays the falling or jumping animation).
-            if new == crate::physics::PHYS_FALLING
-                && old != new
-                && let Some(pawn) = vm.db.find("Pawn")
-                && vm.db.objects.get(o).class.is_some_and(|c| vm.is_child_of(c, pawn))
-            {
-                fire(vm, o, "Falling", &mut []);
-            }
+            // The movement-animation driver notices a change to falling and tells the script.
+            set(vm, o, "Physics", Value::Byte(a[0].as_byte()));
         }
         Ok(Value::Empty)
     });
