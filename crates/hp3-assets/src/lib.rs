@@ -19,6 +19,7 @@ pub enum Asset {
     Sound(sound::Sound),
     StaticMesh(Box<static_mesh::StaticMesh>),
     Polys(model::Polys),
+    Model(Box<model::Model>),
 }
 
 /// Decodes the native data of `class` from `r`. `None` when the class's layout is not known yet.
@@ -29,6 +30,7 @@ pub fn read_native(class: &str, pkg: &Package, r: &mut Reader<'_>) -> Option<Res
         "Sound" => sound::read_sound(pkg, r).map(Asset::Sound),
         "StaticMesh" => static_mesh::read_static_mesh(r).map(|m| Asset::StaticMesh(Box::new(m))),
         "Polys" => model::read_polys(r).map(Asset::Polys),
+        "Model" => model::read_model(r).map(|m| Asset::Model(Box::new(m))),
         _ => return None,
     })
 }
