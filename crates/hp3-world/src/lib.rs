@@ -614,6 +614,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
             }
         }
         nav::tick_controller(vm, a, dt);
+        nav::face_focus(vm, a);
         physics::step_actor(vm, a, dt);
     }
     mark(vm, "actors");

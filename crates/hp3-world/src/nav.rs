@@ -14,7 +14,7 @@ use hp3_script::vm::Latent;
 use hp3_script::{ObjId, Value, Vm};
 
 use crate::physics::{vec, value};
-use crate::{get, set, slot, world};
+use crate::{fire, get, set, slot, world};
 
 struct Edge {
     to: usize,
@@ -223,11 +223,34 @@ fn find_path(vm: &mut Vm<'_>, controller: ObjId, goal_at: Vec3, goal: Option<Obj
     Some(if at_first && path.len() > 1 { path[1] } else { first })
 }
 
-fn start_move(vm: &mut Vm<'_>, controller: ObjId, target: Option<ObjId>, destination: Vec3) {
+/// Starts a move. `focus` is what the pawn looks at on the way (the move target itself when none is given);
+/// `walk` is `bShouldWalk`, passed to the pawn's `SetWalking` when the script supplied it.
+fn start_move(vm: &mut Vm<'_>, controller: ObjId, target: Option<ObjId>, destination: Vec3, focus: Option<ObjId>, walk: Option<bool>) {
     let Some(pawn) = get(vm, controller, "Pawn").as_obj() else { return };
     let from = vec(&get(vm, pawn, "Location"));
-    let speed = get(vm, pawn, "GroundSpeed").as_float().max(50.0);
-    let timer = 1.0 + 2.0 * from.distance(destination) / speed;
+    // The pawn looks at its view focus, or else where it is going.
+    let look = focus.or(target);
+    set(vm, controller, "Focus", Value::Object(look));
+    if look.is_none() {
+        set(vm, controller, "FocalPoint", value(destination));
+    }
+    if let Some(w) = walk {
+        fire(vm, pawn, "SetWalking", &mut [Value::Bool(w)]);
+    }
+    // Give up after the time the walk should take, with some slack: half a second, plus twice the walking
+    // time (more when it walks slowly), at 0.6 of ground speed at the pawn's desired speed.
+    let ground = get(vm, pawn, "GroundSpeed").as_float().max(50.0);
+    let desired = match get(vm, pawn, "DesiredSpeed").as_float() {
+        d if d > 0.0 => d,
+        _ => 1.0,
+    };
+    let extra = if walk == Some(true) {
+        let pct = get(vm, pawn, "WalkingPct").as_float();
+        if pct > 0.0 { (1.0 / pct).max(2.0) } else { 2.0 }
+    } else {
+        2.0
+    };
+    let timer = 0.5 + extra * from.distance(destination) / (desired * 0.6 * ground);
     set(vm, controller, "MoveTarget", Value::Object(target));
     set(vm, controller, "Destination", value(destination));
     set(vm, controller, "MoveTimer", Value::Float(timer));
@@ -238,7 +261,7 @@ fn start_move(vm: &mut Vm<'_>, controller: ObjId, target: Option<ObjId>, destina
 /// Steers pawns of controllers with a move in progress; ends moves that arrived or ran out of time.
 pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     let mut controllers: Vec<ObjId> = world(vm).nav.moves.keys().copied().collect();
-    controllers.extend(vm.latent.iter().filter(|(_, l)| matches!(l, Latent::Other("landing"))).map(|(o, _)| *o));
+    controllers.extend(vm.latent.iter().filter(|(_, l)| matches!(l, Latent::Other("landing") | Latent::Other("rotation"))).map(|(o, _)| *o));
     for c in controllers {
         tick_controller(vm, c, dt);
     }
@@ -247,6 +270,9 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
 /// Steers one controller's pawn along its move in progress, and ends its landing wait.
 pub fn tick_controller(vm: &mut Vm<'_>, only: ObjId, dt: f32) {
     // WaitForLanding ends when the pawn is no longer falling.
+    if matches!(vm.latent.get(&only), Some(Latent::Other("rotation"))) && rotation_done(vm, only) {
+        vm.finish_latent(only);
+    }
     let waiting: Vec<ObjId> = vm.latent.iter().filter(|(o, l)| **o == only && matches!(l, Latent::Other("landing"))).map(|(o, _)| *o).collect();
     for c in waiting {
         let falling = get(vm, c, "Pawn").as_obj().is_some_and(|p| get(vm, p, "Physics").as_byte() == crate::physics::PHYS_FALLING);
@@ -286,12 +312,6 @@ pub fn tick_controller(vm: &mut Vm<'_>, only: ObjId, dt: f32) {
                     let dir = delta.normalize();
                     let accel = get(vm, p, "AccelRate").as_float().max(100.0);
                     set(vm, p, "Acceleration", value(dir * accel));
-                    let yaw = (dir.y.atan2(dir.x) * 65536.0 / std::f32::consts::TAU).round() as i32;
-                    let mut rot: Vec<Value> = get(vm, p, "Rotation").fields().to_vec();
-                    if rot.len() == 3 {
-                        rot[1] = Value::Int(yaw);
-                        set(vm, p, "Rotation", Value::Struct(rot.into()));
-                    }
                     false
                 }
             }
@@ -336,7 +356,9 @@ pub fn register(vm: &mut Vm<'_>) {
     // MoveTo(vector NewDestination, optional Actor ViewFocus, optional bool bShouldWalk)
     vm.register("Controller.MoveTo", |vm, this, a| {
         if let Some(c) = this {
-            start_move(vm, c, None, vec(&a[0]));
+            let focus = a.get(1).and_then(Value::as_obj);
+            let walk = a.get(2).filter(|v| !matches!(v, Value::Empty)).map(Value::as_bool);
+            start_move(vm, c, None, vec(&a[0]), focus, walk);
         }
         Ok(Value::Empty)
     });
@@ -344,7 +366,9 @@ pub fn register(vm: &mut Vm<'_>) {
     vm.register("Controller.MoveToward", |vm, this, a| {
         if let (Some(c), Some(t)) = (this, a.first().and_then(Value::as_obj)) {
             let at = vec(&get(vm, t, "Location"));
-            start_move(vm, c, Some(t), at);
+            let focus = a.get(1).and_then(Value::as_obj);
+            let walk = a.get(4).filter(|v| !matches!(v, Value::Empty)).map(Value::as_bool);
+            start_move(vm, c, Some(t), at, focus, walk);
         }
         Ok(Value::Empty)
     });
@@ -354,15 +378,12 @@ pub fn register(vm: &mut Vm<'_>) {
         }
         Ok(Value::Empty)
     });
-    // Turning is immediate for now: the pawn takes the controller's desired rotation.
+    // FinishRotation: wait until the pawn faces where the controller wants it to (within about 11 degrees).
     vm.register("Controller.FinishRotation", |vm, this, _a| {
         if let Some(c) = this
-            && let Some(p) = get(vm, c, "Pawn").as_obj()
+            && !rotation_done(vm, c)
         {
-            let r = get(vm, p, "DesiredRotation");
-            if matches!(r, Value::Struct(_)) {
-                set(vm, p, "Rotation", r);
-            }
+            vm.latent.insert(c, Latent::Other("rotation"));
         }
         Ok(Value::Empty)
     });
@@ -375,4 +396,53 @@ pub fn register(vm: &mut Vm<'_>) {
         }
         Ok(Value::Empty)
     });
+}
+
+/// Whether the controller's pawn is within 2000 units of yaw (about 11 degrees) of its desired rotation.
+fn rotation_done(vm: &mut Vm<'_>, c: ObjId) -> bool {
+    let Some(p) = get(vm, c, "Pawn").as_obj() else { return true };
+    let yaw = |v: Value| v.fields().get(1).map_or(0, Value::as_int);
+    let (cur, want) = (yaw(get(vm, p, "Rotation")), yaw(get(vm, p, "DesiredRotation")));
+    let mut d = (want - cur) & 0xFFFF;
+    if d > 32768 {
+        d = 65536 - d;
+    }
+    d <= 2000
+}
+
+/// Points an AI controller's pawn at what it focuses on: each tick its `DesiredRotation` becomes the direction
+/// to the focus actor (or the focal point), level while the pawn walks; the controller then takes the pawn's
+/// rotation. The player's controller is left alone (its script sets its own view).
+pub fn face_focus(vm: &mut Vm<'_>, c: ObjId) {
+    if world(vm).player == Some(c) {
+        return;
+    }
+    let Some(p) = get(vm, c, "Pawn").as_obj() else { return };
+    let at = vec(&get(vm, p, "Location"));
+    let target = match get(vm, c, "Focus").as_obj() {
+        Some(f) => vec(&get(vm, f, "Location")),
+        None => {
+            let fp = vec(&get(vm, c, "FocalPoint"));
+            if fp == Vec3::ZERO {
+                // Nothing to look at: keep the heading.
+                let r = get(vm, p, "Rotation");
+                set(vm, c, "Rotation", r);
+                return;
+            }
+            fp
+        }
+    };
+    let d = target - at;
+    if d.length_squared() > 1e-4 {
+        let k = 65536.0 / std::f32::consts::TAU;
+        let yaw = (d.y.atan2(d.x) * k).round() as i32 & 0xFFFF;
+        let pitch = if get(vm, p, "Physics").as_byte() == crate::physics::PHYS_WALKING {
+            0
+        } else {
+            (d.z.atan2(d.truncate().length()) * k).round() as i32 & 0xFFFF
+        };
+        set(vm, p, "DesiredRotation", Value::Struct(vec![Value::Int(pitch), Value::Int(yaw), Value::Int(0)].into()));
+    }
+    let r = get(vm, p, "Rotation");
+    set(vm, c, "Rotation", r);
 }

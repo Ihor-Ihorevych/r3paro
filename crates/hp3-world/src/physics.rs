@@ -484,7 +484,72 @@ pub fn step_actor(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         PHYS_PROJECTILE => projectile(vm, a, dt),
         _ => return,
     }
-    turn_to_desired(vm, a, dt);
+    if is_pawn(vm, a) {
+        pawn_rotation(vm, a, dt);
+    } else {
+        turn_to_desired(vm, a, dt);
+    }
+}
+
+fn is_pawn(vm: &mut Vm<'_>, a: ObjId) -> bool {
+    let Some(pawn) = vm.db.find("Pawn") else { return false };
+    vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, pawn))
+}
+
+/// Moves the angle `cur` toward `want` (both in Unreal's 65536 per turn) by at most `delta`, the short way round.
+pub fn fixed_turn(cur: i32, want: i32, delta: i32) -> i32 {
+    let (cur, want) = (cur & 0xFFFF, want & 0xFFFF);
+    let mut diff = (want - cur) & 0xFFFF;
+    if diff > 32768 {
+        diff -= 65536;
+    }
+    (cur + diff.clamp(-delta.abs(), delta.abs())) & 0xFFFF
+}
+
+/// How a pawn turns toward its desired rotation each tick.
+///
+/// A pawn with no controller stays as it is. The player's pawn turns only when its controller asks
+/// (`bRotateToDesired`), toward the controller's `DesiredRotation`, at twice `EnemyTurnSpeed`. Any other pawn
+/// always turns toward its own `DesiredRotation` at `RotationRate.Yaw`, up to twice that when the angle left is
+/// large. Pitch settles to level while on the floor, and roll to none.
+fn pawn_rotation(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
+    let Some(c) = get(vm, a, "Controller").as_obj() else { return };
+    let ints = |v: Value| -> [i32; 3] {
+        let f = v.fields();
+        [f.first().map_or(0, Value::as_int), f.get(1).map_or(0, Value::as_int), f.get(2).map_or(0, Value::as_int)]
+    };
+    let rot = ints(get(vm, a, "Rotation"));
+    let human = world(vm).player == Some(c);
+    let (desired, delta) = if human {
+        if !get(vm, c, "bRotateToDesired").as_bool() {
+            return;
+        }
+        let d = ints(get(vm, c, "DesiredRotation"));
+        set(vm, a, "DesiredRotation", Value::Struct(vec![Value::Int(d[0]), Value::Int(d[1]), Value::Int(0)].into()));
+        (d, (2.0 * get(vm, c, "EnemyTurnSpeed").as_float() * dt).round() as i32)
+    } else {
+        let d = ints(get(vm, a, "DesiredRotation"));
+        let rate = ints(get(vm, a, "RotationRate"))[1].max(1);
+        let mut left = ((d[1] - rot[1]) & 0xFFFF).abs();
+        if left > 32768 {
+            left = 65536 - left;
+        }
+        (d, ((2 * left).clamp(rate, 2 * rate) as f32 * dt).round() as i32)
+    };
+    let on_floor = matches!(get(vm, a, "Physics").as_byte(), PHYS_WALKING);
+    let want_pitch = if on_floor || get(vm, a, "Physics").as_byte() == PHYS_FALLING { 0 } else { desired[0] };
+    let yaw = fixed_turn(rot[1], desired[1], delta);
+    let pitch = fixed_turn(rot[0], want_pitch, delta);
+    if yaw != rot[1] & 0xFFFF || pitch != rot[0] & 0xFFFF || rot[2] != 0 {
+        set(vm, a, "Rotation", Value::Struct(vec![Value::Int(pitch), Value::Int(yaw), Value::Int(0)].into()));
+    }
+    if human {
+        // The controller's heading follows the pawn's while it is turning the pawn.
+        let mut cr = ints(get(vm, c, "Rotation"));
+        cr[1] = yaw;
+        cr[0] = fixed_turn(cr[0], ints(get(vm, c, "DesiredRotation"))[0], delta);
+        set(vm, c, "Rotation", Value::Struct(cr.iter().map(|&v| Value::Int(v)).collect::<Vec<_>>().into()));
+    }
 }
 
 /// Every actor's physics in level order (the old whole-level step, used by tools).
