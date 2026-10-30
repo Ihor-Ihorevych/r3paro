@@ -49,9 +49,10 @@ pub struct Color {
 }
 
 impl Color {
+    /// Colors are serialized member by member as red, green, blue, alpha.
     pub fn read(r: &mut Reader<'_>) -> Result<Color> {
         let v = r.bytes(4)?;
-        Ok(Color { b: v[0], g: v[1], r: v[2], a: v[3] })
+        Ok(Color { r: v[0], g: v[1], b: v[2], a: v[3] })
     }
 }
 

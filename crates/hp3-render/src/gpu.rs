@@ -153,6 +153,30 @@ impl Renderer {
         })
     }
 
+    pub fn globals_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.globals_layout
+    }
+
+    pub fn texture_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.texture_layout
+    }
+
+    /// A bind group sampling `view` with the shared repeat sampler.
+    pub fn texture_bind(&self, view: &wgpu::TextureView) -> wgpu::BindGroup {
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.texture_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
+        })
+    }
+
+    pub fn upload_view(&self, width: u32, height: u32, rgba: &[u8]) -> wgpu::TextureView {
+        self.upload(width, height, rgba)
+    }
+
     fn upload(&self, width: u32, height: u32, rgba: &[u8]) -> wgpu::TextureView {
         let tex = self.device.create_texture_with_data(
             &self.queue,
@@ -237,6 +261,19 @@ impl Renderer {
 
     /// Draws `scene` from `camera` into `color` (with `depth` of the same size).
     pub fn draw(&self, scene: &GpuScene, camera: &Camera, color: &wgpu::TextureView, depth: &wgpu::TextureView, aspect: f32) -> wgpu::CommandBuffer {
+        self.draw_with(scene, camera, color, depth, aspect, |_| {})
+    }
+
+    /// Like `draw`, then runs `extra` in the same pass (with the camera's bind group still set at group 0).
+    pub fn draw_with(
+        &self,
+        scene: &GpuScene,
+        camera: &Camera,
+        color: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        aspect: f32,
+        extra: impl FnOnce(&mut wgpu::RenderPass<'_>),
+    ) -> wgpu::CommandBuffer {
         let view_proj = camera.view_proj(aspect);
         self.queue.write_buffer(&scene.globals, 0, bytemuck::cast_slice(&view_proj.to_cols_array()));
         let mut enc = self.device.create_command_encoder(&Default::default());
@@ -268,14 +305,25 @@ impl Renderer {
                 pass.set_index_buffer(d.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..d.count, 0, 0..1);
             }
+            extra(&mut pass);
         }
         enc.finish()
     }
 
     /// Renders `scene` offscreen from `camera` and returns `width * height` RGBA pixels.
     pub fn render_to_rgba(&self, scene: &Scene, camera: &Camera, width: u32, height: u32) -> Vec<u8> {
-        let d = &self.device;
         let gpu = self.upload_scene(scene);
+        self.render_frame_to_rgba(width, height, |color, depth| self.draw(&gpu, camera, color, depth, width as f32 / height as f32))
+    }
+
+    /// Runs `draw` against an offscreen color and depth target and reads the color back as RGBA.
+    pub fn render_frame_to_rgba(
+        &self,
+        width: u32,
+        height: u32,
+        draw: impl FnOnce(&wgpu::TextureView, &wgpu::TextureView) -> wgpu::CommandBuffer,
+    ) -> Vec<u8> {
+        let d = &self.device;
         let size = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
         let target = d.create_texture(&wgpu::TextureDescriptor {
             label: Some("target"),
@@ -289,7 +337,7 @@ impl Renderer {
         });
         let depth = self.depth_target(width, height);
         let color = target.create_view(&Default::default());
-        let draw = self.draw(&gpu, camera, &color, &depth, width as f32 / height as f32);
+        let cmd = draw(&color, &depth);
         let bytes_per_row = (width * 4).div_ceil(256) * 256;
         let readback = d.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
@@ -306,7 +354,7 @@ impl Renderer {
             },
             size,
         );
-        self.queue.submit([draw, enc.finish()]);
+        self.queue.submit([cmd, enc.finish()]);
         let slice = readback.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
         let _ = d.poll(wgpu::PollType::Wait);

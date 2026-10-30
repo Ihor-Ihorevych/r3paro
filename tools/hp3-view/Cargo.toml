@@ -12,3 +12,7 @@ hp3-assets.workspace = true
 hp3-render = { path = "../../crates/hp3-render" }
 glam = "0.30"
 png = "0.17"
+hp3-core.workspace = true
+hp3-script.workspace = true
+hp3-world = { path = "../../crates/hp3-world" }
+hp3-engine = { path = "../../crates/hp3-engine" }

@@ -110,9 +110,15 @@ impl Batcher<'_, '_> {
 
 /// Builds the scene of the level in `map` (a loaded map package).
 pub fn build(loader: &Loader<'_>, map: &Rc<Package>) -> Scene {
+    build_with(loader, map, &|_| true)
+}
+
+/// Builds the scene with only the static-mesh actors whose export index passes `include`; the others are drawn
+/// per frame.
+pub fn build_with(loader: &Loader<'_>, map: &Rc<Package>, include: &dyn Fn(usize) -> bool) -> Scene {
     let mut b = Batcher { loader, by_texture: HashMap::new(), scene: Scene::default() };
     add_bsp(&mut b, map);
-    add_actors(&mut b, map);
+    add_actors(&mut b, map, include);
     b.scene
 }
 
@@ -153,7 +159,7 @@ fn add_bsp(b: &mut Batcher<'_, '_>, map: &Rc<Package>) {
     }
 }
 
-fn add_actors(b: &mut Batcher<'_, '_>, map: &Rc<Package>) {
+fn add_actors(b: &mut Batcher<'_, '_>, map: &Rc<Package>, include: &dyn Fn(usize) -> bool) {
     for i in 0..map.exports.len() {
         let chain = b.loader.set.export_chain(map, i);
         let is_mesh_actor = chain.iter().any(|c| c.eq_ignore_ascii_case("Actor"));
@@ -194,6 +200,9 @@ fn add_actors(b: &mut Batcher<'_, '_>, map: &Rc<Package>) {
             continue;
         }
         let Some(mesh) = mesh else { continue };
+        if !include(i) {
+            continue;
+        }
         let Some((sp, si)) = b.loader.set.resolve(map, mesh) else { continue };
         let Some(asset) = b.loader.asset(&sp, si) else { continue };
         let Asset::StaticMesh(sm) = &*asset else { continue };

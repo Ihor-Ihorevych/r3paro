@@ -13,6 +13,7 @@ hp3-assets.workspace = true
 hp3-script.workspace = true
 hp3-world = { path = "../../crates/hp3-world" }
 hp3-render = { path = "../../crates/hp3-render" }
+hp3-engine = { path = "../../crates/hp3-engine" }
 sdl3 = { version = "0.20", features = ["build-from-source-static", "raw-window-handle"] }
 wgpu = "26"
 glam = "0.30"

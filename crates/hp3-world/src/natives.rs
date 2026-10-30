@@ -458,6 +458,46 @@ pub fn register(vm: &mut Vm<'_>) {
         w.collision.actors = saved;
         Ok(Value::Bool(clear))
     });
+    // TraceActors(BaseClass, out Actor, out HitLoc, out HitNorm, End, optional Start, optional Extent):
+    // every blocking actor the segment passes through, nearest first.
+    vm.register_iterator("Actor.TraceActors", |vm, this, a| {
+        let Some(o) = this else { return Ok(Vec::new()) };
+        let end = crate::physics::vec(&a[4]);
+        let start = if given(a, 5) { crate::physics::vec(&a[5]) } else { crate::physics::vec(&get(vm, o, "Location")) };
+        let extent = if given(a, 6) { crate::physics::vec(&a[6]) } else { glam::Vec3::ZERO };
+        let class = obj_arg(a, 0).and_then(|c| vm.class_of(c));
+        let boxes = world(vm).collision.actors.clone();
+        let mut hits = Vec::new();
+        for b in boxes {
+            if Some(b.actor) == this {
+                continue;
+            }
+            if let (Some(want), Some(have)) = (class, vm.db.objects.get(b.actor).class)
+                && !vm.is_child_of(have, want)
+            {
+                continue;
+            }
+            let mut single = crate::collision::Collision::default();
+            single.actors.push(b);
+            if let Some(h) = single.trace(start, end, extent, None) {
+                hits.push(h);
+            }
+        }
+        hits.sort_by(|x, y| x.time.total_cmp(&y.time));
+        Ok(hits
+            .into_iter()
+            .map(|h| {
+                let mut item = a.to_vec();
+                item[1] = Value::Object(h.actor);
+                item[2] = crate::physics::value(h.location);
+                item[3] = crate::physics::value(h.normal);
+                item
+            })
+            .collect())
+    });
+    // AI hearing and music: nothing to do until those systems exist.
+    vm.register("Actor.MakeNoise", |_vm, _this, _a| Ok(Value::Empty));
+    vm.register("Actor.StopAllMusic", |_vm, _this, _a| Ok(Value::Empty));
     vm.register("LevelInfo.IsDemoBuild", |_vm, _this, _a| Ok(Value::Bool(false)));
     vm.register("Actor.AttachToBone", |vm, this, a| {
         if let Some(att) = obj_arg(a, 0) {

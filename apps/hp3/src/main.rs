@@ -107,16 +107,17 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
     let pkg = set.get(&map)?;
 
     let loader = Loader::new(&set);
-    let t = Instant::now();
-    let scene = scene::build(&loader, &pkg);
-    eprintln!("{map}: scene built in {:?} ({:?})", t.elapsed(), scene.stats);
-
     let mut db = ClassDb::new(&set);
     db.load_all_classes();
     let mut vm = Vm::new(db);
     let t = Instant::now();
     hp3_world::load(&mut vm, &pkg, config)?;
     eprintln!("world loaded in {:?}", t.elapsed());
+    // Static actors are baked into the level's geometry; everything else is drawn per frame.
+    let statics = hp3_engine::static_exports(&mut vm, &pkg);
+    let t = Instant::now();
+    let scene = scene::build_with(&loader, &pkg, &|i| statics.contains(&i));
+    eprintln!("{map}: scene built in {:?} ({:?})", t.elapsed(), scene.stats);
 
     let sdl = sdl3::init()?;
     let video = sdl.video()?;
@@ -135,6 +136,8 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
     let renderer = Renderer::with_adapter(&adapter, format)?;
     eprintln!("GPU: {}", renderer.adapter_info);
     let gpu_scene = renderer.upload_scene(&scene);
+    let dynamic = hp3_render::dynamic::Dynamic::new(&renderer);
+    let mut mesh_cache = hp3_engine::MeshCache::default();
 
     let (mut width, mut height) = window.size_in_pixels();
     let configure = |w: u32, h: u32| {
@@ -256,7 +259,9 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
             Err(e) => return Err(e.into()),
         };
         let view = frame.texture.create_view(&Default::default());
-        let cmd = renderer.draw(&gpu_scene, &camera, &view, &depth, width as f32 / height as f32);
+        let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut mesh_cache);
+        let refs: Vec<_> = instances.iter().map(|(m, t)| (m.as_ref(), *t)).collect();
+        let cmd = dynamic.draw(&renderer, &gpu_scene, &refs, &camera, &view, &depth, width as f32 / height as f32);
         renderer.queue.submit([cmd]);
         frame.present();
 
