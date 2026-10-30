@@ -25,12 +25,9 @@ Milestones are from the plan (M0 to M12).
 - **M4 World boot, mostly**: `hp3-run level <HP3 folder> <map> [ticks]` loads a map into the VM, spawns the
   game class from the config (`HGame.HGame`), runs begin-play and the player login, and ticks events, timers
   and state code. `hp3-run levels <HP3 folder>` does this for every map: all 34 load, 33 log in a player
-  (Entry has none, as it should), and 2 seconds of play raise no script errors. The natives still hit need
-  the systems that come next: pathfinding (`FindPathToward`, `actorReachable`), traces, bone coordinates,
-  `SetOpacity`, `FinishRotation`, `Volume.Encompasses`. Sound, animation, collision and movement natives are
-  placeholders.
-- Known issue: the interpreter runs at about 0.5 µs per statement; Adv1 needs about 9 ms per tick, mostly in
-  the ambient creatures' scripts. A performance pass is planned (fewer value copies, faster property access).
+  (Entry has none, as it should), and play raises no script errors. Sound natives are still placeholders.
+- Known issue: the interpreter runs at about 0.5 µs per statement; Adv1 needs about 9 ms per tick and
+  HP3_InsideHub about 160 ms. A performance pass is planned (fewer value copies, faster property access).
 - **M5 Playable render, in progress**: `hp3 <HP3 folder> [map]` opens an SDL3 window and draws the level with
   wgpu while its scripts run at 60 Hz. Keyboard and mouse go through the game's key bindings; the view is the
   game's own `PlayerCalcView`, or a camera behind the pawn while the game's camera is not running (a map loaded
@@ -57,11 +54,8 @@ Milestones are from the plan (M0 to M12).
   AI moves (`MoveTo`, `MoveToward`). Reachability is a straight line test for now (no jumps or drops).
 - `Volume.Encompasses` tests the point against the volume brush's BSP. `SetOpacity` is recorded for the
   renderer; emitters are not simulated yet (`ParticleEmitter.Trigger` does nothing).
-- All 34 maps run 600 ticks with no script errors and no unimplemented natives reached. Running is slow on
-  the largest map (HP3_InsideHub about 160 ms per tick in the VM): a performance pass is due.
-- M7 onwards: not started. The natives still hit across all maps are pathfinding and AI movement
-  (`FindPathToward`, `actorReachable`, `MoveTo`...), `SetOpacity`, `ParticleEmitter.Trigger`, `FinishRotation`
-  and `Volume.Encompasses`.
+- All 34 maps run 600 ticks with no script errors and no unimplemented natives reached.
+- M7 onwards: not started.
 
 ## Checking
 
