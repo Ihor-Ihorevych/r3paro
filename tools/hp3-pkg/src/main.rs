@@ -26,6 +26,8 @@ fn main() -> ExitCode {
         Some("textures") if args.len() >= 4 => {
             textures(Path::new(&args[1]), &args[2], Path::new(&args[3]), args.get(4).map(String::as_str))
         }
+        Some("natives") if args.len() == 2 => natives(Path::new(&args[1])),
+        Some("disasm") if args.len() == 4 => disasm(Path::new(&args[1]), &args[2], &args[3]),
         Some("hex") if args.len() == 6 => hex(Path::new(&args[1]), &args[2], &args[3], &args[4], &args[5]),
         Some("check") if args.len() >= 2 => {
             let verbose = args.iter().any(|a| a == "-v");
@@ -245,6 +247,109 @@ fn textures(root: &Path, package: &str, out: &Path, filter: Option<&str>) -> R {
         written += 1;
     }
     println!("{written} textures written to {}, {skipped} skipped", out.display());
+    Ok(ExitCode::SUCCESS)
+}
+
+const FUNC_NATIVE: u32 = 0x0000_0400;
+
+/// Every native function the script packages declare: package, class, function, native index and flags.
+fn natives(root: &Path) -> R {
+    let set = PackageSet::open(root)?;
+    let mut total = 0;
+    let mut indexed = 0;
+    let mut per_package: std::collections::BTreeMap<String, usize> = Default::default();
+    for path in set.files() {
+        if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("u")) {
+            continue;
+        }
+        let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
+        let pkg = set.get(&stem)?;
+        for i in 0..pkg.exports.len() {
+            if !pkg.export_class_name(i).eq_ignore_ascii_case("Function") {
+                continue;
+            }
+            let chain = set.export_chain(&pkg, i);
+            let Ok(o) = object::read_export(&pkg, i, &chain) else { continue };
+            let Body::Function { function, .. } = &o.body else { continue };
+            if function.function_flags & FUNC_NATIVE == 0 {
+                continue;
+            }
+            total += 1;
+            if function.native_index != 0 {
+                indexed += 1;
+            }
+            *per_package.entry(stem.clone()).or_default() += 1;
+            println!(
+                "{}\t{}\t{}\t{:#010x}",
+                pkg.ref_path(ObjRef::from_export(i)),
+                function.native_index,
+                function.operator_precedence,
+                function.function_flags
+            );
+        }
+        set.unload_all();
+    }
+    eprintln!("{total} native functions ({indexed} with a fixed index): {per_package:?}");
+    Ok(ExitCode::SUCCESS)
+}
+
+fn token_text(pkg: &Package, t: &hp3_package::bytecode::Token, depth: usize, out: &mut String) {
+    use hp3_package::bytecode::Operand;
+    use std::fmt::Write;
+    let pad = "  ".repeat(depth);
+    let ops: Vec<String> = t
+        .operands
+        .iter()
+        .map(|o| match o {
+            Operand::Obj(r) => pkg.ref_path(*r),
+            Operand::Name(n) => format!("'{}'", pkg.name(*n)),
+            Operand::U8(v) => v.to_string(),
+            Operand::U16(v) => format!("{v:#x}"),
+            Operand::I32(v) => v.to_string(),
+            Operand::F32(v) => format!("{v}"),
+            Operand::Str(s) => format!("{s:?}"),
+            Operand::Labels(l) => l.iter().map(|(n, at)| format!("{}@{at:#x}", pkg.name(*n))).collect::<Vec<_>>().join(","),
+        })
+        .collect();
+    let head = match t.native {
+        Some(n) => format!("native {n}"),
+        None => format!("{:#04x}", t.op),
+    };
+    let _ = writeln!(out, "{:04x} {pad}{head} {}", t.offset, ops.join(" "));
+    for a in &t.args {
+        token_text(pkg, a, depth + 1, out);
+    }
+}
+
+/// Bytecode of every function and state of one class.
+fn disasm(root: &Path, package: &str, class: &str) -> R {
+    let set = PackageSet::open(root)?;
+    let pkg = set.get(package)?;
+    let ci = pkg.find_export_path(&format!("{class}@Class")).ok_or("no such class")?;
+    let mut out = String::new();
+    for i in 0..pkg.exports.len() {
+        let path = pkg.ref_path(ObjRef::from_export(i));
+        let under = pkg.exports[i].outer == ObjRef::from_export(ci)
+            || pkg.ref_outer(pkg.exports[i].outer) == ObjRef::from_export(ci)
+            || i == ci;
+        if !under {
+            continue;
+        }
+        let chain = set.export_chain(&pkg, i);
+        let o = object::read_export(&pkg, i, &chain)?;
+        let structure = match &o.body {
+            Body::Function { structure, .. } | Body::State { structure, .. } | Body::Class { structure, .. } => structure,
+            _ => continue,
+        };
+        if structure.script.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("\n== {} {path} ({} bytes)\n", pkg.export_class_name(i), structure.script_size));
+        for t in &structure.script {
+            token_text(&pkg, t, 0, &mut out);
+        }
+    }
+    print!("{out}");
     Ok(ExitCode::SUCCESS)
 }
 
