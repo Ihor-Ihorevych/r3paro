@@ -323,19 +323,27 @@ fn tri_trace(t: &Tri, start: Vec3, end: Vec3, extent: Vec3) -> Option<Hit> {
     let time = ((d0 - offset - EPSILON) / (d0 - d1)).clamp(0.0, 1.0);
     let at = start + (end - start) * time;
     let contact = at - n * (n.dot(at - t.v[0]));
+    // The box's footprint is approximated by a circle of its larger half width: the contact point must lie in
+    // the triangle or within that distance of one of its edges.
     let grow = extent.x.max(extent.y);
-    for i in 0..3 {
-        let a = t.v[i];
-        let b = t.v[(i + 1) % 3];
-        let edge_normal = (b - a).cross(t.normal).normalize_or_zero();
-        // Edge normals point away from the triangle's interior for counter-clockwise winding from `t.normal`.
-        let side = edge_normal.dot(contact - a);
-        let inside_sign = edge_normal.dot(t.v[(i + 2) % 3] - a).signum();
-        if side * inside_sign < -grow {
-            return None;
-        }
+    let inside = (0..3).all(|i| {
+        let (a, b) = (t.v[i], t.v[(i + 1) % 3]);
+        let edge_normal = (b - a).cross(t.normal);
+        let toward_inside = edge_normal.dot(t.v[(i + 2) % 3] - a).signum();
+        edge_normal.dot(contact - a) * toward_inside >= 0.0
+    });
+    if !inside && (0..3).all(|i| segment_distance(contact, t.v[i], t.v[(i + 1) % 3]) > grow) {
+        return None;
     }
     Some(Hit { time, location: at, normal: n, actor: t.actor })
+}
+
+/// Distance from `p` to the segment `a`-`b`.
+fn segment_distance(p: Vec3, a: Vec3, b: Vec3) -> f32 {
+    let ab = b - a;
+    let len2 = ab.length_squared();
+    let t = if len2 > 1e-12 { ((p - a).dot(ab) / len2).clamp(0.0, 1.0) } else { 0.0 };
+    (p - (a + ab * t)).length()
 }
 
 /// Swept box against a box (slab test on the boxes' Minkowski sum).

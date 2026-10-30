@@ -211,6 +211,34 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
     let mut cache = hp3_engine::MeshCache::default();
     let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut cache, lighting.as_ref());
     eprintln!("{} static batches, {} live actors drawn", scene.batches.len(), instances.len());
+    // HP3_SOAK=<n>: keeps ticking and drawing for n more frames (HP3_HOLD=<key> held), to find per-frame leaks.
+    if let Some(n) = std::env::var("HP3_SOAK").ok().and_then(|v| v.parse::<u32>().ok()) {
+        if let Ok(key) = std::env::var("HP3_HOLD") {
+            hp3_world::world(&mut vm).input.key_down(&key);
+        }
+        let before = cache.uploads;
+        let mut slow: Vec<(f32, f32, u32)> = Vec::new();
+        let mut soak_hud = hp3_engine::HudCache::default();
+        for i in 0..n {
+            let t = std::time::Instant::now();
+            hp3_world::tick(&mut vm, 1.0 / 60.0);
+            let tick_ms = t.elapsed().as_secs_f32() * 1000.0;
+            let t = std::time::Instant::now();
+            let _ = hp3_world::player_view(&mut vm);
+            let view_ms = t.elapsed().as_secs_f32() * 1000.0;
+            let t = std::time::Instant::now();
+            let _ = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut cache, lighting.as_ref());
+            let inst_ms = t.elapsed().as_secs_f32() * 1000.0;
+            let t = std::time::Instant::now();
+            let _ = hp3_engine::hud_quads(&mut vm, &loader, &mut soak_hud, 1280, 720);
+            slow.push((tick_ms + view_ms + inst_ms, t.elapsed().as_secs_f32() * 1000.0, i));
+        }
+        slow.sort_by(|a, b| (b.0 + b.1).total_cmp(&(a.0 + a.1)));
+        for (t, d, i) in slow.iter().take(5) {
+            eprintln!("soak: slowest frame +{i}: world {t:.1} ms, hud {d:.1} ms");
+        }
+        eprintln!("soak: {} frames, {} mesh uploads (was {before})", n, cache.uploads - before);
+    }
     let pc = hp3_world::world(&mut vm).player.ok_or("no player")?;
     // The pawn, or (in a cutscene, which takes the pawn from the player) the controller itself.
     let mut pawn = hp3_world::get(&mut vm, pc, "Pawn").as_obj().unwrap_or(pc);

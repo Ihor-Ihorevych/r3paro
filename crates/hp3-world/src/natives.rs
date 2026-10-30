@@ -543,6 +543,20 @@ pub fn register(vm: &mut Vm<'_>) {
                 hits.push(h);
             }
         }
+        // The level's geometry stops the segment: its first hit (Level for BSP and terrain, the actor for a
+        // static mesh) ends the list. HP3's camera keeps out of walls with this.
+        let level = world(vm).level_info;
+        if let Some(mut h) = world(vm).collision.trace_static(start, end, extent) {
+            h.actor = h.actor.or(level);
+            let wanted = match (class, h.actor.and_then(|x| vm.db.objects.get(x).class)) {
+                (Some(want), Some(have)) => vm.is_child_of(have, want),
+                _ => true,
+            };
+            hits.retain(|x| x.time <= h.time);
+            if wanted {
+                hits.push(h);
+            }
+        }
         hits.sort_by(|x, y| x.time.total_cmp(&y.time));
         Ok(hits
             .into_iter()

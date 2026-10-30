@@ -698,7 +698,7 @@ fn build_collision(vm: &mut Vm<'_>, map: &Rc<Package>, model: Option<ObjRef>, ac
     for &a in actors {
         // Movers collide as moving shapes, not as part of the fixed level.
         if mover_class.is_some_and(|m| vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, m))) {
-            if let Some(shape) = mover_shape(vm, a) {
+            if let Some(shape) = mover_shape(vm, a).filter(|_| std::env::var_os("HP3_NO_MOVER_COLLISION").is_none()) {
                 col.movers.push(shape);
             }
             continue;
@@ -724,6 +724,30 @@ fn build_collision(vm: &mut Vm<'_>, map: &Rc<Package>, model: Option<ObjRef>, ac
             };
             let to_world = |v: &hp3_assets::Vec3| loc + basis * (Vec3::new(v.x, v.y, v.z) * s3 * scale);
             let pos: Vec<Vec3> = sm.vertices.iter().map(|v| to_world(&v.position)).collect();
+            if let Ok(want) = std::env::var("HP3_COLLISION_DEBUG")
+                && vm.db.names.get(vm.db.objects.get(a).name).eq_ignore_ascii_case(&want)
+            {
+                let tri_bounds = |tris: &mut dyn Iterator<Item = [u32; 3]>| {
+                    let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+                    for t in tris {
+                        for i in t {
+                            let p = pos.get(i as usize).copied().unwrap_or(Vec3::ZERO);
+                            lo = lo.min(p);
+                            hi = hi.max(p);
+                        }
+                    }
+                    (lo, hi)
+                };
+                let col = tri_bounds(&mut sm.collision_triangles.iter().map(|t| t.vertices.map(|i| i as u32)));
+                let draw = tri_bounds(&mut sm.indices.chunks_exact(3).map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]));
+                eprintln!(
+                    "collision debug {want}: {} collision tris bounds {:?}; {} render tris bounds {:?}",
+                    sm.collision_triangles.len(),
+                    col,
+                    sm.indices.len() / 3,
+                    draw
+                );
+            }
             if !sm.collision_triangles.is_empty() {
                 for t in &sm.collision_triangles {
                     let [a0, b0, c0] = t.vertices.map(|i| pos.get(i as usize).copied().unwrap_or(Vec3::ZERO));

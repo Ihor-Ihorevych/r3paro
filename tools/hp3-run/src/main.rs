@@ -192,9 +192,39 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
     }
     let t = std::time::Instant::now();
     let trigger_at: u32 = std::env::var("HP3_TRIGGER_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+    // HP3_TRACE_FROM=<tick>: HP3_TRACE_CALLS only starts printing at that tick.
+    let trace_from: Option<u32> = std::env::var("HP3_TRACE_FROM").ok().and_then(|v| v.parse().ok());
+    let held_trace = trace_from.and_then(|_| vm.trace_calls.take());
     for frame in 0..frames {
+        if trace_from == Some(frame) {
+            vm.trace_calls = held_trace.clone();
+        }
         if frame == trigger_at {
             trigger_tag(&mut vm);
+        }
+        // HP3_HOLD=<key>@<tick>[-<tick>]: holds a key (as the app would) over a span of ticks.
+        if let Ok(spec) = std::env::var("HP3_HOLD")
+            && let Some((key, span)) = spec.split_once('@')
+        {
+            let (from, to) = span.split_once('-').map_or((span, ""), |(a, b)| (a, b));
+            let from: u32 = from.parse().unwrap_or(0);
+            let to: u32 = to.parse().unwrap_or(u32::MAX);
+            if frame == from {
+                hp3_world::world(&mut vm).input.key_down(key);
+            }
+            if frame == to {
+                hp3_world::world(&mut vm).input.key_up(key);
+            }
+        }
+        // HP3_MOUSE=<dx>,<dy>@<from>-<to>: mouse motion applied every tick over a span.
+        if let Ok(spec) = std::env::var("HP3_MOUSE")
+            && let Some((delta, span)) = spec.split_once('@')
+        {
+            let d: Vec<f32> = delta.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+            let (from, to) = span.split_once('-').unwrap_or((span, "4294967295"));
+            if (from.parse().unwrap_or(0)..=to.parse().unwrap_or(u32::MAX)).contains(&frame) && d.len() == 2 {
+                hp3_world::world(&mut vm).input.mouse_move(d[0], d[1]);
+            }
         }
         hp3_world::tick(&mut vm, 1.0 / 60.0);
         follow_travel(&mut vm);

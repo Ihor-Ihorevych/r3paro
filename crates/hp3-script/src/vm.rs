@@ -945,6 +945,9 @@ impl<'s> Vm<'s> {
                 }
             }
             Expr::Iterator(call, end) => {
+                // The loop body starts after this statement. Taken before the arguments are evaluated: they
+                // may call script functions (`Vec(0,0,0)`), which move `current_pc`.
+                let body = self.current_pc + 1;
                 // `foreach Obj.Iter(...)` runs the iterator with that object as self.
                 let (iter_this, call) = match &**call {
                     Expr::Context(obj, inner) => (self.eval(obj, frame, None)?.as_obj(), &**inner),
@@ -971,7 +974,6 @@ impl<'s> Vm<'s> {
                         other => values.push(self.eval(other, frame, None)?),
                     }
                 }
-                let body = self.current_pc + 1;
                 let items = if self.profile {
                     let t = std::time::Instant::now();
                     let r = iter(self, iter_this, &values)?;

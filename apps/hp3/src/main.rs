@@ -277,12 +277,15 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
             camera.position += mv * speed;
         }
 
+        let frame_start = Instant::now();
+        let mut stages: Vec<(&str, f32)> = Vec::new();
         // The level's scripts run at a fixed 60 Hz.
         accumulator += dt;
         while accumulator >= 1.0 / 60.0 {
             hp3_world::tick(&mut vm, 1.0 / 60.0);
             accumulator -= 1.0 / 60.0;
         }
+        stages.push(("ticks", frame_start.elapsed().as_secs_f32() * 1000.0));
         // A level switch the game asked for: the new level is loaded and its scene built.
         if let Some(url) = hp3_world::take_travel(&mut vm) {
             let t = Instant::now();
@@ -302,6 +305,7 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
         if !free_camera && let Some(c) = game_camera(&mut vm) {
             camera = c;
         }
+        stages.push(("camera", frame_start.elapsed().as_secs_f32() * 1000.0));
         let frame = match surface.get_current_texture() {
             Ok(f) => f,
             Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
@@ -311,15 +315,24 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
             Err(e) => return Err(e.into()),
         };
         let view = frame.texture.create_view(&Default::default());
+        stages.push(("acquire", frame_start.elapsed().as_secs_f32() * 1000.0));
         let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut mesh_cache, lighting.as_ref());
         let refs: Vec<_> = instances.iter().map(|(m, t, l)| (m.as_ref(), *t, *l)).collect();
+        stages.push(("instances", frame_start.elapsed().as_secs_f32() * 1000.0));
         let cmd = dynamic.draw(&renderer, &gpu_scene, &refs, &camera, &view, &depth, width as f32 / height as f32);
+        stages.push(("draw", frame_start.elapsed().as_secs_f32() * 1000.0));
         let mut quads = hp3_engine::hud_quads(&mut vm, &loader, &mut hud_cache, width, height);
         quads.extend(hp3_engine::screen_flash(&mut vm, width, height));
         let images = |k: &hp3_assets::loader::ObjKey| hud_cache.image(&loader, k);
         let hud = overlay.draw(&renderer, &quads, &images, &view, width, height);
+        stages.push(("hud", frame_start.elapsed().as_secs_f32() * 1000.0));
         renderer.queue.submit([cmd, hud]);
+        stages.push(("submit", frame_start.elapsed().as_secs_f32() * 1000.0));
         frame.present();
+        stages.push(("present", frame_start.elapsed().as_secs_f32() * 1000.0));
+        if stages.last().is_some_and(|s| s.1 > 200.0) {
+            eprintln!("slow frame (cumulative ms): {stages:?}");
+        }
 
         frames += 1;
         if fps_timer.elapsed().as_secs_f32() >= 1.0 {

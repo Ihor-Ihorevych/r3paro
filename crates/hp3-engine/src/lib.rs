@@ -254,6 +254,8 @@ pub struct MeshCache {
     meshes: HashMap<(ObjKey, Vec<Option<ObjKey>>), Option<Rc<GpuMesh>>>,
     skinned: HashMap<ObjId, Skinned>,
     skeletons: HashMap<ObjKey, Rc<hp3_anim::Skeleton>>,
+    /// Meshes uploaded to the GPU so far (a debugging counter).
+    pub uploads: usize,
 }
 
 fn skin_refs(vm: &Vm<'_>, mp: &Rc<Package>, skins: &[Option<ObjId>]) -> Vec<(Rc<Package>, ObjRef)> {
@@ -292,6 +294,11 @@ impl MeshCache {
             let geom = meshes::build(loader, &mp, mi, &skin_refs(vm, &mp, skins))?;
             let images = |k: &ObjKey| loader.image(&loader.set.get(&k.0).ok()?, k.1);
             let gpu = Rc::new(dynamic.upload(r, &geom, &images));
+            self.uploads += 1;
+            if std::env::var_os("HP3_UPLOAD_DEBUG").is_some() {
+                let old = self.skinned.get(&actor).map(|s| (s.mesh == mesh, s.skins == skins));
+                eprintln!("upload skinned actor {actor:?} mesh {mesh:?} (same mesh, same skins before: {old:?})");
+            }
             self.skinned.insert(
                 actor,
                 Skinned { mesh, skins: skins.to_vec(), gpu, geom, asset: asset.clone(), skeleton, bone_maps: HashMap::new(), last: None },

@@ -253,6 +253,10 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
             _ => m.destination,
         };
         m.timer -= dt;
+        // Moving toward an actor, the controller's Destination follows it (scripts face and steer by it).
+        if m.target.is_some() {
+            set(vm, c, "Destination", value(dest));
+        }
         let mut arrived = false;
         let done = match pawn {
             None => true,

@@ -172,6 +172,10 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         && hit.normal.z < WALKABLE_Z
     {
         // A wall: try stepping up over it, else slide along it.
+        if std::env::var_os("HP3_WALK_DEBUG").is_some() {
+            let name = hit.actor.map(|h| vm.db.names.get(vm.db.objects.get(h).name).to_string());
+            eprintln!("walk: hit {name:?} at {} normal {} time {}", hit.location, hit.normal, hit.time);
+        }
         let remaining = delta * (1.0 - hit.time);
         let before = vec(&get(vm, a, "Location"));
         let up = move_actor(vm, a, Vec3::Z * MAX_STEP_HEIGHT);
