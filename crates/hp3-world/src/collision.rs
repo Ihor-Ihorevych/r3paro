@@ -145,6 +145,25 @@ fn node_passes_through(model: &Model, node: usize) -> bool {
     surf >= 0 && model.surfs.get(surf as usize).is_some_and(|s| s.poly_flags & (PF_NOT_SOLID | PF_PORTAL) != 0)
 }
 
+/// Whether a point (in the model's space) is inside its solid: walk the BSP to a leaf; ending behind a
+/// plane with no child there is solid.
+pub fn point_inside(model: &Model, p: Vec3) -> bool {
+    if model.nodes.is_empty() {
+        return false;
+    }
+    let mut node = 0usize;
+    for _ in 0..model.nodes.len() {
+        let (n, w) = plane_of(model, node);
+        let nd = &model.nodes[node];
+        let child = if n.dot(p) - w >= 0.0 { nd.front } else { nd.back };
+        if child < 0 {
+            return n.dot(p) - w < 0.0;
+        }
+        node = child as usize;
+    }
+    false
+}
+
 /// Quake-style recursive hull trace: each plane is pushed out by the box's support distance.
 #[allow(clippy::too_many_arguments)]
 fn bsp_trace(

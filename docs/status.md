@@ -52,6 +52,13 @@ Milestones are from the plan (M0 to M12).
 - Script objects: package objects (meshes, materials, sounds, notifies) are now loaded the first time a script
   uses them, and native-only classes (`Mesh`, `SkeletalMesh`, `Sound`...) exist as classes, so casts and
   `DynamicLoadObject(..., class'Mesh')` work.
+- **Navigation, started**: the map's path network (navigation points and reach specs), route finding
+  (`FindPathToward`, `FindPathTo`, `RouteCache`), reachability (`actorReachable`, `pointReachable`) and latent
+  AI moves (`MoveTo`, `MoveToward`). Reachability is a straight line test for now (no jumps or drops).
+- `Volume.Encompasses` tests the point against the volume brush's BSP. `SetOpacity` is recorded for the
+  renderer; emitters are not simulated yet (`ParticleEmitter.Trigger` does nothing).
+- All 34 maps run 600 ticks with no script errors and no unimplemented natives reached. Running is slow on
+  the largest map (HP3_InsideHub about 160 ms per tick in the VM): a performance pass is due.
 - M7 onwards: not started. The natives still hit across all maps are pathfinding and AI movement
   (`FindPathToward`, `actorReachable`, `MoveTo`...), `SetOpacity`, `ParticleEmitter.Trigger`, `FinishRotation`
   and `Volume.Encompasses`.

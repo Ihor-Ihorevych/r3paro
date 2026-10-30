@@ -234,3 +234,26 @@ pub fn skin_points(mesh: &SkeletalMesh, skin: &[Mat4]) -> Vec<Vec3> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotator_round_trip() {
+        for r in [[0, 0, 0], [0, 16384, 0], [4000, -12000, 2500], [-8000, 30000, -6000], [10000, 5000, 0]] {
+            let back = matrix_rotator(&rotator_matrix(r));
+            for i in 0..3 {
+                let d = (back[i] - r[i]).rem_euclid(65536);
+                assert!(d <= 2 || d >= 65534, "{r:?} -> {back:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn yaw_turns_x_toward_y() {
+        let m = rotator_matrix([0, 16384, 0]);
+        let x = m.transform_vector3(Vec3::X);
+        assert!((x - Vec3::Y).length() < 1e-4, "{x:?}");
+    }
+}

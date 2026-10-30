@@ -112,6 +112,9 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
         let loc = hp3_world::physics::vec(&hp3_world::get(&mut vm, pawn, "Location"));
         let w = hp3_world::world(&mut vm);
         println!("collision: {} triangles", w.collision.triangle_count());
+        let (nodes, links) = hp3_world::nav::network_size(&mut vm);
+        println!("path network: {nodes} navigation points, {links} links");
+        let w = hp3_world::world(&mut vm);
         for (what, d) in [("down", -glam::Vec3::Z * 2000.0), ("up", glam::Vec3::Z * 2000.0), ("forward", glam::Vec3::X * 4000.0)] {
             let hit = w.collision.trace(loc, loc + d, glam::Vec3::ZERO, Some(pawn));
             println!("  trace {what} from pawn at {loc}: {:?}", hit.map(|h| (h.time * d.length(), h.normal, h.actor.is_some())));

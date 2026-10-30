@@ -5,6 +5,7 @@
 
 pub mod anim;
 pub mod collision;
+pub mod nav;
 pub mod input;
 pub mod natives;
 pub mod physics;
@@ -45,6 +46,9 @@ pub struct World {
     /// Pairs of actors currently touching (lower id first).
     pub touching: std::collections::HashSet<(ObjId, ObjId)>,
     pub anim: anim::Animation,
+    pub nav: nav::Navigation,
+    /// Opacity set by `SetOpacity` (1 when absent).
+    pub opacity: HashMap<ObjId, f32>,
 }
 
 /// The world stored in the VM. Panics if no level is loaded.
@@ -116,6 +120,7 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Res
     let actor_class = vm.db.find("Actor").ok_or_else(|| VmError::Runtime("no Actor class".into()))?;
     natives::register(vm);
     anim::register(vm);
+    nav::register(vm);
     // Every scripted object of the map, so references between them resolve to live instances.
     let mut level_order = Vec::new();
     let mut level_model = None;
@@ -172,6 +177,8 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Res
         collision: collision::Collision::default(),
         touching: Default::default(),
         anim: Default::default(),
+        nav: Default::default(),
+        opacity: Default::default(),
         config,
     }));
     let collision = build_collision(vm, map, level_model, &actors);
@@ -235,6 +242,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         input::apply(vm, pc);
         fire(vm, pc, "PlayerTick", &mut [Value::Float(dt)]);
     }
+    nav::tick(vm, dt);
     physics::step(vm, dt);
     physics::update_touching(vm);
     anim::update_movement(vm);

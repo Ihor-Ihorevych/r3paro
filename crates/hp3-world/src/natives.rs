@@ -471,6 +471,37 @@ pub fn register(vm: &mut Vm<'_>) {
             })
             .collect())
     });
+    // Encompasses(Actor Other): whether Other's location is inside this volume's brush.
+    vm.register("Volume.Encompasses", |vm, this, a| {
+        let (Some(v), Some(other)) = (this, obj_arg(a, 0)) else { return Ok(Value::Bool(false)) };
+        let Some(brush) = get(vm, v, "Brush").as_obj() else { return Ok(Value::Bool(false)) };
+        let Some((pkg, index)) = vm.db.objects.get(brush).key.clone() else { return Ok(Value::Bool(false)) };
+        let Ok(p) = vm.db.set.get(&pkg) else { return Ok(Value::Bool(false)) };
+        let chain = vm.db.set.export_chain(&p, index);
+        let Some(hp3_assets::Asset::Model(model)) = crate::native_asset(&p, index, &chain) else { return Ok(Value::Bool(false)) };
+        // Brush space to world: translate(Location) * rotate * scale * translate(-PrePivot).
+        let loc = crate::physics::vec(&get(vm, v, "Location"));
+        let prepivot = crate::physics::vec(&get(vm, v, "PrePivot"));
+        let r: Vec<i32> = get(vm, v, "Rotation").fields().iter().map(Value::as_int).collect();
+        let rot = hp3_anim::rotator_matrix([r.first().copied().unwrap_or(0), r.get(1).copied().unwrap_or(0), r.get(2).copied().unwrap_or(0)]);
+        let scale = match get(vm, v, "DrawScale").as_float() {
+            0.0 => 1.0,
+            s => s,
+        };
+        let to_world = glam::Mat4::from_translation(loc) * rot * glam::Mat4::from_scale(glam::Vec3::splat(scale)) * glam::Mat4::from_translation(-prepivot);
+        let at = to_world.inverse().transform_point3(crate::physics::vec(&get(vm, other, "Location")));
+        Ok(Value::Bool(crate::collision::point_inside(&model, at)))
+    });
+    // Emitters are not simulated yet; triggering one does nothing.
+    vm.register("ParticleEmitter.Trigger", |_vm, _this, _a| Ok(Value::Empty));
+    // SetOpacity(float): kept for the renderer.
+    vm.register("Actor.SetOpacity", |vm, this, a| {
+        if let Some(o) = this {
+            let alpha = a.first().map(Value::as_float).unwrap_or(1.0);
+            world(vm).opacity.insert(o, alpha);
+        }
+        Ok(Value::Empty)
+    });
     // AI hearing and music: nothing to do until those systems exist.
     vm.register("Actor.MakeNoise", |_vm, _this, _a| Ok(Value::Empty));
     vm.register("Actor.StopAllMusic", |_vm, _this, _a| Ok(Value::Empty));
