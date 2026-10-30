@@ -54,6 +54,10 @@ pub enum Expr {
     Final(StructId, Vec<Expr>),
     /// Native call by its fixed index, with the function that declares it.
     Native(u16, Option<StructId>, Vec<Expr>),
+    /// Call through a delegate variable; the name is the function used when the delegate is unset.
+    DelegateCall(Box<Expr>, Name, Vec<Expr>),
+    /// A function of `self` taken as a delegate value.
+    DelegateValue(Name),
     Iterator(Box<Expr>, usize),
     IteratorNext,
     IteratorPop,
@@ -94,6 +98,18 @@ impl<'a, 'd> Compiler<'a, 'd> {
         let owner = self.db.load_struct(&op_, oi)?;
         let name = self.db.names.intern(pp.name(pp.exports[pi].name));
         self.db.get(owner).prop(name).map(|p| p.slot)
+    }
+
+    /// A variable reference as a local or instance access, depending on where it is declared.
+    fn var_expr(&mut self, r: ObjRef) -> Option<Expr> {
+        let pkg = self.pkg();
+        let (pp, pi) = self.db.set.resolve(&pkg, r)?;
+        let outer = pp.exports[pi].outer;
+        let (op_, oi) = self.db.set.resolve(&pp, outer)?;
+        let owner = self.db.load_struct(&op_, oi)?;
+        let name = self.db.names.intern(pp.name(pp.exports[pi].name));
+        let slot = self.db.get(owner).prop(name)?.slot;
+        Some(if self.db.get(owner).kind == crate::class_db::StructKind::Function { Expr::Local(slot) } else { Expr::Instance(slot) })
     }
 
     fn struct_ref(&mut self, r: ObjRef) -> Option<StructId> {
@@ -272,6 +288,19 @@ impl<'a, 'd> Compiler<'a, 'd> {
             op::DYN_ARRAY_REMOVE => Expr::DynArrayRemove(arg(self, 0), arg(self, 1), arg(self, 2)),
             op::PRIMITIVE_CAST => match t.operands.first() {
                 Some(Operand::U8(c)) => Expr::Cast(*c, arg(self, 0)),
+                _ => Expr::Unsupported(t.op),
+            },
+            op::DELEGATE_FUNCTION => {
+                let var = self.var_expr(Self::obj_operand(t, 0)).unwrap_or(Expr::Unsupported(t.op));
+                let n = match t.operands.get(1) {
+                    Some(Operand::Name(n)) => self.name(*n),
+                    _ => Name::NONE,
+                };
+                let args = self.args(t);
+                Expr::DelegateCall(Box::new(var), n, args)
+            }
+            op::DELEGATE_PROPERTY => match t.operands.first() {
+                Some(Operand::Name(n)) => Expr::DelegateValue(self.name(*n)),
                 _ => Expr::Unsupported(t.op),
             },
             other => Expr::Unsupported(other),

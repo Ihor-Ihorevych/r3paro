@@ -5,6 +5,7 @@ pub mod compile;
 pub mod names;
 pub mod natives;
 pub mod objects;
+pub mod states;
 pub mod value;
 pub mod vm;
 

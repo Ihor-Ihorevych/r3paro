@@ -42,7 +42,40 @@ pub struct Frame {
     pub this: Option<ObjId>,
     pub locals: Vec<Value>,
     switch_value: Option<Value>,
+    iters: Vec<IterState>,
 }
+
+impl Frame {
+    pub fn new(func: StructId, this: Option<ObjId>, locals: Vec<Value>) -> Frame {
+        Frame { func, this, locals, switch_value: None, iters: Vec::new() }
+    }
+}
+
+/// A running `foreach`: the values each iteration writes to the out arguments.
+struct IterState {
+    items: Vec<Vec<Value>>,
+    index: usize,
+    places: Vec<(usize, Place)>,
+    /// First statement of the loop body.
+    body: usize,
+}
+
+pub enum RunEnd {
+    Finished,
+    /// State code waiting on a latent action; resumes at this statement.
+    Suspended(usize),
+}
+
+/// What suspended state code is waiting for.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Latent {
+    Sleep(f32),
+    /// Waiting on something the world decides (animation end, movement); cleared with `finish_latent`.
+    Other(&'static str),
+}
+
+/// An iterator native: one entry per iteration, each holding the values of all arguments.
+pub type IterFn = fn(&mut Vm<'_>, Option<ObjId>, &[Value]) -> VmResult<Vec<Vec<Value>>>;
 
 #[derive(Clone, Debug)]
 enum Root {
@@ -85,6 +118,19 @@ pub struct Vm<'s> {
     pub rng: u32,
     /// `Object.AndAnd_BoolBool` and `Object.OrOr_BoolBool`, whose right operand is evaluated only when needed.
     short_circuit: [Option<StructId>; 2],
+    iterators: HashMap<String, IterFn>,
+    /// Objects whose state code is waiting, and on what.
+    pub latent: HashMap<ObjId, Latent>,
+    /// Where each object's state code resumes.
+    pub state_pc: HashMap<ObjId, usize>,
+    /// Objects that changed state while their state code ran.
+    pub(crate) state_changed: std::collections::HashSet<ObjId>,
+    /// Statement being executed, for iterators to find their loop body.
+    current_pc: usize,
+    /// World data of the crate that embeds the VM.
+    pub ext: Option<Box<dyn std::any::Any>>,
+    /// The state each object was in before its last state change.
+    pub last_state: HashMap<ObjId, Option<StructId>>,
 }
 
 impl<'s> Vm<'s> {
@@ -106,8 +152,21 @@ impl<'s> Vm<'s> {
             steps: 0,
             rng: 0x1234_5678,
             short_circuit: [None, None],
+            iterators: HashMap::new(),
+            latent: HashMap::new(),
+            state_pc: HashMap::new(),
+            state_changed: Default::default(),
+            current_pc: 0,
+            ext: None,
+            last_state: HashMap::new(),
         }
         .with_short_circuit()
+        .with_states()
+    }
+
+    fn with_states(mut self) -> Self {
+        crate::states::register(&mut self);
+        self
     }
 
     fn with_short_circuit(mut self) -> Self {
@@ -126,9 +185,20 @@ impl<'s> Vm<'s> {
         }
     }
 
+    /// Adds or replaces a native, by `Class.Function`.
+    pub fn register(&mut self, path: &str, f: NativeFn) {
+        self.natives.insert(path.to_ascii_lowercase(), f);
+    }
+
+    /// Adds an iterator native, by `Class.Function`.
+    pub fn register_iterator(&mut self, path: &str, f: IterFn) {
+        self.iterators.insert(path.to_ascii_lowercase(), f);
+    }
+
     /// Whether a native function has an implementation.
     pub fn has_native(&self, f: StructId) -> bool {
-        self.natives.contains_key(&self.function_path(f).to_ascii_lowercase())
+        let p = self.function_path(f).to_ascii_lowercase();
+        self.natives.contains_key(&p) || self.iterators.contains_key(&p)
     }
 
     pub fn code(&mut self, id: StructId) -> Rc<Code> {
@@ -433,6 +503,17 @@ impl<'s> Vm<'s> {
                     None => return Err(VmError::Unimplemented(format!("native index {index} has no declaration"))),
                 }
             }
+            Expr::DelegateValue(name) => Value::Delegate(ctx.or(frame.this), *name),
+            Expr::DelegateCall(var, fallback, args) => {
+                let (target, name) = match self.eval(var, frame, ctx)? {
+                    Value::Delegate(o, n) if n != Name::NONE => (o, n),
+                    _ => (ctx.or(frame.this), *fallback),
+                };
+                match self.find_function(target, None, name) {
+                    Some(f) => self.call(f, target, args, frame, ctx)?,
+                    None => Value::Empty,
+                }
+            }
             Expr::New(_) => return Err(VmError::Unimplemented("new".into())),
             Expr::Unsupported(op) => return Err(VmError::Unimplemented(format!("opcode {op:#04x}"))),
             other => return Err(VmError::Runtime(format!("{other:?} used as an expression"))),
@@ -512,7 +593,7 @@ impl<'s> Vm<'s> {
             .map(|p| p.slot)
             .collect();
         let ret = def.props.iter().find(|p| p.flags & CPF_RETURN_PARM != 0).map(|p| p.slot);
-        let mut frame = Frame { func: f, this, locals: def.defaults.clone(), switch_value: None };
+        let mut frame = Frame::new(f, this, def.defaults.clone());
         for (i, slot) in params.iter().enumerate() {
             if let Some(v) = args.get(i) {
                 frame.locals[*slot] = coerce(&frame.locals[*slot], v.clone());
@@ -531,25 +612,49 @@ impl<'s> Vm<'s> {
         Ok(ret.map(|s| frame.locals[s].clone()).unwrap_or(Value::Empty))
     }
 
-    fn run(&mut self, code: &Code, frame: &mut Frame, start: usize) -> VmResult<()> {
-        let mut pc = start;
-        let ret_slot = self.db.get(frame.func).props.iter().find(|p| p.flags & CPF_RETURN_PARM != 0).map(|p| p.slot);
-        while pc < code.statements.len() {
-            self.steps += 1;
-            if self.steps % 10_000_000 == 0 && self.depth > 0 {
-                // A single call running this long is a runaway loop.
-                return Err(VmError::Runtime("runaway loop".into()));
-            }
-            match self.exec(&code.statements[pc], frame, ret_slot)? {
-                Flow::Next => pc += 1,
-                Flow::Jump(t) => pc = t,
-                Flow::Return | Flow::Stop => return Ok(()),
-            }
-        }
-        Ok(())
+    pub(crate) fn run_state_code(&mut self, code: &Code, frame: &mut Frame, start: usize) -> VmResult<RunEnd> {
+        self.depth += 1;
+        let r = self.run(code, frame, start);
+        self.depth -= 1;
+        r
     }
 
-    fn exec(&mut self, s: &Expr, frame: &mut Frame, ret_slot: Option<usize>) -> VmResult<Flow> {
+    fn run(&mut self, code: &Code, frame: &mut Frame, start: usize) -> VmResult<RunEnd> {
+        let mut pc = start;
+        let ret_slot = self.db.get(frame.func).props.iter().find(|p| p.flags & CPF_RETURN_PARM != 0).map(|p| p.slot);
+        let state_obj = frame.this.filter(|_| self.db.get(frame.func).kind == StructKind::State);
+        let mut budget: u64 = 10_000_000;
+        while pc < code.statements.len() {
+            self.steps += 1;
+            budget -= 1;
+            if budget == 0 {
+                return Err(VmError::Runtime(format!("runaway loop in {}", self.function_path(frame.func))));
+            }
+            self.current_pc = pc;
+            let flow = self.exec(&code.statements[pc], code, frame, ret_slot)?;
+            // State code stops when the object leaves the state or a latent action starts.
+            if let Some(o) = state_obj {
+                if self.state_changed.remove(&o) {
+                    return Ok(RunEnd::Finished);
+                }
+                if self.latent.contains_key(&o) {
+                    let next = match flow {
+                        Flow::Jump(t) => t,
+                        _ => pc + 1,
+                    };
+                    return Ok(RunEnd::Suspended(next));
+                }
+            }
+            match flow {
+                Flow::Next => pc += 1,
+                Flow::Jump(t) => pc = t,
+                Flow::Return | Flow::Stop => return Ok(RunEnd::Finished),
+            }
+        }
+        Ok(RunEnd::Finished)
+    }
+
+    fn exec(&mut self, s: &Expr, code: &Code, frame: &mut Frame, ret_slot: Option<usize>) -> VmResult<Flow> {
         Ok(match s {
             Expr::Jump(t) => Flow::Jump(*t),
             Expr::JumpIfNot(t, cond) => {
@@ -590,15 +695,81 @@ impl<'s> Vm<'s> {
                 }
                 Flow::Next
             }
-            Expr::Iterator(..) | Expr::IteratorNext | Expr::IteratorPop => {
-                return Err(VmError::Unimplemented("iterators".into()));
+            Expr::GotoLabel(label) => {
+                let name = self.eval(label, frame, None)?.as_name();
+                match code.labels.get(&name) {
+                    Some(&i) => Flow::Jump(i),
+                    None => {
+                        let at = self.function_path(frame.func);
+                        let label = self.db.names.get(name).to_string();
+                        self.warn(format!("{at}: no label {label}"));
+                        Flow::Stop
+                    }
+                }
             }
-            Expr::GotoLabel(_) => return Err(VmError::Unimplemented("goto label".into())),
+            Expr::Iterator(call, end) => {
+                let (f, args) = match &**call {
+                    Expr::Native(_, Some(f), args) | Expr::Final(f, args) => (*f, args),
+                    _ => return Err(VmError::Runtime("iterator over a non-function".into())),
+                };
+                let path = self.function_path(f).to_ascii_lowercase();
+                let Some(iter) = self.iterators.get(&path).copied() else {
+                    return Err(VmError::Unimplemented(self.function_path(f)));
+                };
+                let mut values = Vec::new();
+                let mut places = Vec::new();
+                for a in args {
+                    match a {
+                        Expr::Nothing => values.push(Value::Empty),
+                        Expr::Local(_) | Expr::Instance(_) | Expr::StructMember(..) | Expr::ArrayElement(..) | Expr::DynArrayElement(..) => {
+                            let p = self.place(a, frame, None)?;
+                            values.push(self.read(&p, frame));
+                            places.push((values.len() - 1, p));
+                        }
+                        other => values.push(self.eval(other, frame, None)?),
+                    }
+                }
+                let body = self.current_pc + 1;
+                let this = frame.this;
+                let items = iter(self, this, &values)?;
+                if items.is_empty() {
+                    return Ok(Flow::Jump(*end));
+                }
+                let state = IterState { items, index: 0, places, body };
+                self.write_iter(&state, frame);
+                frame.iters.push(state);
+                Flow::Next
+            }
+            Expr::IteratorNext => {
+                let Some(mut state) = frame.iters.pop() else { return Ok(Flow::Next) };
+                state.index += 1;
+                let more = state.index < state.items.len();
+                if more {
+                    self.write_iter(&state, frame);
+                }
+                let body = state.body;
+                // Kept on the stack either way: the pop after the loop removes it.
+                frame.iters.push(state);
+                if more { Flow::Jump(body) } else { Flow::Next }
+            }
+            Expr::IteratorPop => {
+                frame.iters.pop();
+                Flow::Next
+            }
             other => {
                 self.eval(other, frame, None)?;
                 Flow::Next
             }
         })
+    }
+
+    fn write_iter(&mut self, state: &IterState, frame: &mut Frame) {
+        let item = &state.items[state.index];
+        for (i, p) in &state.places {
+            if let Some(v) = item.get(*i) {
+                self.write(p, frame, v.clone());
+            }
+        }
     }
 }
 
