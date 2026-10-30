@@ -36,6 +36,12 @@ impl Config {
         self.user.get(section, key).or_else(|| self.ini.get(section, key))
     }
 
+    /// Every value of a repeated key (dynamic arrays): `User.ini`'s when it has any, else `Default.ini`'s.
+    pub fn get_all(&self, section: &str, key: &str) -> Vec<&str> {
+        let user = self.user.get_all(section, key);
+        if user.is_empty() { self.ini.get_all(section, key) } else { user }
+    }
+
     /// A localized string from `<package>.<language>` (falling back to `<package>.int`).
     pub fn localize(&mut self, package: &str, section: &str, key: &str) -> Option<String> {
         for lang in [self.language.clone(), "int".to_string()] {

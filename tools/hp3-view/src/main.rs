@@ -171,6 +171,21 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
     let k = std::f32::consts::TAU / 65536.0;
     let back = Vec3::new((yaw as f32 * k).cos(), (yaw as f32 * k).sin(), 0.0);
     let mut camera = Camera { position: p - back * 160.0 + Vec3::Z * 50.0, rotation: [-1500, yaw, 0], fov_degrees: 90.0 };
+    // The game's own camera, when it runs and no actor was asked for.
+    if std::env::var_os("HP3_VIEW_CLASS").is_none() {
+        let mut args = [Value::Object(None), Value::Empty, Value::Empty];
+        if vm.event(pc, "PlayerCalcView", &mut args).is_ok() {
+            let (loc, rot) = (args[1].fields().to_vec(), args[2].fields().to_vec());
+            if loc.len() == 3 && rot.len() == 3 && loc.iter().any(|v| v.as_float() != 0.0) {
+                eprintln!("game camera at {:?} rotation {:?}", loc, rot);
+                camera = Camera {
+                    position: Vec3::new(loc[0].as_float(), loc[1].as_float(), loc[2].as_float()),
+                    rotation: [rot[0].as_int(), rot[1].as_int(), rot[2].as_int()],
+                    fov_degrees: 90.0,
+                };
+            }
+        }
+    }
     // HP3_VIEW_CAM=x,y,z,pitch,yaw places the camera explicitly.
     if let Ok(c) = std::env::var("HP3_VIEW_CAM") {
         let v: Vec<f32> = c.split(',').filter_map(|x| x.trim().parse().ok()).collect();

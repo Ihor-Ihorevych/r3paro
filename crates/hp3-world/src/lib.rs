@@ -5,6 +5,7 @@
 
 pub mod anim;
 pub mod collision;
+pub mod config;
 pub mod nav;
 pub mod input;
 pub mod natives;
@@ -125,6 +126,10 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Res
     natives::register(vm);
     anim::register(vm);
     nav::register(vm);
+    let configured = config::apply(vm, &config);
+    if std::env::var_os("HP3_CONFIG_DEBUG").is_some() {
+        eprintln!("config: {configured} class default values read from the ini files");
+    }
     // Every scripted object of the map, so references between them resolve to live instances.
     let mut level_order = Vec::new();
     let mut level_model = None;
@@ -223,12 +228,57 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Res
         // A loaded map finishes by accepting the player's travel: pawn first, then its controller.
         if let Some(pc) = world(vm).player {
             if let Some(pawn) = get(vm, pc, "Pawn").as_obj() {
+                arrive_from(vm, pawn);
                 fire(vm, pawn, "TravelPostAccept", &mut []);
             }
             fire(vm, pc, "TravelPostAccept", &mut []);
+            init_camera_settings(vm, pc);
         }
     }
     Ok(())
+}
+
+/// A map loaded directly has no camera settings carried over from the previous level (or set by the new
+/// game's intro): if the player's camera has none, it takes its pawn's, as switching pawns does.
+fn init_camera_settings(vm: &mut Vm<'_>, pc: ObjId) {
+    let (Some(cam), Some(pawn)) = (get(vm, pc, "Camera").as_obj(), get(vm, pc, "Pawn").as_obj()) else { return };
+    let unset = get(vm, cam, "CurrentSet").fields().get(1).is_none_or(|d| d.as_float() == 0.0);
+    if unset {
+        fire(vm, cam, "InitTarget", &mut [Value::Object(Some(pawn)), Value::Float(0.0), Value::Bool(true)]);
+    }
+}
+
+/// Makes the player arrive as if travelling from a neighbouring level, so the level's `SmartStart` for it places
+/// the player, attaches the companions and starts the game camera. `HP3_FROM` names the previous level;
+/// unset, the map's first `SmartStart` is used; `none` arrives from nowhere (a plain start).
+fn arrive_from(vm: &mut Vm<'_>, pawn: ObjId) {
+    let wanted = std::env::var("HP3_FROM").ok();
+    if wanted.as_deref().is_some_and(|w| w.eq_ignore_ascii_case("none")) {
+        return;
+    }
+    let Some(smart) = vm.db.find("SmartStart") else { return };
+    let actors = world(vm).actors.clone();
+    let mut chosen = None;
+    for a in actors {
+        if !vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, smart)) {
+            continue;
+        }
+        let from = get(vm, a, "PreviousLevelName").as_str().to_string();
+        if from.is_empty() {
+            continue;
+        }
+        match &wanted {
+            Some(w) if from.eq_ignore_ascii_case(w) => {
+                chosen = Some(from);
+                break;
+            }
+            None if chosen.is_none() => chosen = Some(from),
+            _ => {}
+        }
+    }
+    if let Some(from) = chosen {
+        set(vm, pawn, "PreviousLevelName", Value::Str(from));
+    }
 }
 
 /// Advances the level by `dt` seconds: actor ticks, timers, then state code.
@@ -255,10 +305,14 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     anim::update_movement(vm);
     anim::tick(vm, dt);
     anim::update_attachments(vm);
+    // Ticked actors carry the frame's parity in `bTicked`; scripts compare it to see a new frame (HP3's
+    // camera updates its view once per frame this way).
+    let parity = world(vm).frame % 2 == 1;
     for &a in &actors {
         if vm.db.objects.get(a).deleted {
             continue;
         }
+        set(vm, a, "bTicked", Value::Bool(parity));
         fire(vm, a, "Tick", &mut [Value::Float(dt)]);
     }
     let mut due = Vec::new();

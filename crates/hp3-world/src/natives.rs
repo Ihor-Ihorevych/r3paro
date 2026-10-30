@@ -399,18 +399,13 @@ pub fn register(vm: &mut Vm<'_>) {
     vm.register("Object.SetPropertyText", |vm, this, a| {
         if let Some(o) = this {
             let (prop, text) = (a[0].as_str().to_string(), a[1].as_str().to_string());
-            let cur = get(vm, o, &prop);
-            let v = match cur {
-                Value::Int(_) => Value::Int(text.trim().parse().unwrap_or(0)),
-                Value::Float(_) => Value::Float(text.trim().parse().unwrap_or(0.0)),
-                Value::Byte(_) => Value::Byte(text.trim().parse().unwrap_or(0)),
-                Value::Bool(_) => Value::Bool(text.trim().eq_ignore_ascii_case("true") || text.trim() == "1"),
-                Value::Name(_) => Value::Name(vm.db.names.intern(text.trim())),
-                Value::Str(_) => Value::Str(text),
-                Value::Object(_) => Value::Object(crate::find_object(vm, text.trim())),
-                _ => return Ok(Value::Empty),
-            };
-            set(vm, o, &prop, v);
+            let ty = vm.db.objects.get(o).class.and_then(|c| {
+                let n = vm.db.names.find(&prop)?;
+                vm.db.get(c).prop(n).map(|p| p.ty.clone())
+            });
+            if let Some(v) = ty.and_then(|ty| crate::config::parse(vm, &ty, &text)) {
+                set(vm, o, &prop, v);
+            }
         }
         Ok(Value::Empty)
     });

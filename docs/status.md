@@ -65,6 +65,12 @@ Milestones are from the plan (M0 to M12).
 - `Volume.Encompasses` tests the point against the volume brush's BSP. `SetOpacity` is recorded for the
   renderer; emitters are not simulated yet (`ParticleEmitter.Trigger` does nothing).
 - All 34 maps run 600 ticks with no script errors and no unimplemented natives reached.
+- **Config and arrival**: `config` class properties are read from the ini files (each class's own section,
+  parents first). A map loaded directly arrives as if from a neighbouring level: the pawn takes the
+  `PreviousLevelName` of the map's first `SmartStart` (or `HP3_FROM=<level>`; `HP3_FROM=none` for a bare
+  start), so the game places Harry, attaches Ron and Hermione as followers and starts its own camera, which
+  takes the pawn's camera settings when none were carried over. Ticked actors flip `bTicked` each frame
+  (HP3's camera computes its view once per frame on that).
 - M7 onwards: not started.
 
 ## Checking

@@ -403,11 +403,14 @@ fn token_text(pkg: &Package, t: &hp3_package::bytecode::Token, depth: usize, out
 fn disasm(root: &Path, package: &str, class: &str) -> R {
     let set = PackageSet::open(root)?;
     let pkg = set.get(package)?;
-    let ci = pkg.find_export_path(&format!("{class}@Class")).ok_or("no such class")?;
+    // `*` disassembles every class of the package.
+    let all = class == "*";
+    let ci = if all { 0 } else { pkg.find_export_path(&format!("{class}@Class")).ok_or("no such class")? };
     let mut out = String::new();
     for i in 0..pkg.exports.len() {
         let path = pkg.ref_path(ObjRef::from_export(i));
-        let under = pkg.exports[i].outer == ObjRef::from_export(ci)
+        let under = all
+            || pkg.exports[i].outer == ObjRef::from_export(ci)
             || pkg.ref_outer(pkg.exports[i].outer) == ObjRef::from_export(ci)
             || i == ci;
         if !under {
