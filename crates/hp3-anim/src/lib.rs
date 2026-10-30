@@ -204,19 +204,93 @@ pub fn bones_with(
     frame: f32,
     turns: &[(usize, Mat4)],
 ) -> Vec<Mat4> {
-    let mut poses = skel.reference.clone();
-    if let (Some((set, map)), Some(seq)) = (set, seq)
-        && let Some(s) = set.sequences.get(seq)
+    bones_layered(skel, set, seq, frame, &[], turns)
+}
+
+/// A sequence blended over the base pose: with weight `alpha`, on the bones under `root` (all when `None`).
+#[derive(Clone, Copy, Debug)]
+pub struct Layer {
+    pub sequence: Option<usize>,
+    pub frame: f32,
+    pub alpha: f32,
+    pub root: Option<usize>,
+}
+
+/// The poses a sequence gives each bone at `frame`; `None` for bones it does not animate.
+fn sampled(set: &AnimSet, map: &[Option<usize>], seq: usize, frame: f32) -> Vec<Option<BonePose>> {
+    let mut out = vec![None; map.len()];
+    if let Some(s) = set.sequences.get(seq)
         && let Some(motion) = set.anim.motions.get(s.motion)
     {
         let length = motion.track_time.max(1.0);
         let t = (frame / s.frames as f32).clamp(0.0, 1.0) * length;
+        // Walking and running cycles sway their root bone from side to side, in place; the character's
+        // physics moves it, so the root keeps the cycle's average horizontal position.
+        let locomotion = s.name.starts_with("run") || s.name.starts_with("walk");
         for (bone, anim_bone) in map.iter().enumerate() {
             let Some(ab) = anim_bone else { continue };
-            if let Some(track) = motion.tracks.get(*ab)
-                && let Some(p) = sample_track(track, t, length)
-            {
-                poses[bone] = p;
+            if let Some(track) = motion.tracks.get(*ab) {
+                out[bone] = sample_track(track, t, length);
+                if bone == 0
+                    && locomotion
+                    && !track.positions.is_empty()
+                    && let Some(p) = &mut out[bone]
+                {
+                    let n = track.positions.len() as f32;
+                    p.position.x = track.positions.iter().map(|v| v.x).sum::<f32>() / n;
+                    p.position.y = track.positions.iter().map(|v| v.y).sum::<f32>() / n;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Whether `bone` is `root` or below it.
+fn under(parents: &[usize], mut bone: usize, root: usize) -> bool {
+    loop {
+        if bone == root {
+            return true;
+        }
+        if bone == 0 || parents[bone] >= bone {
+            return false;
+        }
+        bone = parents[bone];
+    }
+}
+
+/// Bone-to-mesh matrices for a base sequence with `layers` blended over it, in order.
+pub fn bones_layered(
+    skel: &Skeleton,
+    set: Option<(&AnimSet, &[Option<usize>])>,
+    seq: Option<usize>,
+    frame: f32,
+    layers: &[Layer],
+    turns: &[(usize, Mat4)],
+) -> Vec<Mat4> {
+    let mut poses = skel.reference.clone();
+    if let Some((set, map)) = set {
+        if let Some(seq) = seq {
+            for (bone, p) in sampled(set, map, seq, frame).into_iter().enumerate() {
+                if let Some(p) = p {
+                    poses[bone] = p;
+                }
+            }
+        }
+        for l in layers {
+            let (Some(ls), true) = (l.sequence, l.alpha > 0.001) else { continue };
+            let alpha = l.alpha.min(1.0);
+            for (bone, p) in sampled(set, map, ls, l.frame).into_iter().enumerate() {
+                let Some(p) = p else { continue };
+                if l.root.is_some_and(|r| !under(&skel.parents, bone, r)) {
+                    continue;
+                }
+                let base = poses[bone];
+                let mut q = p.rotation;
+                if base.rotation.dot(q) < 0.0 {
+                    q = -q;
+                }
+                poses[bone] = BonePose { rotation: base.rotation.slerp(q, alpha), position: base.position.lerp(p.position, alpha) };
             }
         }
     }
@@ -243,7 +317,19 @@ pub fn pose_with(
     frame: f32,
     turns: &[(usize, Mat4)],
 ) -> Vec<Mat4> {
-    let world = bones_with(skel, set, seq, frame, turns);
+    pose_layered(skel, set, seq, frame, &[], turns)
+}
+
+/// Like `pose_with`, with layers blended over the base sequence.
+pub fn pose_layered(
+    skel: &Skeleton,
+    set: Option<(&AnimSet, &[Option<usize>])>,
+    seq: Option<usize>,
+    frame: f32,
+    layers: &[Layer],
+    turns: &[(usize, Mat4)],
+) -> Vec<Mat4> {
+    let world = bones_layered(skel, set, seq, frame, layers, turns);
     world.iter().zip(&skel.inv_reference_world).map(|(w, inv)| *w * *inv).collect()
 }
 

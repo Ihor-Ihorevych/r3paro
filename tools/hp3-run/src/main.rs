@@ -246,6 +246,25 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             }
             hp3_world::world(&mut vm).input.mouse_move(2.0, 0.0);
         }
+        // HP3_PAWN_LOG=<every>: the player pawn's heading, velocity direction and the controller's view yaw.
+        if let Some(every) = std::env::var("HP3_PAWN_LOG").ok().and_then(|v| v.parse::<u32>().ok())
+            && frame % every == 0
+            && let Some(pc) = hp3_world::world(&mut vm).player
+            && let Some(p) = hp3_world::get(&mut vm, pc, "Pawn").as_obj()
+        {
+            let yaw = |v: hp3_script::Value| v.fields().get(1).map(|f| f.as_int() & 0xFFFF).unwrap_or(0);
+            let (pr, cr) = (hp3_world::get(&mut vm, p, "Rotation"), hp3_world::get(&mut vm, pc, "Rotation"));
+            let vel = hp3_world::physics::vec(&hp3_world::get(&mut vm, p, "Velocity"));
+            let vyaw = (vel.y.atan2(vel.x) * 65536.0 / std::f32::consts::TAU).round() as i32 & 0xFFFF;
+            let anim = hp3_world::get(&mut vm, p, "AnimSequence").as_name();
+            println!(
+                "pawnlog {frame}: pawn yaw {} vel yaw {vyaw} speed {:.0} view yaw {} anim {}",
+                yaw(pr),
+                vel.truncate().length(),
+                yaw(cr),
+                vm.db.names.get(anim)
+            );
+        }
         let tick_start = std::time::Instant::now();
         hp3_world::tick(&mut vm, 1.0 / 60.0);
         follow_travel(&mut vm);

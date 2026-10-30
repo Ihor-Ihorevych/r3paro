@@ -25,6 +25,14 @@ pub struct Channel {
     pub playing: bool,
     /// Blend weight set by `AnimBlendParams`/`AnimBlendToAlpha` (channel 0 is always full).
     pub alpha: f32,
+    /// Where `alpha` is heading and how fast (per second); 0 means it jumps there.
+    pub target_alpha: f32,
+    pub blend_rate: f32,
+    /// The bone (lower case) the channel's animation is limited to, with everything below it.
+    pub bone: Option<String>,
+    /// The script set this channel's blending (`AnimBlendParams`/`AnimBlendToAlpha`); otherwise it acts at full
+    /// strength over the whole body while its animation plays.
+    pub scripted_blend: bool,
 }
 
 #[derive(Default)]
@@ -196,7 +204,7 @@ pub fn update_attachments(vm: &mut Vm<'_>) {
 fn channel_mut<'a>(vm: &'a mut Vm<'_>, actor: ObjId, index: usize) -> &'a mut Channel {
     let a = world(vm).anim.actors.entry(actor).or_default();
     while a.channels.len() <= index {
-        a.channels.push(Channel { alpha: if a.channels.is_empty() { 1.0 } else { 0.0 }, ..Default::default() });
+        a.channels.push(Channel { alpha: 1.0, target_alpha: 1.0, ..Default::default() });
     }
     &mut a.channels[index]
 }
@@ -226,7 +234,7 @@ fn play(vm: &mut Vm<'_>, actor: ObjId, seq: Name, rate: f32, channel: usize, loo
         ch.rate = base * rate;
         return true;
     }
-    *ch = Channel { sequence: Some(si), frame: 0.0, rate: base * rate, looping, playing: true, alpha: ch.alpha };
+    *ch = Channel { sequence: Some(si), frame: 0.0, rate: base * rate, looping, playing: true, ..ch.clone() };
     if channel == 0 {
         set_script_view(vm, actor, seq, 0.0, base * rate);
     }
@@ -248,6 +256,10 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         let mut looped = false;
         if let Some(actor) = world(vm).anim.actors.get_mut(&a) {
             for (ci, ch) in actor.channels.iter_mut().enumerate() {
+                if ci > 0 && ch.alpha != ch.target_alpha {
+                    let step = if ch.blend_rate > 0.0 { ch.blend_rate * dt } else { f32::MAX };
+                    ch.alpha = if ch.alpha < ch.target_alpha { (ch.alpha + step).min(ch.target_alpha) } else { (ch.alpha - step).max(ch.target_alpha) };
+                }
                 let Some(si) = ch.sequence else { continue };
                 if !ch.playing {
                     continue;
@@ -261,6 +273,10 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
                     } else {
                         ch.frame = frames;
                         ch.playing = false;
+                        if ci > 0 && !ch.scripted_blend {
+                            ch.alpha = 0.0;
+                            ch.target_alpha = 0.0;
+                        }
                         ended.push(ci);
                     }
                 }
@@ -463,17 +479,41 @@ pub fn register(vm: &mut Vm<'_>) {
         }
         Ok(Value::Empty)
     });
+    // AnimBlendParams(Channel, DesiredStrength, InTime, OutTime, BoneName, bGlobalPose): limits the channel to a
+    // bone and its children and fades it to the strength over InTime.
     vm.register("Actor.AnimBlendParams", |vm, this, a| {
         if let Some(o) = this {
             let ci = channel_arg(a, 0);
-            channel_mut(vm, o, ci).alpha = a.get(1).map(Value::as_float).unwrap_or(0.0);
+            let strength = a.get(1).map(Value::as_float).unwrap_or(0.0);
+            let in_time = a.get(2).map(Value::as_float).unwrap_or(0.0);
+            let bone = match a.get(4) {
+                Some(Value::Name(n)) if *n != Name::NONE => Some(vm.db.names.get(*n).to_ascii_lowercase()),
+                _ => None,
+            };
+            let ch = channel_mut(vm, o, ci);
+            ch.scripted_blend = true;
+            ch.bone = bone;
+            ch.target_alpha = strength;
+            ch.blend_rate = if in_time > 0.0 { 1.0 / in_time } else { 0.0 };
+            if in_time <= 0.0 {
+                ch.alpha = strength;
+            }
         }
         Ok(Value::Empty)
     });
+    // AnimBlendToAlpha(Channel, Alpha, TimeToBlend)
     vm.register("Actor.AnimBlendToAlpha", |vm, this, a| {
         if let Some(o) = this {
             let ci = channel_arg(a, 0);
-            channel_mut(vm, o, ci).alpha = a.get(1).map(Value::as_float).unwrap_or(0.0);
+            let alpha = a.get(1).map(Value::as_float).unwrap_or(0.0);
+            let time = a.get(2).map(Value::as_float).unwrap_or(0.0);
+            let ch = channel_mut(vm, o, ci);
+            ch.scripted_blend = true;
+            ch.target_alpha = alpha;
+            ch.blend_rate = if time > 0.0 { 1.0 / time } else { 0.0 };
+            if time <= 0.0 {
+                ch.alpha = alpha;
+            }
         }
         Ok(Value::Empty)
     });

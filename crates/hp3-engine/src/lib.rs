@@ -245,7 +245,7 @@ struct Skinned {
     /// Bone maps per animation set (by the set's address).
     bone_maps: HashMap<usize, Vec<Option<usize>>>,
     /// The (sequence, frame) last written, to skip unchanged poses.
-    last: Option<(Option<usize>, u32)>,
+    last: Option<(Option<usize>, u32, u64)>,
 }
 
 /// Uploaded meshes, keyed by mesh and skins; animated actors' own skinned copies.
@@ -308,20 +308,34 @@ impl MeshCache {
             .anim
             .actors
             .get(&actor)
-            .map(|a| (a.set.clone(), a.channels.first().cloned(), a.bone_turns.clone()));
+            .map(|a| (a.set.clone(), a.channels.clone(), a.bone_turns.clone()));
         let s = self.skinned.get_mut(&actor)?;
-        let (set, channel, turns) = state.unwrap_or((None, None, Vec::new()));
-        let (seq, frame) = channel.map(|c| (c.sequence, c.frame)).unwrap_or((None, 0.0));
+        let (set, channels, turns) = state.unwrap_or((None, Vec::new(), Vec::new()));
+        let (seq, frame) = channels.first().map(|c| (c.sequence, c.frame)).unwrap_or((None, 0.0));
+        // Other channels with a sequence and some strength are blended over the base, limited to their bone.
+        let mut layers: Vec<hp3_anim::Layer> = Vec::new();
+        let mut layer_hash: u64 = 0;
+        for c in channels.iter().skip(1) {
+            if c.sequence.is_some() && c.alpha > 0.001 {
+                let root = c.bone.as_deref().and_then(|b| s.skeleton.find(b));
+                layers.push(hp3_anim::Layer { sequence: c.sequence, frame: c.frame, alpha: c.alpha, root });
+                layer_hash = layer_hash
+                    .wrapping_mul(1_000_003)
+                    .wrapping_add(c.sequence.unwrap_or(0) as u64 + 1)
+                    .wrapping_mul(31)
+                    .wrapping_add(c.frame.to_bits() as u64 ^ ((c.alpha.to_bits() as u64) << 20));
+            }
+        }
         // Bone controllers change the pose too: they are part of what was last written.
         let turn_sum: i64 = turns.iter().map(|t| t.1.iter().map(|&v| v as i64).sum::<i64>() + (t.2 * 1000.0) as i64).sum();
-        let key = (seq, frame.to_bits() ^ (turn_sum as u32));
+        let key = (seq, frame.to_bits() ^ (turn_sum as u32), layer_hash);
         if s.last != Some(key) {
             let hp3_assets::Asset::SkeletalMesh(m) = &*s.asset else { return None };
             let skin = match &set {
                 Some(set) => {
                     let map = s.bone_maps.entry(Rc::as_ptr(set) as usize).or_insert_with(|| set.bone_map(&s.skeleton));
                     let t = hp3_world::anim::turns_for(&s.skeleton, &turns);
-                    hp3_anim::pose_with(&s.skeleton, Some((set, map)), seq, frame, &t)
+                    hp3_anim::pose_layered(&s.skeleton, Some((set, map)), seq, frame, &layers, &t)
                 }
                 None => hp3_anim::pose(&s.skeleton, None, None, 0.0),
             };

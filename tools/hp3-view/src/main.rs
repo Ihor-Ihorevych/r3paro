@@ -100,6 +100,24 @@ fn pose(root: &Path, package: &str, mesh: &str, out: &Path, seq: Option<&str>, f
         Some(Asset::MeshAnimation(a)) => Some(hp3_anim::AnimSet::new((**a).clone(), &ap)),
         _ => None,
     });
+    // HP3_PROBE_SEQ=<sequence>: how far a few bones travel over the sequence (root motion and sway).
+    if let (Ok(name), Some(set)) = (std::env::var("HP3_PROBE_SEQ"), &anim)
+        && let Some(seq) = set.find(&name)
+    {
+        let map = set.bone_map(&skel);
+        let frames = set.sequences[seq].frames;
+        println!("{name}: {frames} frames at {} per second", set.sequences[seq].rate);
+        for bone in 0..skel.len().min(6) {
+            let (mut lo, mut hi) = (glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN));
+            for f in 0..frames {
+                let m = hp3_anim::bones(&skel, Some((set, &map)), Some(seq), f as f32)[bone];
+                let p = m.w_axis.truncate();
+                lo = lo.min(p);
+                hi = hi.max(p);
+            }
+            println!("  bone {bone} {:20} travels x {:.1} y {:.1} z {:.1}", skel.names[bone], hi.x - lo.x, hi.y - lo.y, hi.z - lo.z);
+        }
+    }
     let (points, label) = match &anim {
         Some(set_) => {
             let map = set_.bone_map(&skel);
