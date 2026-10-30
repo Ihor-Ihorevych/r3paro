@@ -175,6 +175,27 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                     println!("  zone {name}: {}", v.join(" "));
                 }
             }
+            if std::env::var("HP3_TERRAIN_DEBUG").is_ok() {
+                let actors = hp3_world::world(&mut vm).actors.clone();
+                let ti = vm.db.find("TerrainInfo");
+                for a in actors {
+                    if vm.db.objects.get(a).class != ti {
+                        continue;
+                    }
+                    println!("  terrain {} scale {:?} at {:?}", hp3_script::natives::object_path(&vm, a), hp3_world::get(&mut vm, a, "TerrainScale"), hp3_world::get(&mut vm, a, "Location"));
+                    let Some(slot) = hp3_world::slot(&mut vm, a, "Layers") else { continue };
+                    for i in 0..4 {
+                        let Some(l) = vm.db.objects.values(a).and_then(|v| v.get(slot + i)).cloned() else { continue };
+                        let f = l.fields().to_vec();
+                        if f.first().and_then(hp3_script::Value::as_obj).is_none() {
+                            continue;
+                        }
+                        let tex = f[0].as_obj().map(|t| hp3_script::natives::object_path(&vm, t));
+                        let alpha = f[1].as_obj().map(|t| hp3_script::natives::object_path(&vm, t));
+                        println!("    layer {i}: {tex:?} alpha {alpha:?} uscale {:?} vscale {:?} axis {:?} matrix {:?}", f[2], f[3], f[6], f.get(9));
+                    }
+                }
+            }
             if std::env::var("HP3_ATTACH_DEBUG").is_ok() {
                 let list: Vec<_> = hp3_world::world(&mut vm).anim.attachments.iter().map(|(k, v)| (*k, v.clone())).collect();
                 for (child, (parent, bone)) in list {

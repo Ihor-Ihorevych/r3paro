@@ -9,7 +9,7 @@ use hp3_package::{ObjRef, Package};
 use hp3_render::dynamic::{Dynamic, GpuMesh};
 use hp3_render::gpu::Renderer;
 use hp3_render::meshes::{self, MeshGeom};
-use hp3_render::scene::{rotation_matrix, LightSource, Lighting};
+use hp3_render::scene::{rotation_matrix, LightSource, Lighting, MapInputs, TerrainLayer};
 use hp3_script::{ObjId, Value, Vm};
 use hp3_world::{get, world};
 
@@ -92,6 +92,48 @@ pub fn lighting(vm: &mut Vm<'_>, map: &Package) -> Lighting {
     }
     if sum.1 > 0 {
         out.ambient = sum.0 / sum.1 as f32;
+    }
+    out
+}
+
+/// The texture a material object shows, as a loader key.
+fn texture_key(vm: &Vm<'_>, loader: &Loader<'_>, material: ObjId) -> Option<ObjKey> {
+    let (pkg, index) = export_of(vm, material)?;
+    let (tp, ti) = loader.base_texture(&pkg, ObjRef::from_export(index))?;
+    Some(loader::key(&tp, ti))
+}
+
+/// Everything the scene builder takes from the running world: lighting (unless `lit` is false) and the
+/// layers of each terrain.
+pub fn map_inputs(vm: &mut Vm<'_>, loader: &Loader<'_>, map: &Package, lit: bool) -> MapInputs {
+    let mut out = MapInputs { lighting: lit.then(|| lighting(vm, map)), ..Default::default() };
+    let map_name = map.name.to_ascii_lowercase();
+    let Some(terrain_class) = vm.db.find("TerrainInfo") else { return out };
+    let actors = world(vm).actors.clone();
+    for a in actors {
+        let Some(class) = vm.db.objects.get(a).class else { continue };
+        let Some((pkg, index)) = vm.db.objects.get(a).key.clone() else { continue };
+        if !vm.is_child_of(class, terrain_class) || pkg.as_ref() != map_name {
+            continue;
+        }
+        let Some(slot) = hp3_world::slot(vm, a, "Layers") else { continue };
+        let mut layers = Vec::new();
+        for i in 0..32 {
+            let Some(layer) = vm.db.objects.values(a).and_then(|v| v.get(slot + i)).cloned() else { break };
+            let f = layer.fields().to_vec();
+            let Some(texture) = f.first().and_then(Value::as_obj).and_then(|t| texture_key(vm, loader, t)) else { continue };
+            let alpha_map = f.get(1).and_then(Value::as_obj).and_then(|t| texture_key(vm, loader, t));
+            let mut matrix = [[0.0f32; 4]; 4];
+            if let Some(m) = f.get(9) {
+                for (r, plane) in m.fields().iter().take(4).enumerate() {
+                    for (c, v) in plane.fields().iter().take(4).enumerate() {
+                        matrix[r][c] = v.as_float();
+                    }
+                }
+            }
+            layers.push(TerrainLayer { texture, alpha_map, matrix });
+        }
+        out.terrain_layers.insert(index, layers);
     }
     out
 }

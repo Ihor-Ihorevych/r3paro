@@ -143,8 +143,9 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
     }
     let statics = hp3_engine::static_exports(&mut vm, &pkg);
     // HP3_UNLIT=1 draws everything at full brightness.
-    let lighting = (std::env::var_os("HP3_UNLIT").is_none()).then(|| hp3_engine::lighting(&mut vm, &pkg));
-    let scene = scene::build_with(&loader, &pkg, &|i| statics.contains(&i), lighting.as_ref());
+    let inputs = hp3_engine::map_inputs(&mut vm, &loader, &pkg, std::env::var_os("HP3_UNLIT").is_none());
+    let scene = scene::build_map(&loader, &pkg, &|i| statics.contains(&i), &inputs);
+    let lighting = inputs.lighting;
     let renderer = Renderer::new_headless()?;
     let dynamic = Dynamic::new(&renderer);
     let mut cache = hp3_engine::MeshCache::default();
@@ -169,7 +170,14 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
     let yaw = hp3_world::get(&mut vm, pawn, "Rotation").fields().get(1).map(Value::as_int).unwrap_or(0);
     let k = std::f32::consts::TAU / 65536.0;
     let back = Vec3::new((yaw as f32 * k).cos(), (yaw as f32 * k).sin(), 0.0);
-    let camera = Camera { position: p - back * 160.0 + Vec3::Z * 50.0, rotation: [-1500, yaw, 0], fov_degrees: 90.0 };
+    let mut camera = Camera { position: p - back * 160.0 + Vec3::Z * 50.0, rotation: [-1500, yaw, 0], fov_degrees: 90.0 };
+    // HP3_VIEW_CAM=x,y,z,pitch,yaw places the camera explicitly.
+    if let Ok(c) = std::env::var("HP3_VIEW_CAM") {
+        let v: Vec<f32> = c.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        if v.len() == 5 {
+            camera = Camera { position: Vec3::new(v[0], v[1], v[2]), rotation: [v[3] as i32, v[4] as i32, 0], fov_degrees: 90.0 };
+        }
+    }
     let (w, h) = (1280, 720);
     let gpu_scene = renderer.upload_scene(&scene);
     let refs: Vec<_> = instances.iter().map(|(m, t, l)| (m.as_ref(), *t, *l)).collect();

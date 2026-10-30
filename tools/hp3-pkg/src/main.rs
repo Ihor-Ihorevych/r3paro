@@ -200,6 +200,26 @@ fn lightmaps(root: &Path, map: &str) -> R {
     use hp3_assets::Asset;
     let set = PackageSet::open(root)?;
     let pkg = set.get(map)?;
+    let mut shown = 0;
+    for i in 0..pkg.exports.len() {
+        if shown < 4 && pkg.export_class_name(i).eq_ignore_ascii_case("StaticMeshInstance") {
+            let chain = set.export_chain(&pkg, i);
+            let o = object::read_export(&pkg, i, &chain)?;
+            let base = pkg.exports[i].serial_offset + pkg.exports[i].serial_size - o.tail.len();
+            let mut r = hp3_package::Reader::with_base(o.tail, base);
+            if let Some(Ok(Asset::StaticMeshInstance(smi))) = hp3_assets::read_native("StaticMeshInstance", &pkg, &mut r) {
+                shown += 1;
+                println!(
+                    "{}: {} colors (first {:?}), {} lights: {:?}",
+                    pkg.ref_path(ObjRef::from_export(i)),
+                    smi.colors.len(),
+                    smi.colors.first(),
+                    smi.lights.len(),
+                    smi.lights.iter().take(3).map(|l| (l.light.export(), l.visibility.len(), l.apply)).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
     for i in 0..pkg.exports.len() {
         let chain = set.export_chain(&pkg, i);
         let o = object::read_export(&pkg, i, &chain)?;

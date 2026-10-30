@@ -66,6 +66,24 @@ impl LightSource {
     }
 }
 
+/// One texture layer of a terrain, as the running world has it.
+#[derive(Clone, Debug)]
+pub struct TerrainLayer {
+    pub texture: ObjKey,
+    pub alpha_map: Option<ObjKey>,
+    /// World position to texture coordinates: u = p . x + w.x, v = p . y + w.y, with the matrix's planes as
+    /// rows `[x, y, z, w]`.
+    pub matrix: [[f32; 4]; 4],
+}
+
+/// What the scene builder takes from the running world: lighting and terrain layers (by the terrain actor's
+/// export index in the map).
+#[derive(Default)]
+pub struct MapInputs {
+    pub lighting: Option<Lighting>,
+    pub terrain_layers: HashMap<usize, Vec<TerrainLayer>>,
+}
+
 /// The map's lights, by export index in the map package, and its ambient light.
 #[derive(Default)]
 pub struct Lighting {
@@ -104,6 +122,8 @@ pub struct Batch {
     pub texture: Option<ObjKey>,
     /// Lightmap page (index into `Scene::lightmaps`), if lit by one.
     pub lightmap: Option<usize>,
+    /// A terrain layer: blended over what is below by this alpha map (sampled with `light_uv`).
+    pub blend: Option<ObjKey>,
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
 }
@@ -148,6 +168,7 @@ pub struct SceneStats {
     pub static_meshes: usize,
     pub mesh_triangles: usize,
     pub missing_textures: usize,
+    pub terrain_triangles: usize,
 }
 
 /// Unreal's rotation matrix: rows are the rotated X, Y and Z axes.
@@ -185,11 +206,32 @@ impl Batcher<'_, '_> {
         Some(k)
     }
 
+    /// Makes sure a texture given by key is in the scene's images.
+    fn texture_key(&mut self, k: &ObjKey) -> Option<ObjKey> {
+        if !self.scene.images.contains_key(k) {
+            let p = self.loader.set.get(&k.0).ok()?;
+            let img = self.loader.image(&p, k.1)?;
+            self.scene.images.insert(k.clone(), img);
+        }
+        Some(k.clone())
+    }
+
+    /// An alpha map's weights as an image whose every channel is the weight; under a key of its own.
+    fn alpha_key(&mut self, k: &ObjKey) -> Option<ObjKey> {
+        let key: ObjKey = (format!("{}#alpha", k.0), k.1);
+        if !self.scene.images.contains_key(&key) {
+            let p = self.loader.set.get(&k.0).ok()?;
+            let img = self.loader.weight_image(&p, k.1)?;
+            self.scene.images.insert(key.clone(), Rc::new(img));
+        }
+        Some(key)
+    }
+
     fn batch(&mut self, texture: Option<ObjKey>, lightmap: Option<usize>) -> &mut Batch {
         let next = self.scene.batches.len();
         let i = *self.by_texture.entry((texture.clone(), lightmap)).or_insert(next);
         if i == next {
-            self.scene.batches.push(Batch { texture, lightmap, vertices: Vec::new(), indices: Vec::new() });
+            self.scene.batches.push(Batch { texture, lightmap, blend: None, vertices: Vec::new(), indices: Vec::new() });
         }
         &mut self.scene.batches[i]
     }
@@ -198,6 +240,93 @@ impl Batcher<'_, '_> {
 /// Builds the scene of the level in `map` (a loaded map package).
 pub fn build(loader: &Loader<'_>, map: &Rc<Package>) -> Scene {
     build_with(loader, map, &|_| true, None)
+}
+
+/// Like `build_with`, also drawing terrain with the given layers.
+pub fn build_map(loader: &Loader<'_>, map: &Rc<Package>, include: &dyn Fn(usize) -> bool, inputs: &MapInputs) -> Scene {
+    let mut scene = build_with(loader, map, include, inputs.lighting.as_ref());
+    let mut b = Batcher { loader, by_texture: HashMap::new(), scene: std::mem::take(&mut scene) };
+    add_terrain(&mut b, map, inputs);
+    b.scene
+}
+
+/// Terrain: each layer's triangles where its alpha map shows it, blended in order over the first.
+fn add_terrain(b: &mut Batcher<'_, '_>, map: &Rc<Package>, inputs: &MapInputs) {
+    for i in 0..map.exports.len() {
+        if !map.export_class_name(i).eq_ignore_ascii_case("TerrainInfo") {
+            continue;
+        }
+        let Some(layers) = inputs.terrain_layers.get(&i) else { continue };
+        let Some(asset) = b.loader.asset(map, i) else { continue };
+        let Asset::Terrain(t) = &*asset else { continue };
+        let (w, h) = (t.heightmap_x.max(0) as usize, t.heightmap_y.max(0) as usize);
+        if w < 2 || h < 2 || t.vertices.len() < w * h {
+            continue;
+        }
+        // Holes: one bit per quad, set where the quad is drawn (an empty bitmap shows everything).
+        let visible = b
+            .loader
+            .with_tags(map, i, |tags, _| {
+                props::find(map, tags, "QuadVisibilityBitmap", 0).map(|t| {
+                    let mut r = hp3_package::Reader::new(t.data);
+                    let n = r.ci().unwrap_or(0).max(0) as usize;
+                    (0..n).filter_map(|_| r.u32().ok()).collect::<Vec<u32>>()
+                })
+            })
+            .flatten()
+            .unwrap_or_default();
+        let quad_visible = |x: usize, y: usize| {
+            let q = y * (w - 1) + x;
+            visible.is_empty() || visible.get(q / 32).is_some_and(|b| b & (1 << (q % 32)) != 0)
+        };
+        // Vertex normals from the faces around each vertex; lighting per vertex.
+        let pos = |k: usize| GVec3::new(t.vertices[k].x, t.vertices[k].y, t.vertices[k].z);
+        let mut normals = vec![GVec3::ZERO; w * h];
+        for y in 0..h - 1 {
+            for x in 0..w - 1 {
+                let (a, bb, c, d) = (y * w + x, y * w + x + 1, (y + 1) * w + x, (y + 1) * w + x + 1);
+                let n = (pos(bb) - pos(a)).cross(pos(c) - pos(a));
+                let n = if n.z < 0.0 { -n } else { n };
+                for k in [a, bb, c, d] {
+                    normals[k] += n;
+                }
+            }
+        }
+        let color: Vec<[f32; 3]> = (0..w * h)
+            .map(|k| match &inputs.lighting {
+                Some(l) => (l.at(pos(k), normals[k].normalize_or(GVec3::Z)) * 0.5).to_array(),
+                None => [0.5, 0.5, 0.5],
+            })
+            .collect();
+        for (li, layer) in layers.iter().enumerate() {
+            let Some(texture) = b.texture_key(&layer.texture) else { continue };
+            let alpha = if li == 0 { None } else { layer.alpha_map.as_ref().and_then(|k| b.alpha_key(k)) };
+            if li > 0 && alpha.is_none() {
+                continue;
+            }
+            let m = layer.matrix;
+            let mut batch = Batch { texture: Some(texture), lightmap: None, blend: alpha, vertices: Vec::with_capacity(w * h), indices: Vec::new() };
+            for k in 0..w * h {
+                let p = pos(k);
+                let u = p.x * m[0][0] + p.y * m[1][0] + p.z * m[2][0] + m[3][0];
+                let v = p.x * m[0][1] + p.y * m[1][1] + p.z * m[2][1] + m[3][1];
+                let (x, y) = (k % w, k / w);
+                let a_uv = [(x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32];
+                batch.vertices.push(Vertex { position: p.to_array(), uv: [u, v], light_uv: a_uv, color: color[k] });
+            }
+            for y in 0..h - 1 {
+                for x in 0..w - 1 {
+                    if !quad_visible(x, y) {
+                        continue;
+                    }
+                    let (a, bb, c, d) = ((y * w + x) as u32, (y * w + x + 1) as u32, ((y + 1) * w + x) as u32, ((y + 1) * w + x + 1) as u32);
+                    batch.indices.extend_from_slice(&[a, bb, d, a, d, c]);
+                }
+            }
+            b.scene.stats.terrain_triangles += batch.indices.len() / 3;
+            b.scene.batches.push(batch);
+        }
+    }
 }
 
 /// Builds the scene with only the static-mesh actors whose export index passes `include`; the others are drawn

@@ -125,6 +125,25 @@ impl<'s> Loader<'s> {
         Some(Image { width: w as u32, height: h as u32, rgba, masked })
     }
 
+    /// A terrain alpha map's weights, spread to all four channels: the texture's alpha channel when its format
+    /// has one, its red channel otherwise.
+    pub fn weight_image(&self, pkg: &Rc<Package>, index: usize) -> Option<Image> {
+        let format = self.with_tags(pkg, index, |tags, _| props::find(pkg, tags, "Format", 0).and_then(|t| t.as_u8()).unwrap_or(0))?;
+        let format = Format::from_u8(format)?;
+        let Asset::Texture(tex) = &*self.asset(pkg, index)? else { return None };
+        let mip = tex.mips.first()?;
+        let data = pkg.data.get(mip.data_offset..mip.data_offset + mip.data_len)?;
+        let (w, h) = (mip.width as usize, mip.height as usize);
+        let rgba = texture::decode_rgba(format, w, h, data, None)?;
+        let has_alpha = matches!(format, Format::Rgba8 | Format::Dxt3 | Format::Dxt5);
+        let mut out = vec![0u8; w * h * 4];
+        for (i, px) in rgba.chunks_exact(4).enumerate() {
+            let a = if has_alpha { px[3] } else { px[0] };
+            out[i * 4..i * 4 + 4].copy_from_slice(&[a, a, a, a]);
+        }
+        Some(Image { width: w as u32, height: h as u32, rgba: out, masked: false })
+    }
+
     /// Follows a material reference down to a texture: shaders' diffuse, combiners' first input, modifiers'
     /// material, the current entry of a switch or sequence.
     pub fn base_texture(&self, pkg: &Rc<Package>, r: ObjRef) -> Option<(Rc<Package>, usize)> {

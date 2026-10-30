@@ -117,8 +117,9 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
     let statics = hp3_engine::static_exports(&mut vm, &pkg);
     let t = Instant::now();
     // HP3_UNLIT=1 draws everything at full brightness.
-    let lighting = (std::env::var_os("HP3_UNLIT").is_none()).then(|| hp3_engine::lighting(&mut vm, &pkg));
-    let scene = scene::build_with(&loader, &pkg, &|i| statics.contains(&i), lighting.as_ref());
+    let inputs = hp3_engine::map_inputs(&mut vm, &loader, &pkg, std::env::var_os("HP3_UNLIT").is_none());
+    let scene = scene::build_map(&loader, &pkg, &|i| statics.contains(&i), &inputs);
+    let lighting = inputs.lighting;
     eprintln!("{map}: scene built in {:?} ({:?})", t.elapsed(), scene.stats);
 
     let sdl = sdl3::init()?;
