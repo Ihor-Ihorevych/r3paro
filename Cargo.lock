@@ -463,6 +463,7 @@ version = "0.1.0"
 dependencies = [
  "hp3-package",
  "hp3-script",
+ "hp3-world",
 ]
 
 [[package]]
@@ -487,6 +488,12 @@ dependencies = [
 [[package]]
 name = "hp3-world"
 version = "0.1.0"
+dependencies = [
+ "hp3-assets",
+ "hp3-package",
+ "hp3-script",
+ "log",
+]
 
 [[package]]
 name = "indexmap"

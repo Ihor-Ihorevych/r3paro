@@ -35,6 +35,8 @@ impl std::fmt::Display for VmError {
     }
 }
 
+impl std::error::Error for VmError {}
+
 pub type VmResult<T> = Result<T, VmError>;
 
 pub struct Frame {
@@ -129,6 +131,9 @@ pub struct Vm<'s> {
     current_pc: usize,
     /// World data of the crate that embeds the VM.
     pub ext: Option<Box<dyn std::any::Any>>,
+    /// Skip unimplemented natives instead of failing, counting them in `missing`.
+    pub lenient: bool,
+    pub missing: std::collections::BTreeMap<String, u64>,
     /// The state each object was in before its last state change.
     pub last_state: HashMap<ObjId, Option<StructId>>,
 }
@@ -159,6 +164,8 @@ impl<'s> Vm<'s> {
             current_pc: 0,
             ext: None,
             last_state: HashMap::new(),
+            lenient: false,
+            missing: Default::default(),
         }
         .with_short_circuit()
         .with_states()
@@ -514,7 +521,28 @@ impl<'s> Vm<'s> {
                     None => Value::Empty,
                 }
             }
-            Expr::New(_) => return Err(VmError::Unimplemented("new".into())),
+            Expr::New(args) => {
+                // new(Outer, Name, Flags) Class: an instance of a non-actor class with its defaults.
+                let class = match args.get(3) {
+                    Some(c) => self.eval(c, frame, ctx)?.as_obj(),
+                    None => None,
+                };
+                let name = match args.get(1) {
+                    Some(Expr::Nothing) | None => Value::Empty,
+                    Some(n) => self.eval(n, frame, ctx)?,
+                };
+                match class.and_then(|c| self.class_of(c)) {
+                    Some(c) => {
+                        let n = match name {
+                            Value::Str(s) => self.db.names.intern(&s),
+                            Value::Name(n) => n,
+                            _ => self.db.get(c).name,
+                        };
+                        Value::Object(Some(self.new_object(c, n)))
+                    }
+                    None => Value::Object(None),
+                }
+            }
             Expr::Unsupported(op) => return Err(VmError::Unimplemented(format!("opcode {op:#04x}"))),
             other => return Err(VmError::Runtime(format!("{other:?} used as an expression"))),
         })
@@ -582,7 +610,13 @@ impl<'s> Vm<'s> {
             let path = self.function_path(f);
             let key = path.to_ascii_lowercase();
             let Some(native) = self.natives.get(&key).copied() else {
-                return Err(VmError::Unimplemented(path));
+                if !self.lenient {
+                    return Err(VmError::Unimplemented(path));
+                }
+                // Counted and skipped: the caller gets the declared return type's zero.
+                *self.missing.entry(path).or_default() += 1;
+                let ret = def.props.iter().find(|p| p.flags & CPF_RETURN_PARM != 0).map(|p| p.ty.clone());
+                return Ok(ret.map(|t| self.db.default_value(&t)).unwrap_or(Value::Empty));
             };
             return native(self, this, args);
         }
@@ -708,7 +742,12 @@ impl<'s> Vm<'s> {
                 }
             }
             Expr::Iterator(call, end) => {
-                let (f, args) = match &**call {
+                // `foreach Obj.Iter(...)` runs the iterator with that object as self.
+                let (iter_this, call) = match &**call {
+                    Expr::Context(obj, inner) => (self.eval(obj, frame, None)?.as_obj(), &**inner),
+                    other => (frame.this, other),
+                };
+                let (f, args) = match call {
                     Expr::Native(_, Some(f), args) | Expr::Final(f, args) => (*f, args),
                     _ => return Err(VmError::Runtime("iterator over a non-function".into())),
                 };
@@ -730,8 +769,7 @@ impl<'s> Vm<'s> {
                     }
                 }
                 let body = self.current_pc + 1;
-                let this = frame.this;
-                let items = iter(self, this, &values)?;
+                let items = iter(self, iter_this, &values)?;
                 if items.is_empty() {
                     return Ok(Flow::Jump(*end));
                 }

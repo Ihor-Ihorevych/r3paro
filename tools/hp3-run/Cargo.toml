@@ -9,3 +9,4 @@ publish.workspace = true
 [dependencies]
 hp3-package.workspace = true
 hp3-script.workspace = true
+hp3-world = { path = "../../crates/hp3-world" }

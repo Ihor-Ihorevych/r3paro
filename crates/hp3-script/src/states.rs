@@ -29,6 +29,21 @@ impl Vm<'_> {
         None
     }
 
+    /// The state marked `auto` in a class or its ancestors.
+    pub fn auto_state(&self, class: StructId) -> Option<StructId> {
+        const STATE_AUTO: u32 = 0x0000_0001;
+        let mut c = Some(class);
+        while let Some(cid) = c {
+            for &s in self.db.get(cid).states.values() {
+                if self.db.get(s).state_info.3 & STATE_AUTO != 0 {
+                    return Some(s);
+                }
+            }
+            c = self.db.get(cid).super_;
+        }
+        None
+    }
+
     /// Calls a script event (a function found by name, state first) if the object has one.
     pub fn event(&mut self, obj: ObjId, name: &str, args: &mut [Value]) -> VmResult<Value> {
         let Some(n) = self.db.names.find(name) else { return Ok(Value::Empty) };
@@ -41,6 +56,15 @@ impl Vm<'_> {
     /// Moves an object to a state (`Name::NONE` leaves all states) and starts its state code at `label`.
     pub fn goto_state(&mut self, obj: ObjId, state_name: Name, label: Name) -> VmResult<()> {
         let Some(class) = self.db.objects.get(obj).class else { return Ok(()) };
+        // `Auto` names the class's auto state.
+        let state_name = if self.db.names.get(state_name).eq_ignore_ascii_case("Auto") {
+            match self.auto_state(class) {
+                Some(s) => self.db.get(s).name,
+                None => return Ok(()),
+            }
+        } else {
+            state_name
+        };
         let new_state = if state_name == Name::NONE { None } else { self.find_state(class, state_name) };
         if state_name != Name::NONE && new_state.is_none() {
             let s = format!("{}: no state {}", self.db.names.get(self.db.objects.get(obj).name), self.db.names.get(state_name));

@@ -30,6 +30,34 @@ fn mk_rot(r: [i32; 3]) -> Value {
     Value::Struct(Box::new([Value::Int(r[0]), Value::Int(r[1]), Value::Int(r[2])]))
 }
 
+/// The rotated X, Y and Z axes of a rotation (Unreal's convention: yaw about Z, pitch, then roll).
+pub fn rot_axes(r: [i32; 3]) -> [[f32; 3]; 3] {
+    let k = std::f32::consts::TAU / 65536.0;
+    let (sp, cp) = (r[0] as f32 * k).sin_cos();
+    let (sy, cy) = (r[1] as f32 * k).sin_cos();
+    let (sr, cr) = (r[2] as f32 * k).sin_cos();
+    [
+        [cp * cy, cp * sy, sp],
+        [sr * sp * cy - cr * sy, sr * sp * sy + cr * cy, -sr * cp],
+        [-(cr * sp * cy + sr * sy), cy * sr - cr * sp * sy, cr * cp],
+    ]
+}
+
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// A rotation whose X and Z axes point along the given vectors.
+pub fn axes_to_rot(x: [f32; 3], z: [f32; 3]) -> [i32; 3] {
+    let k = 32768.0 / std::f32::consts::PI;
+    let yaw = x[1].atan2(x[0]);
+    let pitch = x[2].atan2((x[0] * x[0] + x[1] * x[1]).sqrt());
+    // Roll: angle of the given Z axis around X, relative to the Z axis of the yaw/pitch rotation.
+    let base = rot_axes([(pitch * k) as i32, (yaw * k) as i32, 0]);
+    let roll = (-dot(z, base[1])).atan2(dot(z, base[2]));
+    [(pitch * k) as i32 & 0xFFFF, (yaw * k) as i32 & 0xFFFF, (roll * k) as i32 & 0xFFFF]
+}
+
 /// Formats a float the way UnrealScript prints floats: six decimals.
 pub fn float_to_string(f: f32) -> String {
     format!("{f:.6}")
@@ -374,6 +402,36 @@ pub fn registry() -> HashMap<String, NativeFn> {
         "Object.EqualEqual_RotatorRotator" => |vm, this, a| Value::Bool(rot3(&a[0]).map(|c| c & 0xFFFF) == rot3(&a[1]).map(|c| c & 0xFFFF)),
         "Object.NotEqual_RotatorRotator" => |vm, this, a| Value::Bool(rot3(&a[0]).map(|c| c & 0xFFFF) != rot3(&a[1]).map(|c| c & 0xFFFF)),
         "Object.Normalize" => |vm, this, a| mk_rot(rot3(&a[0]).map(|c| { let c = c & 0xFFFF; if c > 32767 { c - 65536 } else { c } })),
+        "Object.GreaterGreater_VectorRotator" => |vm, this, a| {
+            let (v, ax) = (vec3(&a[0]), rot_axes(rot3(&a[1])));
+            mk_vec([0, 1, 2].map(|i| v[0] * ax[0][i] + v[1] * ax[1][i] + v[2] * ax[2][i]))
+        },
+        "Object.LessLess_VectorRotator" => |vm, this, a| {
+            let (v, ax) = (vec3(&a[0]), rot_axes(rot3(&a[1])));
+            mk_vec([dot(v, ax[0]), dot(v, ax[1]), dot(v, ax[2])])
+        },
+        "Object.GetAxes" => |vm, this, a| {
+            let ax = rot_axes(rot3(&a[0]));
+            for i in 0..3 {
+                a[i + 1] = mk_vec(ax[i]);
+            }
+            Value::Empty
+        },
+        "Object.GetUnAxes" => |vm, this, a| {
+            let ax = rot_axes(rot3(&a[0]));
+            for i in 0..3 {
+                a[i + 1] = mk_vec([ax[0][i], ax[1][i], ax[2][i]]);
+            }
+            Value::Empty
+        },
+        "Object.OrthoRotation" => |vm, this, a| mk_rot(axes_to_rot(vec3(&a[0]), vec3(&a[2]))),
+        "Object.Invert" => |vm, this, a| {
+            let (x, y, z) = (vec3(&a[0]), vec3(&a[1]), vec3(&a[2]));
+            a[0] = mk_vec([x[0], y[0], z[0]]);
+            a[1] = mk_vec([x[1], y[1], z[1]]);
+            a[2] = mk_vec([x[2], y[2], z[2]]);
+            Value::Empty
+        },
         "Object.RotRand" => |vm, this, a| {
             let roll = a.first().is_some_and(Value::as_bool);
             let r = [(frand(vm) * 65536.0) as i32, (frand(vm) * 65536.0) as i32, if roll { (frand(vm) * 65536.0) as i32 } else { 0 }];
