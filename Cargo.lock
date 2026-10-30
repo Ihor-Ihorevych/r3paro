@@ -458,8 +458,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "hp3-run"
+version = "0.1.0"
+dependencies = [
+ "hp3-package",
+ "hp3-script",
+]
+
+[[package]]
 name = "hp3-script"
 version = "0.1.0"
+dependencies = [
+ "hp3-package",
+ "log",
+]
 
 [[package]]
 name = "hp3-view"

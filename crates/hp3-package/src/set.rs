@@ -50,6 +50,8 @@ fn canonical_builtin(name: &str) -> String {
 
 pub struct PackageSet {
     root: PathBuf,
+    /// Language whose localized packages are used: `int` when present, else the only one installed.
+    pub language: String,
     files: HashMap<String, PathBuf>,
     loaded: RefCell<HashMap<String, Rc<Package>>>,
     chains: RefCell<HashMap<String, Rc<Vec<String>>>>,
@@ -59,6 +61,7 @@ impl PackageSet {
     /// Indexes every package file under the install's package folders.
     pub fn open(root: &Path) -> Result<PackageSet> {
         let mut files = HashMap::new();
+        let mut localized: HashMap<String, HashMap<String, PathBuf>> = HashMap::new();
         let entries = std::fs::read_dir(root).map_err(|e| Error::Io(root.to_path_buf(), e))?;
         for entry in entries.flatten() {
             let dir_name = entry.file_name().to_string_lossy().to_string();
@@ -69,16 +72,29 @@ impl PackageSet {
             for f in inner.flatten() {
                 let p = f.path();
                 let ext = p.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-                if !PACKAGE_EXTS.contains(&ext.as_str()) {
-                    continue;
-                }
-                if let Some(stem) = p.file_stem() {
-                    files.entry(stem.to_string_lossy().to_ascii_lowercase()).or_insert(p);
+                let Some(stem) = p.file_stem().map(|s| s.to_string_lossy().to_ascii_lowercase()) else { continue };
+                if PACKAGE_EXTS.contains(&ext.as_str()) {
+                    files.entry(stem).or_insert(p);
+                } else if let Some((lang, base)) = ext.split_once('_')
+                    && lang.len() == 3
+                    && PACKAGE_EXTS.contains(&base)
+                {
+                    // Localized packages: `<name>.<language>_<extension>`, e.g. `alldialog.rus_uax`.
+                    localized.entry(lang.to_string()).or_default().insert(stem, p);
                 }
             }
         }
+        let language = if localized.contains_key("int") || localized.len() != 1 {
+            "int".to_string()
+        } else {
+            localized.keys().next().cloned().unwrap_or_else(|| "int".to_string())
+        };
+        if let Some(loc) = localized.remove(&language) {
+            files.extend(loc);
+        }
         Ok(PackageSet {
             root: root.to_path_buf(),
+            language,
             files,
             loaded: RefCell::new(HashMap::new()),
             chains: RefCell::new(HashMap::new()),

@@ -19,6 +19,16 @@ follow the scripts where a script declares the class; the rest are descriptive.
 HP3's own packages are version 129, licensee 0. Several texture, sound and mesh packages are older (99 to 128,
 some with licensee 1, 28 or 29), and the layout depends on the version where noted below.
 
+Localized packages are named `<name>.<language>_<extension>`, e.g. `alldialog.rus_uax` for the Russian
+dialog; the install's language is the one whose localized packages are present.
+
+## Default properties
+
+Struct values inside tagged properties are themselves tag lists, except for `Vector`, `Rotator`, `Color`,
+`Quat`, `Guid`, `Coords`, `Box`, `IntBox` and `FloatBox`, which are their raw members. `Plane`, `Range`,
+`RangeVector` and `Matrix` are tag lists. Actors saved with `bDeleteMe` write their last struct tag without
+its terminating `None`.
+
 ## Header and tables
 
 Tag `0x9E2A83C1`, version u16, licensee u16, flags u32, then name/export/import count and offset (u32 each), a
@@ -68,8 +78,8 @@ the end token. All 1,088,997 bytes of bytecode in the game decode with this tabl
 - **Palette**: colors (BGRA).
 - **Texture**, **Cubemap**, **MovieTexture**: mips, each a lazy byte array, width i32, height i32, width bits u8,
   height bits u8. **FireTexture** adds sparks (8 bytes each); wet and ice textures add nothing.
-- **Sound**: file type (name: `wav` or `bik`), lazy byte array. From version 127: an i32 flag and, when it is 1,
-  a byte envelope; then an i32.
+- **Sound**: file type (name: `wav` or `bik`), lazy byte array. From version 127: an i32 flag, then for flag 1
+  a byte array (creature and effect sounds), for flag 2 four i32s and a float array (dialog lines); then an i32.
 - **Font**: from version 122, glyphs (u, v, width, height i32 and texture index u8) and textures; before, pages
   (texture and glyphs without the index) and a per-page count i32. Then kerning i32 (from version 119), a
   remap of u16 pairs, and an is-remapped i32.

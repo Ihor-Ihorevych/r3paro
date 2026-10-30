@@ -3,7 +3,7 @@
 Milestones are from the plan (M0 to M12).
 
 - **M0 Foundations**: workspace, crate skeletons, clean-room rules, Windows MSVC and Android arm64 toolchains.
-- **M1 Packages: done.** `hp3-pkg check <HP3 folder>` reads all 156,497 exports of the 109 packages of a retail
+- **M1 Packages: done.** `hp3-pkg check <HP3 folder>` reads all 159,093 exports of the 110 packages of a retail
   install exactly (0 errors, 0 leftover bytes, under a second), including all 10,452 scripts. Formats:
   `docs/formats/packages.md`.
 - **M2 Assets**: decoders for every native asset class exist (`hp3-assets`). `hp3-pkg textures` converts
@@ -13,7 +13,10 @@ Milestones are from the plan (M0 to M12).
 - **M3 Script VM**: `hp3-pkg natives` lists the native functions the scripts declare: 499 in all (Core 179,
   Engine 279, GUI 24, Editor 14, kwGame 3: `KWBeamSegment.UpdateChain`, `PersistentStore.FindSlot`,
   `PersistentStore.CreateSlot`). HGame and the other game packages declare none. `hp3-pkg disasm` prints a
-  class's bytecode.
+  class's bytecode. `hp3-run classes` loads all 1,685 classes with their properties and builds every default
+  object (12,446 default tags, all decoded); `hp3-run instances` builds the property values of all 68,554
+  scripted objects placed in the 34 maps (986,581 tags, all decoded, every object reference resolved).
+  Next: the interpreter.
 - M4 onwards: not started.
 
 ## Checking
