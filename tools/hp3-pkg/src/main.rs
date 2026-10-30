@@ -22,6 +22,8 @@ fn main() -> ExitCode {
         Some("imports") if args.len() == 2 => imports(Path::new(&args[1])),
         Some("names") if args.len() == 2 => names(Path::new(&args[1])),
         Some("dump") if args.len() == 4 => dump(Path::new(&args[1]), &args[2], &args[3]),
+        Some("tails") if args.len() >= 3 => tails(Path::new(&args[1]), &args[2], args.get(3).map(|s| s.parse().unwrap_or(20)).unwrap_or(20)),
+        Some("hex") if args.len() == 6 => hex(Path::new(&args[1]), &args[2], &args[3], &args[4], &args[5]),
         Some("check") if args.len() >= 2 => {
             let verbose = args.iter().any(|a| a == "-v");
             let filter = args.iter().skip(2).find(|a| !a.starts_with('-')).cloned();
@@ -135,6 +137,83 @@ fn dump(root: &Path, package: &str, path: &str) -> R {
     Ok(ExitCode::SUCCESS)
 }
 
+/// For exports of one native class: what the asset decoder leaves over, grouped by length.
+fn tails(root: &Path, class: &str, max: usize) -> R {
+    let set = PackageSet::open(root)?;
+    let mut by_len: std::collections::BTreeMap<usize, Vec<String>> = Default::default();
+    let mut errors = 0;
+    for path in set.files() {
+        let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
+        let pkg = set.get(&stem)?;
+        for i in 0..pkg.exports.len() {
+            let chain = set.export_chain(&pkg, i);
+            let Ok(o) = object::read_export(&pkg, i, &chain) else { continue };
+            if !o.native_class.eq_ignore_ascii_case(class) || !matches!(o.body, Body::Unparsed) {
+                continue;
+            }
+            let size = pkg.exports[i].serial_size;
+            let base = pkg.exports[i].serial_offset + size - o.tail.len();
+            let mut r = hp3_package::Reader::with_base(o.tail, base);
+            let at = |r: &hp3_package::Reader<'_>| r.file_pos() - pkg.exports[i].serial_offset;
+            match hp3_assets::read_native(o.native_class, &pkg, &mut r) {
+                Some(Ok(_)) => {
+                    let off = at(&r);
+                    let rest = r.rest();
+                    let hex: Vec<String> = rest.iter().take(48).map(|b| format!("{b:02x}")).collect();
+                    by_len.entry(rest.len()).or_default().push(format!(
+                        "{}:{} @{off:#x}: {}",
+                        pkg.name,
+                        pkg.ref_path(ObjRef::from_export(i)),
+                        hex.join(" ")
+                    ));
+                }
+                Some(Err(e)) => {
+                    errors += 1;
+                    if errors <= max {
+                        println!("error {}:{}: {e}", pkg.name, pkg.ref_path(ObjRef::from_export(i)));
+                    }
+                }
+                None => {}
+            }
+        }
+        set.unload_all();
+    }
+    for (len, items) in &by_len {
+        println!("{len} bytes left: {} exports", items.len());
+        for s in items.iter().take(max) {
+            println!("  {s}");
+        }
+    }
+    println!("{errors} errors");
+    Ok(ExitCode::SUCCESS)
+}
+
+fn parse_num(s: &str) -> Result<usize, std::num::ParseIntError> {
+    match s.strip_prefix("0x") {
+        Some(h) => usize::from_str_radix(h, 16),
+        None => s.parse(),
+    }
+}
+
+/// Hex dump of part of an export's serialized data (offsets relative to the export).
+fn hex(root: &Path, package: &str, path: &str, offset: &str, len: &str) -> R {
+    let set = PackageSet::open(root)?;
+    let pkg = set.get(package)?;
+    let index = pkg.find_export_path(path).ok_or_else(|| format!("no export {path} in {package}"))?;
+    let data = pkg.export_data(index);
+    let start = parse_num(offset)?.min(data.len());
+    let end = (start + parse_num(len)?).min(data.len());
+    for (i, chunk) in data[start..end].chunks(16).enumerate() {
+        let hex: Vec<String> = chunk.iter().map(|x| format!("{x:02x}")).collect();
+        let floats: Vec<String> = chunk
+            .chunks_exact(4)
+            .map(|c| format!("{:.3}", f32::from_le_bytes([c[0], c[1], c[2], c[3]])))
+            .collect();
+        println!("  {:06x}: {:<47}  {}", start + i * 16, hex.join(" "), floats.join(" "));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 fn hexdump(b: &[u8]) {
     for (i, chunk) in b.chunks(16).enumerate() {
         let hex: Vec<String> = chunk.iter().map(|x| format!("{x:02x}")).collect();
@@ -146,7 +225,10 @@ fn run_check(root: &Path, filter: Option<&str>, verbose: bool) -> R {
     let set = PackageSet::open(root)?;
     let files: Vec<PathBuf> = set.files();
     eprintln!("{} package files under {}", files.len(), root.display());
-    let rep = check::check(&set, filter, |name| {
+    let decode = |class: &str, pkg: &Package, r: &mut hp3_package::Reader<'_>| {
+        hp3_assets::read_native(class, pkg, r).map(|res| res.map(|_| ()))
+    };
+    let rep = check::check(&set, filter, &decode, |name| {
         if verbose {
             eprintln!("  {name}");
         }

@@ -41,7 +41,15 @@ impl Report {
     }
 }
 
-pub fn check(set: &PackageSet, filter: Option<&str>, mut progress: impl FnMut(&str)) -> Report {
+/// Decodes the native data of a class from a reader over it; `None` when the layout is not known.
+pub type NativeDecoder<'d> = &'d dyn Fn(&str, &crate::Package, &mut crate::Reader<'_>) -> Option<crate::Result<()>>;
+
+pub fn check(
+    set: &PackageSet,
+    filter: Option<&str>,
+    native: NativeDecoder<'_>,
+    mut progress: impl FnMut(&str),
+) -> Report {
     let mut rep = Report::default();
     for path in set.files() {
         let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
@@ -89,9 +97,34 @@ pub fn check(set: &PackageSet, filter: Option<&str>, mut progress: impl FnMut(&s
                         rep.script_bytes += structure.script_size as u64;
                     }
                     if matches!(o.body, Body::Unparsed) {
-                        let u = rep.unparsed.entry(o.native_class.to_string()).or_default();
-                        u.0 += 1;
-                        u.1 += o.tail.len();
+                        let base = pkg.exports[i].serial_offset + size - o.tail.len();
+                        let mut r = crate::Reader::with_base(o.tail, base);
+                        match native(o.native_class, &pkg, &mut r) {
+                            None => {
+                                let u = rep.unparsed.entry(o.native_class.to_string()).or_default();
+                                u.0 += 1;
+                                u.1 += o.tail.len();
+                            }
+                            Some(Err(e)) => {
+                                st.errors += 1;
+                                if st.first_problem.is_none() {
+                                    st.first_problem = Some(format!("{}: {e}", where_()));
+                                }
+                            }
+                            Some(Ok(())) if r.at_end() => rep.decoded += 1,
+                            Some(Ok(())) => {
+                                st.leftover_exports += 1;
+                                st.leftover_bytes += r.remaining();
+                                if st.first_problem.is_none() {
+                                    st.first_problem = Some(format!(
+                                        "{}: {} native bytes left at export offset {:#x}",
+                                        where_(),
+                                        r.remaining(),
+                                        r.file_pos() - pkg.exports[i].serial_offset
+                                    ));
+                                }
+                            }
+                        }
                     } else if !o.tail.is_empty() {
                         st.leftover_exports += 1;
                         st.leftover_bytes += o.tail.len();

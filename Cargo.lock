@@ -9,6 +9,11 @@ version = "0.1.0"
 [[package]]
 name = "hp3-assets"
 version = "0.1.0"
+dependencies = [
+ "hp3-package",
+ "log",
+ "thiserror",
+]
 
 [[package]]
 name = "hp3-audio"
@@ -50,6 +55,7 @@ dependencies = [
 name = "hp3-pkg"
 version = "0.1.0"
 dependencies = [
+ "hp3-assets",
  "hp3-package",
 ]
 
