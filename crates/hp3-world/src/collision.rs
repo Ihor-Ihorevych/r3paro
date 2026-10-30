@@ -47,6 +47,62 @@ pub struct Collision {
     tris: Vec<Tri>,
     grid: HashMap<(i32, i32), Vec<u32>>,
     pub actors: Vec<ActorBox>,
+    /// Movers: their triangles in their own space, placed by a transform that follows them.
+    pub movers: Vec<MoverShape>,
+}
+
+/// A mover's collision: triangles in mover space and the current mover-to-world placement.
+pub struct MoverShape {
+    pub actor: ObjId,
+    tris: Vec<Tri>,
+    pub to_world: glam::Mat4,
+    to_local: glam::Mat4,
+    /// Radius of the triangles around the mover's origin, to skip far traces.
+    radius: f32,
+}
+
+impl MoverShape {
+    pub fn new(actor: ObjId, triangles: &[[Vec3; 3]]) -> MoverShape {
+        let mut tris = Vec::new();
+        let mut radius: f32 = 0.0;
+        for v in triangles {
+            let normal = (v[1] - v[0]).cross(v[2] - v[0]);
+            if normal.length_squared() < 1e-8 {
+                continue;
+            }
+            radius = radius.max(v[0].length()).max(v[1].length()).max(v[2].length());
+            tris.push(Tri { v: *v, normal: normal.normalize(), actor: Some(actor) });
+        }
+        MoverShape { actor, tris, to_world: glam::Mat4::IDENTITY, to_local: glam::Mat4::IDENTITY, radius }
+    }
+
+    pub fn place(&mut self, to_world: glam::Mat4) {
+        self.to_world = to_world;
+        self.to_local = to_world.inverse();
+    }
+
+    fn trace(&self, start: Vec3, end: Vec3, extent: Vec3) -> Option<Hit> {
+        let origin = self.to_world.w_axis.truncate();
+        let reach = self.radius + extent.length() + start.distance(end);
+        if origin.distance(start) > reach + 1.0 {
+            return None;
+        }
+        let (ls, le) = (self.to_local.transform_point3(start), self.to_local.transform_point3(end));
+        let mut best: Option<Hit> = None;
+        for t in &self.tris {
+            if let Some(h) = tri_trace(t, ls, le, extent)
+                && best.is_none_or(|b| h.time < b.time)
+            {
+                best = Some(h);
+            }
+        }
+        best.map(|h| Hit {
+            time: h.time,
+            location: start + (end - start) * h.time,
+            normal: self.to_world.transform_vector3(h.normal).normalize_or_zero(),
+            actor: Some(self.actor),
+        })
+    }
 }
 
 fn cell(v: f32) -> i32 {
@@ -81,6 +137,15 @@ impl Collision {
 
     /// The first thing a box of half size `extent` hits moving from `start` to `end`, ignoring `ignore`.
     pub fn trace(&self, start: Vec3, end: Vec3, extent: Vec3, ignore: Option<ObjId>) -> Option<Hit> {
+        self.trace_with(start, end, extent, ignore, true)
+    }
+
+    /// The level's geometry only: BSP, meshes and terrain, not actors.
+    pub fn trace_static(&self, start: Vec3, end: Vec3, extent: Vec3) -> Option<Hit> {
+        self.trace_with(start, end, extent, None, false)
+    }
+
+    fn trace_with(&self, start: Vec3, end: Vec3, extent: Vec3, ignore: Option<ObjId>, actors: bool) -> Option<Hit> {
         let mut best: Option<Hit> = None;
         let mut keep = |h: Hit| {
             if best.is_none_or(|b| h.time < b.time) {
@@ -117,7 +182,15 @@ impl Collision {
                 }
             }
         }
-        for b in &self.actors {
+        for m in &self.movers {
+            if Some(m.actor) == ignore {
+                continue;
+            }
+            if let Some(h) = m.trace(start, end, extent) {
+                keep(h);
+            }
+        }
+        for b in self.actors.iter().filter(|_| actors) {
             if Some(b.actor) == ignore {
                 continue;
             }

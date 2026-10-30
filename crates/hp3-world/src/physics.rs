@@ -379,6 +379,62 @@ fn remove_touching(vm: &mut Vm<'_>, a: ObjId, other: ObjId) {
 }
 
 /// Runs one physics step for every moving actor.
+pub const PHYS_MOVING_BRUSH: u8 = 8;
+
+fn indexed_vec(vm: &mut Vm<'_>, a: ObjId, name: &str, i: usize) -> Vec3 {
+    let Some(s) = crate::slot(vm, a, name) else { return Vec3::ZERO };
+    vm.db.objects.values(a).and_then(|v| v.get(s + i)).map(vec).unwrap_or(Vec3::ZERO)
+}
+
+fn indexed_rot(vm: &mut Vm<'_>, a: ObjId, name: &str, i: usize) -> [i32; 3] {
+    let Some(s) = crate::slot(vm, a, name) else { return [0; 3] };
+    let r: Vec<i32> = vm.db.objects.values(a).and_then(|v| v.get(s + i)).map(|v| v.fields().iter().map(Value::as_int).collect()).unwrap_or_default();
+    [r.first().copied().unwrap_or(0), r.get(1).copied().unwrap_or(0), r.get(2).copied().unwrap_or(0)]
+}
+
+/// Movers between keyframes (`InterpolateTo`): from key `PrevKeyNum` to `KeyNum` as `PhysAlpha` goes from 0
+/// to 1 at `PhysRate`, gliding (eased) or moving evenly by `MoverGlideType`; `InterpolateEnd` at the end.
+fn moving_brush(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
+    if !get(vm, a, "bInterpolating").as_bool() {
+        return;
+    }
+    let rate = get(vm, a, "PhysRate").as_float();
+    let alpha = (get(vm, a, "PhysAlpha").as_float() + rate * dt).min(1.0);
+    set(vm, a, "PhysAlpha", Value::Float(alpha));
+    let f = if get(vm, a, "MoverGlideType").as_byte() == 1 { alpha * alpha * (3.0 - 2.0 * alpha) } else { alpha };
+    let (prev, key) = (get(vm, a, "PrevKeyNum").as_byte() as usize, get(vm, a, "KeyNum").as_byte() as usize);
+    let base = vec(&get(vm, a, "BasePos"));
+    let (p0, p1) = (indexed_vec(vm, a, "KeyPos", prev), indexed_vec(vm, a, "KeyPos", key));
+    let old = vec(&get(vm, a, "Location"));
+    let pos = base + p0.lerp(p1, f);
+    let br: Vec<i32> = get(vm, a, "BaseRot").fields().iter().map(Value::as_int).collect();
+    let (r0, r1) = (indexed_rot(vm, a, "KeyRot", prev), indexed_rot(vm, a, "KeyRot", key));
+    let rot: Vec<Value> = (0..3)
+        .map(|i| Value::Int(br.get(i).copied().unwrap_or(0) + r0[i] + ((r1[i] - r0[i]) as f32 * f).round() as i32))
+        .collect();
+    set(vm, a, "Location", value(pos));
+    set(vm, a, "Rotation", Value::Struct(rot.into()));
+    // Actors standing on the mover ride along.
+    let delta = pos - old;
+    if delta != Vec3::ZERO {
+        let riders: Vec<ObjId> = world(vm).actors.iter().copied().filter(|&r| r != a).collect();
+        for r in riders {
+            if get(vm, r, "Base").as_obj() == Some(a) {
+                let p = vec(&get(vm, r, "Location"));
+                set(vm, r, "Location", value(p + delta));
+            }
+        }
+    }
+    let t = crate::mover_transform(vm, a);
+    if let Some(m) = world(vm).collision.movers.iter_mut().find(|m| m.actor == a) {
+        m.place(t);
+    }
+    if alpha >= 1.0 {
+        set(vm, a, "bInterpolating", Value::Bool(false));
+        fire(vm, a, "InterpolateEnd", &mut [Value::Object(None)]);
+    }
+}
+
 pub fn step(vm: &mut Vm<'_>, dt: f32) {
     refresh_actor_boxes(vm);
     let s = Slots::get(vm);
@@ -405,6 +461,10 @@ pub fn step(vm: &mut Vm<'_>, dt: f32) {
             continue;
         }
         match crate::read(vm, a, s.physics).as_byte() {
+            PHYS_MOVING_BRUSH => {
+                moving_brush(vm, a, dt);
+                continue;
+            }
             PHYS_WALKING => walk(vm, a, dt),
             PHYS_FALLING => fall(vm, a, dt),
             PHYS_FLYING | PHYS_SWIMMING => fly(vm, a, dt),

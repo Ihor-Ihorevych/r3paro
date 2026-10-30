@@ -95,11 +95,15 @@ fn graph(vm: &mut Vm<'_>) -> std::rc::Rc<Graph> {
 /// Whether a pawn could walk in a straight line from `from` to `to`: nothing solid between them (a hit on
 /// `goal` itself counts as reaching it).
 pub fn reachable(vm: &mut Vm<'_>, pawn: ObjId, from: Vec3, to: Vec3, goal: Option<ObjId>) -> bool {
-    let lift = Vec3::Z * STEP;
-    match world(vm).collision.trace(from + lift, to + lift, Vec3::ZERO, Some(pawn)) {
-        None => true,
-        Some(h) => goal.is_some() && h.actor == goal,
-    }
+    let _ = (pawn, goal);
+    // Against the level's geometry only (other pawns move out of the way); clear at step height or at
+    // mid-body is enough (low obstacles are stepped over, overhangs walked under).
+    let half = get(vm, pawn, "CollisionHeight").as_float().max(STEP) * 0.5;
+    let col = &world(vm).collision;
+    [STEP, half].iter().any(|&h| {
+        let lift = Vec3::Z * h;
+        col.trace_static(from + lift, to + lift, Vec3::ZERO).is_none()
+    })
 }
 
 /// Network nodes a point can reach directly (or be reached from), nearest first, with their distances.
@@ -249,6 +253,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
             _ => m.destination,
         };
         m.timer -= dt;
+        let mut arrived = false;
         let done = match pawn {
             None => true,
             Some(p) => {
@@ -261,6 +266,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
                 let target_radius = m.target.map(|t| get(vm, t, "CollisionRadius").as_float()).unwrap_or(0.0);
                 let reach = get(vm, p, "CollisionRadius").as_float().max(8.0) * 0.5 + target_radius;
                 if delta.length() <= reach.max(8.0) || m.timer <= 0.0 {
+                    arrived = delta.length() <= reach.max(8.0);
                     set(vm, p, "Acceleration", value(Vec3::ZERO));
                     true
                 } else {
@@ -279,6 +285,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         };
         set(vm, c, "MoveTimer", Value::Float(m.timer));
         if done {
+            set(vm, c, "bMoveToSuccess", Value::Bool(arrived));
             world(vm).nav.moves.remove(&c);
             if matches!(vm.latent.get(&c), Some(Latent::Other("move"))) {
                 vm.finish_latent(c);

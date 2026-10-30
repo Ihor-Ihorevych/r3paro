@@ -37,19 +37,48 @@ fn unquote(s: &str) -> &str {
     s.strip_prefix('"').and_then(|x| x.strip_suffix('"')).unwrap_or(s)
 }
 
+/// The number at the start of `s` (sign, digits, one decimal point, exponent), if any.
+fn leading_number(s: &str) -> Option<f64> {
+    let b = s.as_bytes();
+    let mut end = 0;
+    if end < b.len() && (b[end] == b'-' || b[end] == b'+') {
+        end += 1;
+    }
+    let mut seen_digit = false;
+    let mut seen_dot = false;
+    while end < b.len() {
+        match b[end] {
+            b'0'..=b'9' => seen_digit = true,
+            b'.' if !seen_dot => seen_dot = true,
+            _ => break,
+        }
+        end += 1;
+    }
+    if !seen_digit {
+        return None;
+    }
+    s[..end].parse().ok()
+}
+
 /// A property value from its text form; `None` when the text does not fit the type.
 pub fn parse(vm: &mut Vm<'_>, ty: &PropType, text: &str) -> Option<Value> {
     let t = text.trim();
     Some(match ty {
-        PropType::Int => Value::Int(t.parse::<i64>().ok().map(|v| v as i32).or_else(|| t.parse::<f32>().ok().map(|f| f as i32))?),
-        PropType::Float => Value::Float(t.trim_end_matches(['f', 'F']).parse().ok()?),
-        PropType::Byte => Value::Byte(t.parse().ok()?),
+        // Numbers are read from the front, the rest ignored (as C's atoi/atof do).
+        PropType::Int => Value::Int(leading_number(t)? as i32),
+        PropType::Float => Value::Float(leading_number(t)? as f32),
+        PropType::Byte => Value::Byte(leading_number(t)? as u8),
         PropType::Bool => match t.to_ascii_lowercase().as_str() {
             "true" | "1" | "yes" | "on" => Value::Bool(true),
             "false" | "0" | "no" | "off" | "" => Value::Bool(false),
             _ => return None,
         },
-        PropType::Name => Value::Name(vm.db.names.intern(unquote(t))),
+        // A name is one token: it ends at whitespace or a separator.
+        PropType::Name => {
+            let u = unquote(t);
+            let end = u.find(|c: char| c.is_whitespace() || c == ',' || c == ')').unwrap_or(u.len());
+            Value::Name(vm.db.names.intern(&u[..end]))
+        }
         PropType::Str => Value::Str(unquote(t).to_string()),
         PropType::Object | PropType::Class => {
             // `Class'Package.Name'` or a bare path.

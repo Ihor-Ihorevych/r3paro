@@ -37,7 +37,9 @@ fn list_class(vm: &mut hp3_script::Vm<'_>) {
             }
             let name = hp3_script::natives::object_path(vm, a);
             let mut info = String::new();
-            for n in ["Tag", "Event", "Location", "CollisionRadius", "CollisionHeight", "bCollideActors", "TriggerType", "bTriggerOnceOnly", "CutName", "bInitiallyActive"] {
+            let default_props = "Tag,Event,Location,CollisionRadius,CollisionHeight,bCollideActors,TriggerType,bTriggerOnceOnly,CutName,bInitiallyActive".to_string();
+        let props = std::env::var("HP3_LIST_PROPS").unwrap_or(default_props);
+        for n in props.split(',') {
                 let v = hp3_world::get(vm, a, n);
                 let v = match v {
                     hp3_script::Value::Empty => continue,

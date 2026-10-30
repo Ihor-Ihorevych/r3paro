@@ -148,6 +148,8 @@ pub struct Vm<'s> {
     pub profile: bool,
     /// Log every state change.
     pub trace_states: bool,
+    /// Print calls of functions whose path contains this (lower-case), from `HP3_TRACE_CALLS`.
+    pub trace_calls: Option<String>,
     /// `Engine.Actor`, when loaded: actors are never loaded lazily.
     actor_class: Option<StructId>,
     pub profile_counts: HashMap<StructId, u64>,
@@ -198,6 +200,7 @@ impl<'s> Vm<'s> {
             profile_counts: HashMap::default(),
             profile_natives: HashMap::default(),
             func_info: Vec::new(),
+            trace_calls: std::env::var("HP3_TRACE_CALLS").ok().map(|s| s.to_ascii_lowercase()),
             function_cache: HashMap::default(),
             lenient: false,
             missing: Default::default(),
@@ -769,6 +772,21 @@ impl<'s> Vm<'s> {
     pub fn invoke(&mut self, f: StructId, this: Option<ObjId>, args: &mut [Value]) -> VmResult<Value> {
         if self.depth > 250 {
             return Err(VmError::Recursion);
+        }
+        if let Some(filter) = &self.trace_calls {
+            let path = self.function_path(f);
+            if path.to_ascii_lowercase().contains(filter.as_str()) {
+                let who = this.map(|o| self.db.names.get(self.db.objects.get(o).name).to_string()).unwrap_or_default();
+                let shown: Vec<String> = args
+                    .iter()
+                    .map(|a| match a {
+                        Value::Name(n) => format!("'{}'", self.db.names.get(*n)),
+                        Value::Object(Some(o)) => self.db.names.get(self.db.objects.get(*o).name).to_string(),
+                        other => format!("{other:?}"),
+                    })
+                    .collect();
+                eprintln!("call: {who}.{path}({})", shown.join(", "));
+            }
         }
         let def = self.db.get(f);
         if def.function_flags & FUNC_NATIVE != 0 {

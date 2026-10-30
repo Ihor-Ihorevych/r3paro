@@ -605,6 +605,70 @@ fn vec_of(v: &Value) -> glam::Vec3 {
 }
 
 /// Collision geometry of a level: its BSP, the triangles of blocking static meshes, and terrain.
+/// A mover's collision triangles in its own space (scaled, around its pivot): its static mesh's, or its
+/// brush's polygons.
+fn mover_shape(vm: &mut Vm<'_>, a: ObjId) -> Option<collision::MoverShape> {
+    use glam::Vec3;
+    if !get(vm, a, "bCollideActors").as_bool() {
+        return None;
+    }
+    let scale = match get(vm, a, "DrawScale").as_float() {
+        0.0 => 1.0,
+        s => s,
+    };
+    let s3 = match get(vm, a, "DrawScale3D") {
+        Value::Struct(f) if f.len() == 3 => vec_of(&Value::Struct(f)),
+        _ => Vec3::ONE,
+    };
+    let s3 = if s3 == Vec3::ZERO { Vec3::ONE } else { s3 };
+    let mut tris: Vec<[Vec3; 3]> = Vec::new();
+    if let Some(mesh) = get(vm, a, "StaticMesh").as_obj() {
+        let (pkg, index) = vm.db.objects.get(mesh).key.clone()?;
+        let p = vm.db.set.get(&pkg).ok()?;
+        let chain = vm.db.set.export_chain(&p, index);
+        let Some(Asset::StaticMesh(sm)) = native_asset(&p, index, &chain) else { return None };
+        let pos: Vec<Vec3> = sm.vertices.iter().map(|v| Vec3::new(v.position.x, v.position.y, v.position.z) * s3 * scale).collect();
+        if !sm.collision_triangles.is_empty() {
+            for t in &sm.collision_triangles {
+                tris.push(t.vertices.map(|i| pos.get(i as usize).copied().unwrap_or(Vec3::ZERO)));
+            }
+        } else {
+            for t in sm.indices.chunks_exact(3) {
+                tris.push([t[0], t[1], t[2]].map(|i| pos.get(i as usize).copied().unwrap_or(Vec3::ZERO)));
+            }
+        }
+    } else if let Some(brush) = get(vm, a, "Brush").as_obj() {
+        let (pkg, index) = vm.db.objects.get(brush).key.clone()?;
+        let p = vm.db.set.get(&pkg).ok()?;
+        let chain = vm.db.set.export_chain(&p, index);
+        let Some(Asset::Model(model)) = native_asset(&p, index, &chain) else { return None };
+        let (pp, pi) = vm.db.set.resolve(&p, model.polys)?;
+        let chain = vm.db.set.export_chain(&pp, pi);
+        let Some(Asset::Polys(polys)) = native_asset(&pp, pi, &chain) else { return None };
+        let prepivot = vec_of(&get(vm, a, "PrePivot"));
+        for poly in &polys.polys {
+            let v: Vec<Vec3> = poly.vertices.iter().map(|v| (Vec3::new(v.x, v.y, v.z) - prepivot) * s3 * scale).collect();
+            for k in 1..v.len().saturating_sub(1) {
+                tris.push([v[0], v[k], v[k + 1]]);
+            }
+        }
+    }
+    if tris.is_empty() {
+        return None;
+    }
+    let mut shape = collision::MoverShape::new(a, &tris);
+    shape.place(mover_transform(vm, a));
+    Some(shape)
+}
+
+/// A mover's placement: its location and rotation.
+pub(crate) fn mover_transform(vm: &mut Vm<'_>, a: ObjId) -> glam::Mat4 {
+    let loc = vec_of(&get(vm, a, "Location"));
+    let r: Vec<i32> = get(vm, a, "Rotation").fields().iter().map(Value::as_int).collect();
+    let rot = hp3_anim::rotator_matrix([r.first().copied().unwrap_or(0), r.get(1).copied().unwrap_or(0), r.get(2).copied().unwrap_or(0)]);
+    glam::Mat4::from_translation(loc) * rot
+}
+
 fn build_collision(vm: &mut Vm<'_>, map: &Rc<Package>, model: Option<ObjRef>, actors: &[ObjId]) -> collision::Collision {
     use glam::{Mat3, Vec3};
     let model = model.and_then(|m| vm.db.set.resolve(map, m)).and_then(|(p, i)| {
@@ -615,7 +679,15 @@ fn build_collision(vm: &mut Vm<'_>, map: &Rc<Package>, model: Option<ObjRef>, ac
         }
     });
     let mut col = collision::Collision::new(model);
+    let mover_class = vm.db.find("Mover");
     for &a in actors {
+        // Movers collide as moving shapes, not as part of the fixed level.
+        if mover_class.is_some_and(|m| vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, m))) {
+            if let Some(shape) = mover_shape(vm, a) {
+                col.movers.push(shape);
+            }
+            continue;
+        }
         let mesh = get(vm, a, "StaticMesh").as_obj();
         let blocks = get(vm, a, "bCollideActors").as_bool()
             && (get(vm, a, "bBlockActors").as_bool() || get(vm, a, "bBlockPlayers").as_bool());

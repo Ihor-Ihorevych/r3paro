@@ -210,6 +210,9 @@ fn play(vm: &mut Vm<'_>, actor: ObjId, seq: Name, rate: f32, channel: usize, loo
         return false;
     };
     let name = vm.db.names.get(seq).to_string();
+    if std::env::var("HP3_ANIM_TRACE").is_ok() {
+        eprintln!("anim: play {actor:?} {name} channel {channel} looping {looping}");
+    }
     let Some(si) = set.find(&name) else {
         if std::env::var("HP3_ANIM_TRACE").is_ok() {
             eprintln!("anim: {actor:?} has no sequence {name}");
@@ -273,7 +276,15 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
             vm.finish_latent(a);
         }
         for ci in ended {
+            if std::env::var("HP3_ANIM_TRACE").is_ok() {
+                let c = get(vm, a, "Controller").as_obj();
+                eprintln!("anim: AnimEnd {a:?} channel {ci} controller {c:?}");
+            }
             fire(vm, a, "AnimEnd", &mut [Value::Int(ci as i32)]);
+            // A pawn's controller hears its animations end too (scripted and cutscene controllers wait on it).
+            if let Some(c) = get(vm, a, "Controller").as_obj() {
+                fire(vm, c, "AnimEnd", &mut [Value::Int(ci as i32)]);
+            }
         }
     }
 }
@@ -399,7 +410,12 @@ pub fn register(vm: &mut Vm<'_>) {
     vm.register("Actor.HasAnim", |vm, this, a| {
         let Some(o) = this else { return Ok(Value::Bool(false)) };
         let name = vm.db.names.get(a[0].as_name()).to_string();
-        Ok(Value::Bool(set_of(vm, o).is_some_and(|s| s.find(&name).is_some())))
+        let has = set_of(vm, o).is_some_and(|s| s.find(&name).is_some());
+        if std::env::var("HP3_ANIM_TRACE").is_ok() {
+            let mesh = get(vm, o, "Mesh").as_obj().map(|m| hp3_script::natives::object_path(vm, m));
+            eprintln!("anim: HasAnim {o:?} {name} -> {has} (mesh {mesh:?})");
+        }
+        Ok(Value::Bool(has))
     });
     // GetAnimParams(Channel, out OutSeqName, out OutAnimFrame, out OutAnimRate)
     vm.register("Actor.GetAnimParams", |vm, this, a| {
@@ -525,6 +541,30 @@ pub fn register(vm: &mut Vm<'_>) {
             x.bone_turns.push((bone, rot, alpha));
         }
         Ok(Value::Empty)
+    });
+    // SetAnimFrame(Time, optional Channel, optional UnitFlag): a channel's position, as a fraction of the
+    // sequence (or in frames with UnitFlag 1).
+    vm.register("Actor.SetAnimFrame", |vm, this, a| {
+        if let Some(o) = this {
+            let t = a.first().map(Value::as_float).unwrap_or(0.0);
+            let ci = channel_arg(a, 1);
+            let in_frames = a.get(2).is_some_and(|v| v.as_int() == 1);
+            let frames = set_of(vm, o).and_then(|s| {
+                let si = world(vm).anim.actors.get(&o)?.channels.get(ci)?.sequence?;
+                Some(s.sequences[si].frames as f32)
+            });
+            if let Some(f) = frames {
+                channel_mut(vm, o, ci).frame = if in_frames { t } else { t * f };
+            }
+        }
+        Ok(Value::Empty)
+    });
+    // GetAnimNumFrames(Sequence): its frame count (0 when the actor has no such sequence).
+    vm.register("Actor.GetAnimNumFrames", |vm, this, a| {
+        let Some(o) = this else { return Ok(Value::Int(0)) };
+        let name = vm.db.names.get(a[0].as_name()).to_string();
+        let frames = set_of(vm, o).and_then(|s| s.find(&name).map(|i| s.sequences[i].frames)).unwrap_or(0);
+        Ok(Value::Int(frames))
     });
     // LinkMesh(NewMesh, optional bKeepAnim)
     vm.register("Actor.LinkMesh", |vm, this, a| {
