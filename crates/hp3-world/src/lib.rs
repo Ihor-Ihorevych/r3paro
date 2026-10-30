@@ -5,7 +5,6 @@
 
 pub mod anim;
 pub mod audio;
-pub mod chase;
 pub mod debug_move;
 pub mod canvas;
 pub mod collision;
@@ -78,7 +77,6 @@ pub struct World {
     pub particles: particles::Particles,
     /// The pawn's own `AirSpeed`, kept while flying in the debug modes.
     pub debug_air_speed: Option<f32>,
-    pub chase: chase::Chase,
     /// A level switch asked for and due (`Level.NextURL`).
     pub pending_travel: Option<String>,
     actor_slots: HashMap<&'static str, Option<usize>>,
@@ -339,7 +337,6 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, c
         movies: Default::default(),
         particles: Default::default(),
         debug_air_speed: None,
-        chase: Default::default(),
         tick_profile: Default::default(),
         actor_slots: Default::default(),
         config,
@@ -552,7 +549,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     // The player's controller reads input and moves first, as the local player does.
     follow_player(vm);
     if let Some(pc) = world(vm).player {
-        input::apply(vm, pc);
+        input::apply(vm, pc, dt);
         fire(vm, pc, "PlayerTick", &mut [Value::Float(dt)]);
     }
     interactions::tick(vm, dt);

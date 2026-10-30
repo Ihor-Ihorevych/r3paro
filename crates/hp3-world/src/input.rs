@@ -16,6 +16,8 @@ pub struct Input {
     bindings: HashMap<String, String>,
     aliases: HashMap<String, String>,
     held: HashSet<String>,
+    /// Every `Button` name the bindings can set (cleared each tick, set while their key is held).
+    button_names: Vec<String>,
     /// Keys pressed or released since the last tick.
     pressed: Vec<String>,
     released: Vec<String>,
@@ -45,6 +47,17 @@ impl Input {
                 }
             }
         }
+        // Every button any alias or binding can press.
+        let mut names: Vec<String> = Vec::new();
+        for text in input.aliases.values().chain(input.bindings.values()) {
+            for part in text.split('|') {
+                let words: Vec<&str> = part.split_whitespace().collect();
+                if words.len() >= 2 && words[0].eq_ignore_ascii_case("button") && !names.iter().any(|n| n == words[1]) {
+                    names.push(words[1].to_string());
+                }
+            }
+        }
+        input.button_names = names;
         input
     }
 
@@ -97,30 +110,47 @@ fn param(words: &[&str], name: &str) -> Option<f32> {
 
 /// Writes this tick's input into the player controller and runs the commands of keys pressed since the last
 /// tick.
-pub fn apply(vm: &mut Vm<'_>, pc: ObjId) {
+/// Reads the keys and the mouse into the controller's input properties for a tick of `dt` seconds, then runs
+/// the commands of the keys pressed since the last tick.
+pub fn apply(vm: &mut Vm<'_>, pc: ObjId, dt: f32) {
+    let dt = dt.max(1.0 / 240.0);
     let input = std::mem::take(&mut world(vm).input);
     let mut axes: HashMap<String, f32> = HashMap::default();
-    let mut buttons: HashMap<String, bool> = HashMap::default();
+    let mut buttons: HashSet<String> = HashSet::default();
+    let mut counts: HashSet<String> = HashSet::default();
     let mut execs: Vec<String> = Vec::new();
-    let held: Vec<String> = input.held.iter().cloned().collect();
-    let mut keys: Vec<(String, f32)> = held.into_iter().map(|k| (k, 1.0)).collect();
-    // The chase camera does not look with the mouse.
-    let chase = !world(vm).chase.off;
-    if !chase {
-        keys.push(("mousex".into(), input.mouse.0));
-        keys.push(("mousey".into(), -input.mouse.1));
+    // Keys held now, and keys pressed and let go inside this frame (their buttons still count once).
+    let mut keys: Vec<(String, f32)> = input.held.iter().map(|k| (k.clone(), 1.0)).collect();
+    for k in &input.pressed {
+        if !input.held.contains(k) {
+            keys.push((k.clone(), 1.0));
+        }
     }
+    keys.push(("mousex".into(), input.mouse.0));
+    keys.push(("mousey".into(), -input.mouse.1));
     for (key, amount) in &keys {
+        let mouse = key == "mousex" || key == "mousey";
         for cmd in input.commands(key) {
             let words: Vec<&str> = cmd.split_whitespace().collect();
             match words.first().map(|w| w.to_ascii_lowercase()).as_deref() {
                 Some("axis") if words.len() >= 2 => {
-                    let speed = param(&words, "Speed").or_else(|| param(&words, "SpeedBase")).unwrap_or(1.0);
                     let invert = param(&words, "Invert").unwrap_or(1.0);
-                    *axes.entry(words[1].to_string()).or_default() += amount * speed * invert;
+                    let value = if mouse {
+                        // Mouse pixels accumulate at 0.01 x Speed each, and every axis is then scaled by 20 / dt.
+                        0.2 * param(&words, "Speed").unwrap_or(1.0) * amount / dt
+                    } else if let Some(base) = param(&words, "SpeedBase") {
+                        // Keys that ramp (the arrow keys) reach twice the plain rate.
+                        40.0 * base
+                    } else {
+                        20.0 * param(&words, "Speed").unwrap_or(1.0)
+                    };
+                    *axes.entry(words[1].to_string()).or_default() += value * invert;
                 }
                 Some("button") if words.len() >= 2 && *amount != 0.0 => {
-                    buttons.insert(words[1].to_string(), true);
+                    buttons.insert(words[1].to_string());
+                }
+                Some("count") if words.len() >= 2 && *amount != 0.0 => {
+                    counts.insert(words[1].to_string());
                 }
                 _ => {}
             }
@@ -132,30 +162,30 @@ pub fn apply(vm: &mut Vm<'_>, pc: ObjId) {
             match words.first().map(|w| w.to_ascii_lowercase()).as_deref() {
                 Some("axis") | Some("button") | Some("count") | None => {}
                 Some("toggle") if words.len() >= 2 => {
-                    let cur = get(vm, pc, words[1]).as_bool();
-                    set(vm, pc, words[1], Value::Byte(!cur as u8));
+                    // A toggle flips bit 7 of the byte.
+                    let cur = get(vm, pc, words[1]).as_int() as u8;
+                    set(vm, pc, words[1], Value::Byte(cur ^ 0x80));
                 }
                 _ => execs.push(cmd),
             }
         }
     }
-    // With the chase camera, left and right turn the heading instead of strafing.
-    if chase {
-        let turn = axes.remove("aStrafe").unwrap_or(0.0);
-        crate::chase::update(vm, pc, turn, 1.0 / 60.0);
-    }
-    // Axes reset every tick; the input script turns them into movement.
-    for name in ["aBaseX", "aBaseY", "aBaseZ", "aMouseX", "aMouseY", "aForward", "aTurn", "aStrafe", "aUp", "aLookUp"] {
+    // Axes and buttons start from nothing every tick; the input script turns them into movement.
+    for name in ["aBaseX", "aBaseY", "aBaseZ", "aMouseX", "aMouseY", "aForward", "aTurn", "aStrafe", "aUp", "aLookUp", "aArrowRight", "aArrowUp"] {
         set(vm, pc, name, Value::Float(0.0));
     }
     for (name, v) in axes {
         set(vm, pc, &name, Value::Float(v));
     }
-    for name in ["bRun", "bDuck", "bLook", "bStrafe", "bFire", "bAltFire", "bFreeLook"] {
+    for name in &input.button_names {
         set(vm, pc, name, Value::Byte(0));
     }
-    for (name, on) in buttons {
-        set(vm, pc, &name, Value::Byte(on as u8));
+    for name in buttons {
+        set(vm, pc, &name, Value::Byte(1));
+    }
+    for name in counts {
+        let cur = get(vm, pc, &name).as_int() as u8;
+        set(vm, pc, &name, Value::Byte(cur.wrapping_add(1)));
     }
     for cmd in execs {
         exec(vm, pc, &cmd);
@@ -165,6 +195,14 @@ pub fn apply(vm: &mut Vm<'_>, pc: ObjId) {
     w.input.pressed.clear();
     w.input.released.clear();
     w.input.mouse = (0.0, 0.0);
+}
+
+/// The input properties a script reads after `PlayerTick`: zero again, so actors that tick later this frame
+/// see no input.
+pub fn clear_axes(vm: &mut Vm<'_>, pc: ObjId) {
+    for name in ["aBaseX", "aBaseY", "aBaseZ", "aMouseX", "aMouseY", "aForward", "aTurn", "aStrafe", "aUp", "aLookUp", "aArrowRight", "aArrowUp"] {
+        set(vm, pc, name, Value::Float(0.0));
+    }
 }
 
 /// Runs a console command such as `Jump` or `Fire`: an exec function of the controller, its pawn or the HUD.
