@@ -470,6 +470,16 @@ impl Renderer {
         height: u32,
         draw: impl FnOnce(&wgpu::TextureView, &wgpu::TextureView) -> wgpu::CommandBuffer,
     ) -> Vec<u8> {
+        self.render_frames_to_rgba(width, height, |c, d| vec![draw(c, d)])
+    }
+
+    /// Like `render_frame_to_rgba`, with several command buffers submitted in order.
+    pub fn render_frames_to_rgba(
+        &self,
+        width: u32,
+        height: u32,
+        draw: impl FnOnce(&wgpu::TextureView, &wgpu::TextureView) -> Vec<wgpu::CommandBuffer>,
+    ) -> Vec<u8> {
         let d = &self.device;
         let size = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
         let target = d.create_texture(&wgpu::TextureDescriptor {
@@ -501,7 +511,7 @@ impl Renderer {
             },
             size,
         );
-        self.queue.submit([cmd, enc.finish()]);
+        self.queue.submit(cmd.into_iter().chain([enc.finish()]));
         let slice = readback.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
         let _ = d.poll(wgpu::PollType::Wait);

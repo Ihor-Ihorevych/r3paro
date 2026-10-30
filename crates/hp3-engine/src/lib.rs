@@ -138,6 +138,56 @@ pub fn map_inputs(vm: &mut Vm<'_>, loader: &Loader<'_>, map: &Package, lit: bool
     out
 }
 
+/// Textures of 2D materials with their sizes, by material object.
+#[derive(Default)]
+pub struct HudCache {
+    textures: HashMap<ObjId, Option<(ObjKey, f32, f32)>>,
+}
+
+/// The HUD of this frame as overlay quads (and the key-to-image lookup the overlay needs).
+pub fn hud_quads(vm: &mut Vm<'_>, loader: &Loader<'_>, cache: &mut HudCache, width: u32, height: u32) -> Vec<hp3_render::overlay::Quad> {
+    use hp3_render::overlay::{Blend, Quad};
+    use hp3_world::canvas::{STY_ALPHA, STY_MODULATED, STY_TRANSLUCENT};
+    let tiles = hp3_world::canvas::render(vm, width, height);
+    let mut out = Vec::with_capacity(tiles.len());
+    for t in tiles {
+        // Tiles without a material (or one that does not resolve to a texture) draw nothing, as in Unreal.
+        let Some(material) = t.material else { continue };
+        let tex = Some(material).and_then(|m| {
+            cache
+                .textures
+                .entry(m)
+                .or_insert_with(|| {
+                    let k = texture_key(vm, loader, m)?;
+                    let img = loader.image_with_alpha(&loader.set.get(&k.0).ok()?, k.1)?;
+                    Some((k, img.width as f32, img.height as f32))
+                })
+                .clone()
+        });
+        let Some(tex) = tex else { continue };
+        let (tw, th) = (tex.1, tex.2);
+        // Negative sizes are scales of the texture's size (`DrawTileScaled`); negative extents the whole texture.
+        let w = if t.w < 0.0 { tw * -t.w } else { t.w };
+        let h = if t.h < 0.0 { th * -t.h } else { t.h };
+        let (ul, vl) = if t.ul < 0.0 { (tw, th) } else { (t.ul, t.vl) };
+        let blend = match t.style {
+            STY_TRANSLUCENT => Blend::Additive,
+            STY_MODULATED => Blend::Modulate,
+            _ => Blend::Alpha,
+        };
+        let c = t.color;
+        let alpha = if t.style == STY_ALPHA { c[3] as f32 / 255.0 } else { 1.0 };
+        out.push(Quad {
+            texture: Some(tex.0),
+            rect: [t.x, t.y, w, h],
+            uv: [t.u / tw, t.v / th, (t.u + ul) / tw, (t.v + vl) / th],
+            color: [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, alpha],
+            blend,
+        });
+    }
+    out
+}
+
 /// The package export behind an object, if it came from a package.
 fn export_of(vm: &Vm<'_>, o: ObjId) -> Option<(Rc<Package>, usize)> {
     let (pkg, index) = vm.db.objects.get(o).key.clone()?;

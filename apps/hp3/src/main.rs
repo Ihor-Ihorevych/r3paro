@@ -141,6 +141,8 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
     let gpu_scene = renderer.upload_scene(&scene);
     let dynamic = hp3_render::dynamic::Dynamic::new(&renderer);
     let mut mesh_cache = hp3_engine::MeshCache::default();
+    let overlay = hp3_render::overlay::Overlay::new(&renderer);
+    let mut hud_cache = hp3_engine::HudCache::default();
 
     let (mut width, mut height) = window.size_in_pixels();
     let configure = |w: u32, h: u32| {
@@ -265,7 +267,10 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
         let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut mesh_cache, lighting.as_ref());
         let refs: Vec<_> = instances.iter().map(|(m, t, l)| (m.as_ref(), *t, *l)).collect();
         let cmd = dynamic.draw(&renderer, &gpu_scene, &refs, &camera, &view, &depth, width as f32 / height as f32);
-        renderer.queue.submit([cmd]);
+        let quads = hp3_engine::hud_quads(&mut vm, &loader, &mut hud_cache, width, height);
+        let images = |k: &hp3_assets::loader::ObjKey| loader.image_with_alpha(&loader.set.get(&k.0).ok()?, k.1);
+        let hud = overlay.draw(&renderer, &quads, &images, &view, width, height);
+        renderer.queue.submit([cmd, hud]);
         frame.present();
 
         frames += 1;

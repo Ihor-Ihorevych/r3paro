@@ -71,6 +71,11 @@ Milestones are from the plan (M0 to M12).
   start), so the game places Harry, attaches Ron and Hermione as followers and starts its own camera, which
   takes the pawn's camera settings when none were carried over. Ticked actors flip `bTicked` each frame
   (HP3's camera computes its view once per frame on that).
+- **HUD**: each frame the HUD's `PostRender` draws through the `Canvas` natives (tiles, text with HP3's fonts,
+  sizes, wrapping) into 2D quads drawn over the scene with Unreal's blend styles. HP3's HUD items rest hidden
+  in their `Idle` state until the game fades them in (`HP3_SHOW_HUD=1` in `hp3-view play` shows them all).
+  Not yet: menus (GUI), native TTF fonts, 3D actors in the HUD.
+- Fixed: auto states are flagged 0x2 (0x1 is "editable"); every actor now starts in its class's auto state.
 - M7 onwards: not started.
 
 ## Checking

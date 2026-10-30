@@ -31,7 +31,8 @@ impl Vm<'_> {
 
     /// The state marked `auto` in a class or its ancestors.
     pub fn auto_state(&self, class: StructId) -> Option<StructId> {
-        const STATE_AUTO: u32 = 0x0000_0001;
+        // STATE_Editable is 0x1; auto states carry 0x2.
+        const STATE_AUTO: u32 = 0x0000_0002;
         let mut c = Some(class);
         while let Some(cid) = c {
             for &s in self.db.get(cid).states.values() {

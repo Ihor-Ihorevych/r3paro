@@ -141,6 +141,19 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
     for _ in 0..ticks {
         hp3_world::tick(&mut vm, 1.0 / 60.0);
     }
+    // HP3_SHOW_HUD=1 fades every HUD item in (they rest hidden until the game shows them).
+    if std::env::var_os("HP3_SHOW_HUD").is_some()
+        && let Some(pc) = hp3_world::world(&mut vm).player
+        && let Some(hud) = hp3_world::get(&mut vm, pc, "myHUD").as_obj()
+        && let Value::Array(items) = hp3_world::get(&mut vm, hud, "HudItems")
+    {
+        for it in items.iter().filter_map(Value::as_obj) {
+            let _ = vm.event(it, "DoFadeIn", &mut []);
+        }
+        for _ in 0..30 {
+            hp3_world::tick(&mut vm, 1.0 / 60.0);
+        }
+    }
     let statics = hp3_engine::static_exports(&mut vm, &pkg);
     // HP3_UNLIT=1 draws everything at full brightness.
     let inputs = hp3_engine::map_inputs(&mut vm, &loader, &pkg, std::env::var_os("HP3_UNLIT").is_none());
@@ -196,6 +209,20 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
     let (w, h) = (1280, 720);
     let gpu_scene = renderer.upload_scene(&scene);
     let refs: Vec<_> = instances.iter().map(|(m, t, l)| (m.as_ref(), *t, *l)).collect();
-    let rgba = renderer.render_frame_to_rgba(w, h, |color, depth| dynamic.draw(&renderer, &gpu_scene, &refs, &camera, color, depth, w as f32 / h as f32));
+    // The HUD over the scene (HP3_NO_HUD=1 leaves it out).
+    let quads = if std::env::var_os("HP3_NO_HUD").is_none() {
+        hp3_engine::hud_quads(&mut vm, &loader, &mut hp3_engine::HudCache::default(), w, h)
+    } else {
+        Vec::new()
+    };
+    eprintln!("{} HUD quads", quads.len());
+    let overlay = hp3_render::overlay::Overlay::new(&renderer);
+    let images = |k: &hp3_assets::loader::ObjKey| loader.image_with_alpha(&set.get(&k.0).ok()?, k.1);
+    let rgba = renderer.render_frames_to_rgba(w, h, |color, depth| {
+        vec![
+            dynamic.draw(&renderer, &gpu_scene, &refs, &camera, color, depth, w as f32 / h as f32),
+            overlay.draw(&renderer, &quads, &images, color, w, h),
+        ]
+    });
     write_png(out, w, h, &rgba)
 }

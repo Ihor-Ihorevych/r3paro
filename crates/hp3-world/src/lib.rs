@@ -4,6 +4,7 @@
 //! The world lives in `Vm::ext`; natives reach it with `world(vm)`.
 
 pub mod anim;
+pub mod canvas;
 pub mod collision;
 pub mod config;
 pub mod nav;
@@ -54,6 +55,7 @@ pub struct World {
     pub nav: nav::Navigation,
     /// Opacity set by `SetOpacity` (1 when absent).
     pub opacity: HashMap<ObjId, f32>,
+    pub canvas: canvas::CanvasState,
 }
 
 /// The world stored in the VM. Panics if no level is loaded.
@@ -126,6 +128,7 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Res
     natives::register(vm);
     anim::register(vm);
     nav::register(vm);
+    canvas::register(vm);
     let configured = config::apply(vm, &config);
     if std::env::var_os("HP3_CONFIG_DEBUG").is_some() {
         eprintln!("config: {configured} class default values read from the ini files");
@@ -190,6 +193,7 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Res
         anim: Default::default(),
         nav: Default::default(),
         opacity: Default::default(),
+        canvas: Default::default(),
         config,
     }));
     let collision = build_collision(vm, map, level_model, &actors);

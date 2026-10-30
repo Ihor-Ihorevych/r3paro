@@ -33,6 +33,7 @@ pub fn key(pkg: &Package, index: usize) -> ObjKey {
 pub struct Loader<'s> {
     pub set: &'s PackageSet,
     images: RefCell<HashMap<ObjKey, Option<Rc<Image>>>>,
+    raw_images: RefCell<HashMap<ObjKey, Option<Rc<Image>>>>,
     assets: RefCell<HashMap<ObjKey, Option<Rc<Asset>>>>,
 }
 
@@ -54,7 +55,7 @@ pub fn tag_rotator(tag: &Tag<'_>) -> Option<[i32; 3]> {
 
 impl<'s> Loader<'s> {
     pub fn new(set: &'s PackageSet) -> Self {
-        Loader { set, images: RefCell::new(HashMap::new()), assets: RefCell::new(HashMap::new()) }
+        Loader { set, images: RefCell::new(HashMap::new()), raw_images: RefCell::new(HashMap::new()), assets: RefCell::new(HashMap::new()) }
     }
 
     /// The native asset decoded from an export, if its class has one.
@@ -94,7 +95,22 @@ impl<'s> Loader<'s> {
         img
     }
 
+    /// Like `image`, keeping the texture's own alpha channel (2D drawing: HUD icons, font pages).
+    pub fn image_with_alpha(&self, pkg: &Rc<Package>, index: usize) -> Option<Rc<Image>> {
+        let k = key(pkg, index);
+        if let Some(i) = self.raw_images.borrow().get(&k) {
+            return i.clone();
+        }
+        let img = self.decode_image_alpha(pkg, index, true).map(Rc::new);
+        self.raw_images.borrow_mut().insert(k, img.clone());
+        img
+    }
+
     fn decode_image(&self, pkg: &Rc<Package>, index: usize) -> Option<Image> {
+        self.decode_image_alpha(pkg, index, false)
+    }
+
+    fn decode_image_alpha(&self, pkg: &Rc<Package>, index: usize, keep_alpha: bool) -> Option<Image> {
         let (format, palette_ref, masked) = self.with_tags(pkg, index, |tags, _| {
             let format = props::find(pkg, tags, "Format", 0).and_then(|t| t.as_u8()).unwrap_or(0);
             let palette = props::find(pkg, tags, "Palette", 0).and_then(|t| t.as_obj());
@@ -117,7 +133,7 @@ impl<'s> Loader<'s> {
         let masked = masked || (format == Format::P8 && palette.is_some_and(|p| p.colors.first().is_some_and(|c| c.a == 0)));
         // Alpha is a cut-out only for masked textures; elsewhere it carries other data (specular, blending),
         // which the renderer does not use yet.
-        if !masked {
+        if !masked && !keep_alpha {
             for px in rgba.chunks_exact_mut(4) {
                 px[3] = 255;
             }

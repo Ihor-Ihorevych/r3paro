@@ -196,6 +196,32 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                     }
                 }
             }
+            if std::env::var("HP3_HUD_DEBUG").is_ok() {
+                let errors_before = vm.log.len();
+                if let Some(hud) = hp3_world::get(&mut vm, pc, "myHUD").as_obj()
+                    && let hp3_script::Value::Array(items) = hp3_world::get(&mut vm, hud, "HudItems")
+                {
+                    for it in items.iter().filter_map(hp3_script::Value::as_obj) {
+                        let class = vm.db.objects.get(it).class.map(|c| vm.db.names.get(vm.db.structs[c.0 as usize].name).to_string());
+                        let state = vm.state_of(it).map(|s| vm.db.names.get(vm.db.structs[s.0 as usize].name).to_string());
+                        println!("    item {class:?} state {state:?}");
+                    }
+                }
+                let tiles = hp3_world::canvas::render(&mut vm, 1280, 720);
+                println!("  hud: {} tiles", tiles.len());
+                let mut by_mat: std::collections::BTreeMap<String, usize> = Default::default();
+                for t in &tiles {
+                    let m = t.material.map(|m| hp3_script::natives::object_path(&vm, m)).unwrap_or_else(|| "None".into());
+                    let m = format!("{m} style {} alpha {}", t.style, t.color[3]);
+                    *by_mat.entry(m).or_default() += 1;
+                }
+                for (m, n) in by_mat.iter().take(25) {
+                    println!("    {n:4} {m}");
+                }
+                for l in vm.log.iter().skip(errors_before).take(10) {
+                    println!("    log: {l}");
+                }
+            }
             if std::env::var("HP3_ATTACH_DEBUG").is_ok() {
                 let list: Vec<_> = hp3_world::world(&mut vm).anim.attachments.iter().map(|(k, v)| (*k, v.clone())).collect();
                 for (child, (parent, bone)) in list {
