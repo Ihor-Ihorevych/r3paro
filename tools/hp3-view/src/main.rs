@@ -113,6 +113,16 @@ fn pose(root: &Path, package: &str, mesh: &str, out: &Path, seq: Option<&str>, f
     };
     eprintln!("posing {label}");
     let geom = hp3_render::meshes::build_posed(&loader, &pkg, mi, &[], Some(&points)).ok_or("no geometry")?;
+    if std::env::var_os("HP3_POSE_DEBUG").is_some() {
+        for (i, b) in geom.batches.iter().enumerate() {
+            eprintln!("batch {i}: {} triangles, texture {:?}", b.indices.len() / 3, b.texture);
+        }
+        eprintln!("mesh materials (flags, texture index): {:?}", m.header.materials);
+        for (i, t) in m.header.textures.iter().enumerate() {
+            let path = set.resolve(&pkg, *t).map(|(p, x)| format!("{} ({})", p.ref_path(hp3_package::ObjRef::from_export(x)), p.export_class_name(x)));
+            eprintln!("material {i}: {path:?}");
+        }
+    }
     let renderer = Renderer::new_headless()?;
     let dynamic = Dynamic::new(&renderer);
     let images = |k: &hp3_assets::loader::ObjKey| loader.image(&set.get(&k.0).ok()?, k.1);

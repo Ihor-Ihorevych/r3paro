@@ -65,6 +65,8 @@ pub struct World {
     pub url_options: String,
     /// HP3's `WorldInfo` object (game states, persistent values), kept across levels.
     pub world_info: Option<ObjId>,
+    /// A save was asked for last frame (performed, then the level action cleared, this frame).
+    pub save_requested: bool,
     /// A level switch asked for and due (`Level.NextURL`).
     pub pending_travel: Option<String>,
     actor_slots: HashMap<&'static str, Option<usize>>,
@@ -317,6 +319,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, c
         pending_travel: None,
         url_options: String::new(),
         world_info: None,
+        save_requested: false,
         tick_profile: Default::default(),
         actor_slots: Default::default(),
         config,
@@ -483,6 +486,18 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     if let Some(li) = world(vm).level_info {
         let t = world(vm).time;
         set(vm, li, "TimeSeconds", Value::Float(t));
+        // A save the game asked for (LevelAction = saving) happens in the engine's next frame, which then
+        // clears the action. Saving itself is not implemented yet.
+        const LEVACT_SAVING: u8 = 2;
+        if get(vm, li, "LevelAction").as_byte() == LEVACT_SAVING {
+            if world(vm).save_requested {
+                set(vm, li, "LevelAction", Value::Byte(0));
+                world(vm).save_requested = false;
+                vm.log.push("engine: save requested (not implemented yet)".into());
+            } else {
+                world(vm).save_requested = true;
+            }
+        }
         // A level switch the game asked for happens when its countdown runs out.
         let next = get(vm, li, "NextURL").as_str().to_string();
         if !next.is_empty() {

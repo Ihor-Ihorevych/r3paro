@@ -88,10 +88,21 @@ Milestones are from the plan (M0 to M12).
 - **Level travel**: a level switch the game asks for (`Level.NextURL` once its countdown runs out) loads the
   new map in the same VM (objects outside the level persist), with the URL's options for `InitGame` and
   `Login` and the player pawn's `travel` properties. The desktop app, `hp3-view play` (with `HP3_CLICK`) and
-  `hp3-run` follow it: front end, New Game, slot, and the game travels to HP3_Adv1Express. The train's intro
-  is a cutscene, not run yet.
+  `hp3-run` follow it: front end, New Game, slot, and the game travels to HP3_Adv1Express.
 - Fixed: auto states are flagged 0x2 (0x1 is "editable"); every actor now starts in its class's auto state.
-- M7 onwards: not started.
+- **Cutscenes (M7, started)**: HP3's cutscene system is script (`KWCutScene`, one `KWCutControllerII` per
+  actor thread, commands from `System\Cutscenes\*.int`); the engine side it needed is in place, and the train
+  intro plays through to its end and gives control back in the corridor, with Ron and Hermione following.
+  That took: localized files in subfolders, text import that reads names as one token and numbers from the
+  front (`Howl rate=.8`), `AnimEnd` reaching the pawn's controller, `bMoveToSuccess`, reachability against the
+  level's geometry only, movers (keyframe interpolation, riders, moving collision) and the save request's level
+  action being cleared. Saving itself is not implemented. No sound or dialogue timing yet: lines wait their
+  default time. Known issue: after the intro the game camera sits outside the corridor wall. Making
+  `TraceActors` report static meshes or BSP fixes that but sends the camera's direction search (`UpdateDistance`)
+  into a near-endless loop in enclosed maps (the train, DungeonHUB), so it is left out until that loop's exit
+  condition is understood.
+- Skeletal meshes: a material slot past the mesh's textures takes the last texture (Hermione's hair).
+- M8 onwards: not started.
 
 ## Checking
 

@@ -105,7 +105,9 @@ pub fn build_posed(
                 if indices.is_empty() {
                     continue;
                 }
-                let tex_index = h.materials.get(mi).map(|m| m.1 as usize).unwrap_or(mi);
+                // A texture index past the mesh's textures takes the last one (Hermione's hair has ten material
+                // slots and nine textures; the last is the hair). A heuristic, not checked against HP3.
+                let tex_index = h.materials.get(mi).map(|m| m.1 as usize).unwrap_or(mi).min(h.textures.len().saturating_sub(1));
                 let tex = skin(mi).or_else(|| h.textures.get(tex_index).and_then(|t| texture(loader, pkg, *t)));
                 batches.push(MeshBatch { texture: tex, vertices, indices, points });
             }
