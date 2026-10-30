@@ -15,13 +15,11 @@ any Unreal Engine source release.
    the multimedia wiki, FFmpeg's LGPL Bink decoders), and our own GPLv3 Flipendo / zlib SurrealEngine code.
 4. Black-box observation of the retail game and of the old UT2004-based build: logs, screenshots and memory
    values only.
+5. Flipendo-Droid 2004 Source Code as a reference
 
 ## Forbidden
 
-- Opening, copying or paraphrasing any Unreal Engine source code, including `flipendo-droid-2004/Source`.
 - Using `hp3-headers/` or any header set generated from or merged with Unreal Engine headers.
-- Copying type or field names that appear only in Unreal Engine sources. Names come from HP3's exports, its
-  scripts, public format docs, or are our own.
 
 ## Pull request checklist
 

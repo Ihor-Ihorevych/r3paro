@@ -118,6 +118,20 @@ fn pose(root: &Path, package: &str, mesh: &str, out: &Path, seq: Option<&str>, f
             println!("  bone {bone} {:20} travels x {:.1} y {:.1} z {:.1}", skel.names[bone], hi.x - lo.x, hi.y - lo.y, hi.z - lo.z);
         }
     }
+    // The mesh's vertical extent around its origin in actor space (reference pose).
+    {
+        let to_actor = hp3_anim::mesh_to_actor(m);
+        let zs: Vec<f32> = m.points.iter().map(|p| to_actor.transform_point3(glam::Vec3::new(p.x, p.y, p.z)).z).collect();
+        let (lo, hi) = zs.iter().fold((f32::MAX, f32::MIN), |(a, b), &z| (a.min(z), b.max(z)));
+        println!("mesh {mesh}: reference pose z from {lo:.1} to {hi:.1} (origin at 0)");
+        let h = &m.header;
+        let raw: Vec<f32> = m.points.iter().map(|p| p.z).collect();
+        let (rlo, rhi) = raw.iter().fold((f32::MAX, f32::MIN), |(a, b), &z| (a.min(z), b.max(z)));
+        println!(
+            "  header: mesh_origin ({:.1}, {:.1}, {:.1}) rot_origin {:?} scale ({:.2}, {:.2}, {:.2}); raw point z {rlo:.1}..{rhi:.1}",
+            h.mesh_origin.x, h.mesh_origin.y, h.mesh_origin.z, h.rot_origin, h.mesh_scale.x, h.mesh_scale.y, h.mesh_scale.z
+        );
+    }
     let (points, label) = match &anim {
         Some(set_) => {
             let map = set_.bone_map(&skel);
@@ -307,9 +321,24 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
     eprintln!("{} HUD quads", quads.len());
     let overlay = hp3_render::overlay::Overlay::new(&renderer);
     let images = |k: &hp3_assets::loader::ObjKey| hud_cache.image(&loader, k);
+    let particle_renderer = hp3_render::particles::ParticleRenderer::new(&renderer);
+    let mut particle_cache = hp3_engine::ParticleCache::default();
+    let particle_quads = hp3_engine::particle_quads(&mut vm, &loader, &mut particle_cache, &camera);
+    eprintln!("{} particle quads ({} particles alive)", particle_quads.len(), hp3_world::particles::live(&mut vm));
+    let particle_images = |k: &hp3_assets::loader::ObjKey| loader.image_with_alpha(&loader.set.get(&k.0).ok()?, k.1);
+    let particle_draw = particle_renderer.prepare(&renderer, &particle_quads, &particle_images);
     let rgba = renderer.render_frames_to_rgba(w, h, |color, depth| {
         vec![
-            dynamic.draw(&renderer, &gpu_scene, &refs, &camera, color, depth, w as f32 / h as f32),
+            dynamic.draw_full(
+                &renderer,
+                &gpu_scene,
+                &refs,
+                particle_draw.as_ref().map(|d| (&particle_renderer, d)),
+                &camera,
+                color,
+                depth,
+                w as f32 / h as f32,
+            ),
             overlay.draw(&renderer, &quads, &images, color, w, h),
         ]
     });

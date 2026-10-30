@@ -424,12 +424,42 @@ pub fn actor_instances(
             _ => Vec3::ONE,
         };
         let s3 = if s3 == Vec3::ZERO { Vec3::ONE } else { s3 };
-        let prepivot = vec3(&get(vm, a, "PrePivot"));
+        // Skeletal meshes stand on their feet; static meshes are placed at the actor's location.
+        let prepivot = if draw_type == DT_MESH { hp3_world::mesh_offset(vm, a) } else { vec3(&get(vm, a, "PrePivot")) };
         let transform = Mat4::from_translation(loc + prepivot) * rotation_matrix(rot) * Mat4::from_scale(s3 * scale);
         // Actors are lit as a whole by the lights around them (half: the shader doubles it).
         // Capped, so an actor next to a strong light is bright but not washed out.
         let light = lighting.map(|l| l.actor_light(loc).min(Vec3::splat(1.25)) * 0.5).unwrap_or(Vec3::splat(0.5));
         out.push((gpu, transform, light));
+    }
+    out
+}
+
+/// Remembers which texture each particle material shows.
+#[derive(Default)]
+pub struct ParticleCache {
+    textures: HashMap<ObjId, Option<ObjKey>>,
+}
+
+/// The frame's particles as renderer quads facing `camera`.
+pub fn particle_quads(vm: &mut Vm<'_>, loader: &Loader<'_>, cache: &mut ParticleCache, camera: &hp3_render::scene::Camera) -> Vec<hp3_render::particles::ParticleQuad> {
+    use hp3_render::particles::{ParticleBlend, ParticleQuad};
+    let fwd = camera.forward();
+    let right = Vec3::new(-fwd.y, fwd.x, 0.0).normalize_or_zero();
+    let up = fwd.cross(right).normalize_or_zero();
+    let quads = hp3_world::particles::collect(vm, right, up);
+    let mut out = Vec::with_capacity(quads.len());
+    for q in quads {
+        let texture = match q.material {
+            Some(m) => cache.textures.entry(m).or_insert_with(|| texture_key(vm, loader, m)).clone(),
+            None => None,
+        };
+        let blend = match q.blend {
+            hp3_world::particles::Blend::Alpha => ParticleBlend::Alpha,
+            hp3_world::particles::Blend::Additive => ParticleBlend::Additive,
+            hp3_world::particles::Blend::Modulate => ParticleBlend::Modulate,
+        };
+        out.push(ParticleQuad { texture, blend, corners: q.corners.map(|c| c.to_array()), uv: q.uv, color: q.color });
     }
     out
 }

@@ -103,6 +103,11 @@ pub fn move_actor(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<Hit> {
         return None;
     }
     let loc = vec(&get(vm, a, "Location"));
+    // A ghost (the debug mode) has no collision at all.
+    if is_player_pawn(vm, a) && !get(vm, a, "bCollideWorld").as_bool() && !get(vm, a, "bCollideActors").as_bool() {
+        set(vm, a, "Location", value(loc + delta));
+        return None;
+    }
     let ext = extent(vm, a);
     let player = is_player_pawn(vm, a);
     let hit = world(vm).collision.trace_as(player, loc, loc + delta, ext, Some(a));
@@ -139,7 +144,7 @@ fn floor_below(vm: &mut Vm<'_>, a: ObjId, depth: f32) -> Option<Hit> {
 }
 
 /// Whether `a` is the pawn the local player controls (what `bBlockPlayers` actors block).
-fn is_player_pawn(vm: &mut Vm<'_>, a: ObjId) -> bool {
+pub(crate) fn is_player_pawn(vm: &mut Vm<'_>, a: ObjId) -> bool {
     let Some(pc) = world(vm).player else { return false };
     get(vm, pc, "Pawn").as_obj() == Some(a)
 }
@@ -245,6 +250,8 @@ fn fly(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     let accel = vec(&get(vm, a, "Acceleration"));
     let mut vel = vec(&get(vm, a, "Velocity"));
     let max = get(vm, a, "AirSpeed").as_float().max(1.0);
+    // Braking: speed bleeds off by 5 per second, whether or not something pushes.
+    vel *= (1.0 - 5.0 * dt).max(0.0);
     vel += accel * dt;
     if vel.length() > max {
         vel = vel.normalize() * max;

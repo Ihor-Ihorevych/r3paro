@@ -206,6 +206,22 @@ impl Dynamic {
         depth: &wgpu::TextureView,
         aspect: f32,
     ) -> wgpu::CommandBuffer {
+        self.draw_full(r, scene, meshes, None, camera, color, depth, aspect)
+    }
+
+    /// Like `draw`, with a frame of particles drawn last in the same pass.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_full(
+        &self,
+        r: &Renderer,
+        scene: &GpuScene,
+        meshes: &[(&GpuMesh, Mat4, glam::Vec3)],
+        particles: Option<(&crate::particles::ParticleRenderer, &crate::particles::ParticleDraw)>,
+        camera: &Camera,
+        color: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        aspect: f32,
+    ) -> wgpu::CommandBuffer {
         {
             let mut inst = self.instances.borrow_mut();
             if (meshes.len() as u64) > inst.2 {
@@ -235,6 +251,9 @@ impl Dynamic {
                     pass.set_index_buffer(d.indices.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..d.count, 0, 0..1);
                 }
+            }
+            if let Some((renderer, frame)) = particles {
+                renderer.draw(pass, frame);
             }
         })
     }

@@ -117,6 +117,21 @@ Milestones are from the plan (M0 to M12).
 - **Movies**: this install has no movie files and no Bink video decoder exists yet, so `Movie.Play` logs the
   skipped movie and reports it ended on the next tick; the game carries on (the studio logos of the preamble
   need a HUD that does not exist at that point and are skipped anyway).
+- **Characters stand on the floor** (cutscene "flying" fixed): a skeletal mesh's feet are at its origin, drawn at
+  `Location + PrePivot + SavedPrePivot`; actors with `bAlignBottom` (and `bCollideWorld`) or `bAlignBottomAlways`
+  are lowered by their collision height, plus 5 while they have physics. Harry, Ron and Hermione do not align and
+  use a `PrePivot` of -42 instead. Before this every NPC hovered 43 units up.
+- **Layered animation**: channels above 0 blend over the base pose on the bone named by `AnimBlendParams`, with
+  `AnimBlendToAlpha` fades (the casting pose); `Falling` is sent when a script sets falling physics (jumping);
+  walk and run cycles keep their root bone's horizontal position (no side-to-side sway).
+- **Particles**: `Emitter` actors' sprite emitters are simulated (rates, lifetimes, start location and velocity,
+  acceleration, size and colour over life, fades, spin, texture frames, draw styles) and drawn as depth-tested
+  quads. Rate: `InitialParticlesPerSecond` is the working rate when `AutomaticInitialSpawning` is on. Beams are
+  drawn as stretched quads but their end points and noise are not done; no collision, attractors, revolution,
+  mesh or trail emitters. Not seen yet: the spell cursor and the cast "ray" (script-driven; see below).
+- **Debug keys** in the app: F11 level list, G ghost (no collision), F fly (with collision), H back to walking.
+- Open: the spell cursor emitter stays empty (its rate is set by script during targeting, not yet observed to
+  happen); companions sometimes block the player (Ron standing in InsideHub).
 - M8 onwards: not started.
 
 ## Checking

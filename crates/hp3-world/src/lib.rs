@@ -5,6 +5,7 @@
 
 pub mod anim;
 pub mod audio;
+pub mod debug_move;
 pub mod canvas;
 pub mod collision;
 pub mod config;
@@ -15,6 +16,7 @@ pub mod input;
 pub mod movie;
 pub mod interactions;
 pub mod natives;
+pub mod particles;
 pub mod physics;
 
 use hp3_script::fx::FxHashMap as HashMap;
@@ -72,6 +74,9 @@ pub struct World {
     /// Sounds and music the game asked for, for the platform to play.
     pub audio: audio::Audio,
     pub movies: movie::Movies,
+    pub particles: particles::Particles,
+    /// The pawn's own `AirSpeed`, kept while flying in the debug modes.
+    pub debug_air_speed: Option<f32>,
     /// A level switch asked for and due (`Level.NextURL`).
     pub pending_travel: Option<String>,
     actor_slots: HashMap<&'static str, Option<usize>>,
@@ -329,6 +334,8 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, c
         save_requested: false,
         audio: Default::default(),
         movies: Default::default(),
+        particles: Default::default(),
+        debug_air_speed: None,
         tick_profile: Default::default(),
         actor_slots: Default::default(),
         config,
@@ -496,6 +503,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         let t = world(vm).time;
         set(vm, li, "TimeSeconds", Value::Float(t));
         movie::tick(vm);
+        particles::tick(vm, dt);
         // A save the game asked for (LevelAction = saving) happens in the engine's next frame, which then
         // clears the action. Saving itself is not implemented yet.
         const LEVACT_SAVING: u8 = 2;
@@ -623,6 +631,22 @@ pub(crate) fn native_asset(map: &Package, index: usize, chain: &[String]) -> Opt
     let base = map.exports[index].serial_offset + map.exports[index].serial_size - o.tail.len();
     let mut r = hp3_package::Reader::with_base(o.tail, base);
     hp3_assets::read_native(o.native_class, map, &mut r)?.ok()
+}
+
+/// Where a skeletal mesh's origin (its feet) is drawn relative to the actor's `Location`: `PrePivot` and
+/// `SavedPrePivot`, and for actors that align their bottom (`bAlignBottomAlways`, or `bAlignBottom` with
+/// `bCollideWorld`) a drop by the collision height, five more units while the actor has physics. Characters
+/// that do not align (Harry, Ron, Hermione) get the same drop from their `PrePivot` of -42.
+pub fn mesh_offset(vm: &mut Vm<'_>, a: ObjId) -> glam::Vec3 {
+    let mut offset = vec_of(&get(vm, a, "PrePivot")) + vec_of(&get(vm, a, "SavedPrePivot"));
+    let align = get(vm, a, "bAlignBottomAlways").as_bool() || (get(vm, a, "bAlignBottom").as_bool() && get(vm, a, "bCollideWorld").as_bool());
+    if align {
+        offset.z -= get(vm, a, "CollisionHeight").as_float();
+        if get(vm, a, "Physics").as_byte() != 0 {
+            offset.z -= 5.0;
+        }
+    }
+    offset
 }
 
 fn vec_of(v: &Value) -> glam::Vec3 {

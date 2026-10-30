@@ -18,6 +18,7 @@ use sdl3::keyboard::{Keycode, Scancode};
 use sdl3::mouse::MouseButton;
 
 mod audio;
+mod levelmenu;
 use hp3_script::Value;
 
 /// The ini's name for a key.
@@ -186,6 +187,16 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
     let mut fps_timer = Instant::now();
     let mut free_camera = false;
     let mut in_menu = false;
+    // F11 level list; G ghost, F fly, H walk (debug movement).
+    let mut levels = levelmenu::LevelMenu::new(root);
+    let mut current_map = map.clone();
+    // HP3_OPEN_LEVELS=1 starts with the list open (for screenshots).
+    if std::env::var_os("HP3_OPEN_LEVELS").is_some() {
+        levels.toggle(&current_map);
+    }
+    let mut pending_level: Option<String> = None;
+    let particle_renderer = hp3_render::particles::ParticleRenderer::new(&renderer);
+    let mut particle_cache = hp3_engine::ParticleCache::default();
     'main: loop {
         // Menus take the mouse as a visible cursor; play takes it relative.
         let menu = hp3_world::gui::menu_open(&mut vm);
@@ -196,6 +207,28 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
         for event in events.poll_iter() {
             match event {
                 Event::Quit { .. } => break 'main,
+                Event::KeyDown { scancode: Some(Scancode::F11), repeat: false, .. } => levels.toggle(&current_map),
+                // While the level list is open it takes the keyboard and the mouse.
+                Event::KeyDown { scancode: Some(sc), .. } if levels.open => match sc {
+                    Scancode::Up => levels.step(-1),
+                    Scancode::Down => levels.step(1),
+                    Scancode::PageUp => levels.step(-10),
+                    Scancode::PageDown => levels.step(10),
+                    Scancode::Home => levels.home(),
+                    Scancode::End => levels.end(),
+                    Scancode::Return | Scancode::KpEnter => pending_level = levels.choose(),
+                    Scancode::Escape => levels.open = false,
+                    _ => {}
+                },
+                Event::MouseMotion { .. } | Event::MouseButtonDown { .. } if levels.open => {}
+                Event::KeyDown { scancode: Some(sc @ (Scancode::G | Scancode::F | Scancode::H)), repeat: false, .. } if !in_menu => {
+                    let mode = match sc {
+                        Scancode::G => hp3_world::debug_move::Mode::Ghost,
+                        Scancode::F => hp3_world::debug_move::Mode::Fly,
+                        _ => hp3_world::debug_move::Mode::Walk,
+                    };
+                    eprintln!("movement: {mode:?} ({})", if hp3_world::debug_move::set_mode(&mut vm, mode) { "ok" } else { "no pawn" });
+                }
                 Event::KeyDown { scancode: Some(sc), repeat, .. } if in_menu => {
                     if let Some(k) = menu_key(sc) {
                         hp3_world::gui::key(&mut vm, k, if repeat { 2 } else { 1 }, 0.0);
@@ -294,7 +327,7 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
         }
         stages.push(("ticks", frame_start.elapsed().as_secs_f32() * 1000.0));
         // A level switch the game asked for: the new level is loaded and its scene built.
-        if let Some(url) = hp3_world::take_travel(&mut vm) {
+        if let Some(url) = hp3_world::take_travel(&mut vm).or_else(|| pending_level.take()) {
             let t = Instant::now();
             let pkg = hp3_world::travel(&mut vm, &url)?;
             let statics = hp3_engine::static_exports(&mut vm, &pkg);
@@ -303,6 +336,8 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
             gpu_scene = renderer.upload_scene(&scene);
             lighting = inputs.lighting;
             mesh_cache = hp3_engine::MeshCache::default();
+            particle_cache = hp3_engine::ParticleCache::default();
+            current_map = pkg.name.to_string();
             let _ = window.set_title(&format!("hp3 - {}", pkg.name));
             eprintln!("travelled to {} in {:?}", pkg.name, t.elapsed());
             accumulator = 0.0;
@@ -332,10 +367,23 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
         let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut mesh_cache, lighting.as_ref());
         let refs: Vec<_> = instances.iter().map(|(m, t, l)| (m.as_ref(), *t, *l)).collect();
         stages.push(("instances", frame_start.elapsed().as_secs_f32() * 1000.0));
-        let cmd = dynamic.draw(&renderer, &gpu_scene, &refs, &camera, &view, &depth, width as f32 / height as f32);
+        let particle_quads = hp3_engine::particle_quads(&mut vm, &loader, &mut particle_cache, &camera);
+        let particle_images = |k: &hp3_assets::loader::ObjKey| loader.image_with_alpha(&loader.set.get(&k.0).ok()?, k.1);
+        let particle_draw = particle_renderer.prepare(&renderer, &particle_quads, &particle_images);
+        let cmd = dynamic.draw_full(
+            &renderer,
+            &gpu_scene,
+            &refs,
+            particle_draw.as_ref().map(|d| (&particle_renderer, d)),
+            &camera,
+            &view,
+            &depth,
+            width as f32 / height as f32,
+        );
         stages.push(("draw", frame_start.elapsed().as_secs_f32() * 1000.0));
         let mut quads = hp3_engine::hud_quads(&mut vm, &loader, &mut hud_cache, width, height);
         quads.extend(hp3_engine::screen_flash(&mut vm, width, height));
+        quads.extend(levels.quads(width, height, &current_map));
         let images = |k: &hp3_assets::loader::ObjKey| hud_cache.image(&loader, k);
         let hud = overlay.draw(&renderer, &quads, &images, &view, width, height);
         stages.push(("hud", frame_start.elapsed().as_secs_f32() * 1000.0));
@@ -350,7 +398,7 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
         frames += 1;
         if fps_timer.elapsed().as_secs_f32() >= 1.0 {
             let fps = frames as f32 / fps_timer.elapsed().as_secs_f32();
-            let _ = window.set_title(&format!("hp3 - {map} - {fps:.0} fps"));
+            let _ = window.set_title(&format!("hp3 - {current_map} - {fps:.0} fps"));
             frames = 0;
             fps_timer = Instant::now();
         }

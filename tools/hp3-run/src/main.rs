@@ -227,6 +227,18 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                 hp3_world::world(&mut vm).input.key_up(key);
             }
         }
+        // HP3_DEBUG_MODE=<walk|fly|ghost>@<tick>: the debug movement modes.
+        if let Ok(spec) = std::env::var("HP3_DEBUG_MODE")
+            && let Some((mode, at)) = spec.split_once('@')
+            && at.parse::<u32>().ok() == Some(frame)
+        {
+            let mode = match mode {
+                "fly" => hp3_world::debug_move::Mode::Fly,
+                "ghost" => hp3_world::debug_move::Mode::Ghost,
+                _ => hp3_world::debug_move::Mode::Walk,
+            };
+            println!("debug mode {mode:?}: {}", hp3_world::debug_move::set_mode(&mut vm, mode));
+        }
         // HP3_MOUSE=<dx>,<dy>@<from>-<to>: mouse motion applied every tick over a span.
         if let Ok(spec) = std::env::var("HP3_MOUSE")
             && let Some((delta, span)) = spec.split_once('@')
@@ -301,6 +313,20 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
     }
     let tick_time = t.elapsed();
     list_class(&mut vm);
+    // HP3_FLOAT_CHECK=1: pawns whose feet are well above the floor, with their physics and animation.
+    if std::env::var_os("HP3_FLOAT_CHECK").is_some() {
+        for line in float_check(&mut vm) {
+            println!("{line}");
+        }
+    }
+    println!("particles alive: {}", hp3_world::particles::live(&mut vm));
+    if let Ok(filter) = std::env::var("HP3_PARTICLE_LIST") {
+        for (name, at, n) in hp3_world::particles::summary(&mut vm) {
+            if name.to_ascii_lowercase().contains(&filter.to_ascii_lowercase()) {
+                println!("  emitter {name} at {at} alive {n}");
+            }
+        }
+    }
     // HP3_AUDIO_DEBUG=1: what the game asked to hear.
     if std::env::var_os("HP3_AUDIO_DEBUG").is_some() {
         let events = hp3_world::audio::drain(&mut vm);
@@ -760,4 +786,35 @@ fn classes(root: &Path, show: Option<&str>) -> Result<ExitCode, Box<dyn std::err
         }
     }
     Ok(if s.unknown_tags == 0 && s.mismatched_tags == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+}
+
+/// One line per visible pawn that hovers more than 6 units over the floor below it.
+fn float_check(vm: &mut hp3_script::Vm<'_>) -> Vec<String> {
+    use hp3_world::{get, physics::vec};
+    let Some(pawn_class) = vm.db.find("Pawn") else { return Vec::new() };
+    let actors = hp3_world::world(vm).actors.clone();
+    let mut out = Vec::new();
+    for a in actors {
+        let Some(c) = vm.db.objects.get(a).class else { continue };
+        if vm.db.objects.get(a).deleted || !vm.is_child_of(c, pawn_class) || get(vm, a, "bHidden").as_bool() || get(vm, a, "Mesh").as_obj().is_none() {
+            continue;
+        }
+        let loc = vec(&get(vm, a, "Location"));
+        let (r, h) = (get(vm, a, "CollisionRadius").as_float(), get(vm, a, "CollisionHeight").as_float());
+        let hit = hp3_world::world(vm).collision.trace_static(loc, loc - glam::Vec3::Z * 400.0, glam::Vec3::new(r.min(8.0), r.min(8.0), 1.0));
+        // The mesh's feet are drawn at Location + PrePivot; the floor is `d` below Location.
+        let prepivot = hp3_world::mesh_offset(vm, a).z;
+        let gap = hit.map(|h2| h2.time * 400.0 + prepivot);
+        let name = vm.db.names.get(vm.db.objects.get(a).name).to_string();
+        let anim = get(vm, a, "AnimSequence").as_name();
+        let anim = vm.db.names.get(anim).to_string();
+        if gap.is_none_or(|g| g.abs() > 6.0) {
+            out.push(format!(
+                "floating: {name} at {loc} gap {} physics {} anim {anim} (collision radius {r} height {h})",
+                gap.map_or("no floor".into(), |g| format!("{g:.1}")),
+                get(vm, a, "Physics").as_byte()
+            ));
+        }
+    }
+    out
 }
