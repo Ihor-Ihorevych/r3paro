@@ -251,6 +251,14 @@ fn set_script_view(vm: &mut Vm<'_>, actor: ObjId, seq: Name, frame: f32, rate: f
 pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     let ids: Vec<ObjId> = world(vm).anim.actors.keys().copied().collect();
     for a in ids {
+        tick_actor(vm, a, dt);
+    }
+}
+
+/// Advances one actor's animation channels, sending `AnimEnd` where a sequence ends.
+pub fn tick_actor(vm: &mut Vm<'_>, actor: ObjId, dt: f32) {
+    let ids: Vec<ObjId> = if world(vm).anim.actors.contains_key(&actor) { vec![actor] } else { Vec::new() };
+    for a in ids {
         let Some(anims) = world(vm).anim.actors.get(&a).and_then(|x| x.set.clone()) else { continue };
         let mut ended = Vec::new();
         let mut looped = false;

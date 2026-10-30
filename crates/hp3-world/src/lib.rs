@@ -546,57 +546,31 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
             t = std::time::Instant::now();
         }
     };
-    // The player's controller reads input and moves first, as the local player does.
+    // Each actor goes through the same sequence, in level order (as the original's level tick does it): its
+    // animation advances, its `Tick` event runs, then its state code, its timer, its life span and its physics.
+    // The player's controller first reads the input, runs `PlayerTick` and clears the input again.
     follow_player(vm);
-    if let Some(pc) = world(vm).player {
-        input::apply(vm, pc, dt);
-        fire(vm, pc, "PlayerTick", &mut [Value::Float(dt)]);
-    }
     interactions::tick(vm, dt);
     mark(vm, "player");
-    nav::tick(vm, dt);
-    mark(vm, "nav");
-    physics::step(vm, dt);
-    mark(vm, "physics");
-    physics::update_touching(vm);
-    mark(vm, "touching");
-    anim::update_movement(vm);
-    mark(vm, "movement anims");
-    anim::tick(vm, dt);
-    anim::update_attachments(vm);
-    mark(vm, "animation");
-    // Ticked actors carry the frame's parity in `bTicked`; scripts compare it to see a new frame (HP3's
-    // camera updates its view once per frame this way).
+    physics::begin_frame(vm);
     let parity = world(vm).frame % 2 == 1;
     let ticked = actor_slot(vm, "bTicked");
+    let life_span = actor_slot(vm, "LifeSpan");
+    let player = world(vm).player;
     for &a in &actors {
         if vm.db.objects.get(a).deleted {
             continue;
         }
+        if Some(a) == player {
+            input::apply(vm, a, dt);
+            fire(vm, a, "PlayerTick", &mut [Value::Float(dt)]);
+            input::clear_axes(vm, a);
+        }
+        anim::tick_actor(vm, a, dt);
         if let Some(v) = ticked.and_then(|s| vm.db.objects.values_mut(a).and_then(|v| v.get_mut(s))) {
             *v = Value::Bool(parity);
         }
         fire(vm, a, "Tick", &mut [Value::Float(dt)]);
-    }
-    mark(vm, "Tick events");
-    let mut due = Vec::new();
-    for (&a, t) in world(vm).timers.iter_mut() {
-        t.remaining -= dt;
-        if t.remaining <= 0.0 {
-            due.push(a);
-            if t.looping {
-                t.remaining += t.rate.max(0.0001);
-            }
-        }
-    }
-    world(vm).timers.retain(|_, t| t.remaining > 0.0 || t.looping);
-    for a in due {
-        if !vm.db.objects.get(a).deleted {
-            fire(vm, a, "Timer", &mut []);
-        }
-    }
-    mark(vm, "timers");
-    for &a in &actors {
         if vm.db.objects.get(a).deleted {
             continue;
         }
@@ -607,6 +581,52 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
                 w.errors.push(at);
             }
         }
+        tick_timer(vm, a, dt);
+        if let Some(s) = life_span
+            && let Some(v) = vm.db.objects.values_mut(a).and_then(|v| v.get_mut(s))
+            && let Value::Float(life) = v
+            && *life > 0.0
+        {
+            *life -= dt;
+            if *life <= 0.0 {
+                fire(vm, a, "LifeSpanExpired", &mut []);
+                // `LifeSpanExpired` normally destroys the actor; one that does not is destroyed anyway.
+                destroy_actor(vm, a);
+                continue;
+            }
+        }
+        nav::tick_controller(vm, a, dt);
+        physics::step_actor(vm, a, dt);
+    }
+    mark(vm, "actors");
+    physics::update_touching(vm);
+    mark(vm, "touching");
+    anim::update_movement(vm);
+    mark(vm, "movement anims");
+    anim::update_attachments(vm);
+    mark(vm, "animation");
+}
+
+/// Counts an actor's timer down; fires `Timer` when it runs out, and again each period if it loops.
+fn tick_timer(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
+    let due = match world(vm).timers.get_mut(&a) {
+        Some(t) => {
+            t.remaining -= dt;
+            if t.remaining <= 0.0 {
+                if t.looping {
+                    t.remaining += t.rate.max(0.0001);
+                } else {
+                    world(vm).timers.remove(&a);
+                }
+                true
+            } else {
+                false
+            }
+        }
+        None => false,
+    };
+    if due && !vm.db.objects.get(a).deleted {
+        fire(vm, a, "Timer", &mut []);
     }
 }
 

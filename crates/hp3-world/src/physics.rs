@@ -458,6 +458,36 @@ fn moving_brush(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     }
 }
 
+/// Prepares a frame's physics: the blocking actors' boxes.
+pub fn begin_frame(vm: &mut Vm<'_>) {
+    refresh_actor_boxes(vm);
+}
+
+/// Runs one actor's physics for `dt` seconds (nothing for static actors and those without physics).
+pub fn step_actor(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
+    if vm.db.objects.get(a).deleted {
+        return;
+    }
+    let s = Slots::get(vm);
+    if crate::read(vm, a, s.physics).as_byte() == PHYS_NONE || crate::read(vm, a, s.is_static).as_bool() {
+        return;
+    }
+    match crate::read(vm, a, s.physics).as_byte() {
+        PHYS_MOVING_BRUSH => {
+            moving_brush(vm, a, dt);
+            return;
+        }
+        PHYS_WALKING => walk(vm, a, dt),
+        PHYS_FALLING => fall(vm, a, dt),
+        PHYS_FLYING | PHYS_SWIMMING => fly(vm, a, dt),
+        PHYS_ROTATING => rotate(vm, a, dt),
+        PHYS_PROJECTILE => projectile(vm, a, dt),
+        _ => return,
+    }
+    turn_to_desired(vm, a, dt);
+}
+
+/// Every actor's physics in level order (the old whole-level step, used by tools).
 pub fn step(vm: &mut Vm<'_>, dt: f32) {
     refresh_actor_boxes(vm);
     let s = Slots::get(vm);

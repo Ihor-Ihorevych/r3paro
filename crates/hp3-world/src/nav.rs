@@ -237,15 +237,24 @@ fn start_move(vm: &mut Vm<'_>, controller: ObjId, target: Option<ObjId>, destina
 
 /// Steers pawns of controllers with a move in progress; ends moves that arrived or ran out of time.
 pub fn tick(vm: &mut Vm<'_>, dt: f32) {
+    let mut controllers: Vec<ObjId> = world(vm).nav.moves.keys().copied().collect();
+    controllers.extend(vm.latent.iter().filter(|(_, l)| matches!(l, Latent::Other("landing"))).map(|(o, _)| *o));
+    for c in controllers {
+        tick_controller(vm, c, dt);
+    }
+}
+
+/// Steers one controller's pawn along its move in progress, and ends its landing wait.
+pub fn tick_controller(vm: &mut Vm<'_>, only: ObjId, dt: f32) {
     // WaitForLanding ends when the pawn is no longer falling.
-    let waiting: Vec<ObjId> = vm.latent.iter().filter(|(_, l)| matches!(l, Latent::Other("landing"))).map(|(o, _)| *o).collect();
+    let waiting: Vec<ObjId> = vm.latent.iter().filter(|(o, l)| **o == only && matches!(l, Latent::Other("landing"))).map(|(o, _)| *o).collect();
     for c in waiting {
         let falling = get(vm, c, "Pawn").as_obj().is_some_and(|p| get(vm, p, "Physics").as_byte() == crate::physics::PHYS_FALLING);
         if !falling {
             vm.finish_latent(c);
         }
     }
-    let moves: Vec<(ObjId, Move)> = world(vm).nav.moves.iter().map(|(k, v)| (*k, *v)).collect();
+    let moves: Vec<(ObjId, Move)> = world(vm).nav.moves.iter().filter(|(k, _)| **k == only).map(|(k, v)| (*k, *v)).collect();
     for (c, mut m) in moves {
         let pawn = get(vm, c, "Pawn").as_obj().filter(|&p| !vm.db.objects.get(p).deleted);
         let dest = match m.target {
