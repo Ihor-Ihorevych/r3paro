@@ -231,6 +231,22 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
     }
     let tick_time = t.elapsed();
     list_class(&mut vm);
+    // HP3_AUDIO_DEBUG=1: what the game asked to hear.
+    if std::env::var_os("HP3_AUDIO_DEBUG").is_some() {
+        let events = hp3_world::audio::drain(&mut vm);
+        println!("audio: {} events", events.len());
+        for e in events.iter().take(40) {
+            match e {
+                hp3_world::audio::Event::Play { sound, volume, pitch, radius, slot, .. } => {
+                    let secs = hp3_world::audio::sound_file(&mut vm, sound)
+                        .and_then(|(ty, d)| if ty == "bik" { hp3_audio::bink::duration(&d) } else { hp3_audio::wav::duration(&d) });
+                    let name = vm.db.set.get(&sound.0).ok().map(|p| p.ref_path(hp3_package::ObjRef::from_export(sound.1))).unwrap_or_default();
+                    println!("  play {name} vol {volume} pitch {pitch} radius {radius} slot {slot} ({secs:?} s)");
+                }
+                other => println!("  {other:?}"),
+            }
+        }
+    }
     let w = hp3_world::world(&mut vm);
     let (actors, spawned, errors) = (w.actors.len(), w.spawned, std::mem::take(&mut w.errors));
     println!(

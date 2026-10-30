@@ -4,6 +4,7 @@
 //! The world lives in `Vm::ext`; natives reach it with `world(vm)`.
 
 pub mod anim;
+pub mod audio;
 pub mod canvas;
 pub mod collision;
 pub mod config;
@@ -67,6 +68,8 @@ pub struct World {
     pub world_info: Option<ObjId>,
     /// A save was asked for last frame (performed, then the level action cleared, this frame).
     pub save_requested: bool,
+    /// Sounds and music the game asked for, for the platform to play.
+    pub audio: audio::Audio,
     /// A level switch asked for and due (`Level.NextURL`).
     pub pending_travel: Option<String>,
     actor_slots: HashMap<&'static str, Option<usize>>,
@@ -244,6 +247,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, c
     let game_class = game_class.as_deref();
     let actor_class = vm.db.find("Actor").ok_or_else(|| VmError::Runtime("no Actor class".into()))?;
     natives::register(vm);
+    audio::register(vm);
     anim::register(vm);
     nav::register(vm);
     canvas::register(vm);
@@ -320,6 +324,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, c
         url_options: String::new(),
         world_info: None,
         save_requested: false,
+        audio: Default::default(),
         tick_profile: Default::default(),
         actor_slots: Default::default(),
         config,

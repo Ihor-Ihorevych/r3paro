@@ -27,6 +27,7 @@ fn main() -> ExitCode {
             textures(Path::new(&args[1]), &args[2], Path::new(&args[3]), args.get(4).map(String::as_str))
         }
         Some("natives") if args.len() == 2 => natives(Path::new(&args[1])),
+        Some("sounds") if args.len() >= 3 => sounds(Path::new(&args[1]), &args[2], args.get(3).map(Path::new)),
         Some("lightmaps") if args.len() == 3 => lightmaps(Path::new(&args[1]), &args[2]),
         Some("disasm") if args.len() == 4 => disasm(Path::new(&args[1]), &args[2], &args[3]),
         Some("hex") if args.len() == 6 => hex(Path::new(&args[1]), &args[2], &args[3], &args[4], &args[5]),
@@ -196,6 +197,74 @@ fn tails(root: &Path, class: &str, max: usize) -> R {
 
 /// Writes the first mip of every texture in a package (optionally only names containing `filter`) as PNG.
 /// Summary of the lighting data in a map's BSP models.
+/// Summarises a package's sounds by file type and (with an output folder) writes each sound's file out.
+fn sounds(root: &Path, package: &str, out: Option<&Path>) -> R {
+    use hp3_assets::Asset;
+    use std::collections::BTreeMap;
+    let set = PackageSet::open(root)?;
+    let pkg = set.get(package)?;
+    let mut by_type: BTreeMap<String, (usize, usize, Vec<u8>)> = BTreeMap::new();
+    let mut decoded: Vec<(f64, f64, f64, bool, f64)> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    for i in 0..pkg.exports.len() {
+        if !pkg.export_class_name(i).eq_ignore_ascii_case("Sound") {
+            continue;
+        }
+        let chain = set.export_chain(&pkg, i);
+        let o = object::read_export(&pkg, i, &chain)?;
+        let base = pkg.exports[i].serial_offset + pkg.exports[i].serial_size - o.tail.len();
+        let mut r = hp3_package::Reader::with_base(o.tail, base);
+        let Some(Ok(Asset::Sound(snd))) = hp3_assets::read_native("Sound", &pkg, &mut r) else { continue };
+        let data = &pkg.data[snd.data_offset..snd.data_offset + snd.data_len];
+        let e = by_type.entry(snd.file_type.clone()).or_insert((0, 0, data[..data.len().min(48)].to_vec()));
+        e.0 += 1;
+        e.1 += snd.data_len;
+        let name = pkg.ref_path(ObjRef::from_export(i)).replace(['.', '/', '\\'], "_");
+        // HP3_SOUND_FILTER=<text>: only sounds whose name contains it are decoded.
+        if std::env::var("HP3_SOUND_FILTER").is_ok_and(|f| !name.to_ascii_lowercase().contains(&f.to_ascii_lowercase())) {
+            continue;
+        }
+        if snd.file_type == "bik" {
+            match hp3_audio::bink::decode_with_stats(data) {
+                Ok((pcm, st)) => {
+                    let peak = pcm.samples.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+                    let rms = (pcm.samples.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / pcm.samples.len().max(1) as f64).sqrt();
+                    decoded.push((st.overlap_mismatch as f64, peak as f64, rms, st.dct, st.roughness as f64));
+                    if let Some(dir) = out {
+                        std::fs::create_dir_all(dir)?;
+                        std::fs::write(dir.join(format!("{name}.wav")), hp3_audio::wav::to_wav(&pcm))?;
+                    }
+                }
+                Err(e) => failures.push(format!("{name}: {e}")),
+            }
+        } else if let Some(dir) = out {
+            std::fs::create_dir_all(dir)?;
+            std::fs::write(dir.join(format!("{name}.{}", snd.file_type)), data)?;
+        }
+    }
+    if !decoded.is_empty() {
+        let n = decoded.len() as f64;
+        let mean = |f: &dyn Fn(&(f64, f64, f64, bool, f64)) -> f64| decoded.iter().map(f).sum::<f64>() / n;
+        println!(
+            "decoded {} bink sounds ({} DCT): mean overlap mismatch {:.3}, roughness {:.3}, mean peak {:.0}, mean rms {:.0}, {} failed",
+            decoded.len(),
+            decoded.iter().filter(|d| d.3).count(),
+            mean(&|d| d.0),
+            mean(&|d| d.4),
+            mean(&|d| d.1),
+            mean(&|d| d.2),
+            failures.len()
+        );
+        for f in failures.iter().take(5) {
+            println!("  failed: {f}");
+        }
+    }
+    for (ty, (n, bytes, head)) in &by_type {
+        println!("{ty}: {n} sounds, {bytes} bytes; first starts {:02x?} {:?}", &head[..head.len().min(16)], String::from_utf8_lossy(&head[..head.len().min(16)]));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 fn lightmaps(root: &Path, map: &str) -> R {
     use hp3_assets::Asset;
     let set = PackageSet::open(root)?;

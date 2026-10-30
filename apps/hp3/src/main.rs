@@ -16,6 +16,8 @@ use hp3_script::{ClassDb, Vm};
 use sdl3::event::{Event, WindowEvent};
 use sdl3::keyboard::{Keycode, Scancode};
 use sdl3::mouse::MouseButton;
+
+mod audio;
 use hp3_script::Value;
 
 /// The ini's name for a key.
@@ -130,6 +132,11 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
 
     let sdl = sdl3::init()?;
     let video = sdl.video()?;
+    // No audio device is not fatal: the game runs silent.
+    let mut audio = if std::env::var_os("HP3_NO_AUDIO").is_none() { audio::AudioSystem::new(&sdl, &root) } else { None };
+    if audio.is_none() {
+        eprintln!("audio: off");
+    }
     let mut window = video.window(&format!("hp3 - {map}"), 1280, 720).resizable().position_centered().build()?;
 
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
@@ -300,10 +307,16 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
             eprintln!("travelled to {} in {:?}", pkg.name, t.elapsed());
             accumulator = 0.0;
             last = Instant::now();
+            if let Some(a) = &mut audio {
+                a.stop_all();
+            }
         }
 
         if !free_camera && let Some(c) = game_camera(&mut vm) {
             camera = c;
+        }
+        if let Some(a) = &mut audio {
+            a.update(&mut vm, camera.position, camera.rotation[1]);
         }
         stages.push(("camera", frame_start.elapsed().as_secs_f32() * 1000.0));
         let frame = match surface.get_current_texture() {

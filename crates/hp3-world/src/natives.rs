@@ -278,9 +278,6 @@ pub fn register(vm: &mut Vm<'_>) {
         Ok(Value::Empty)
     });
     // Sound and music: silent until the audio crate exists.
-    vm.register("Actor.PlaySound", |_vm, _this, _a| Ok(Value::Empty));
-    vm.register("Actor.PlayOwnedSound", |_vm, _this, _a| Ok(Value::Empty));
-    vm.register("Actor.PlayMusic", |_vm, _this, _a| Ok(Value::Int(0)));
     // Animation natives live in anim.rs.
     vm.register("Actor.FinishInterpolation", |vm, this, _a| {
         if let Some(o) = this {

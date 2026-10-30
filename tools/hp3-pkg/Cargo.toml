@@ -9,4 +9,5 @@ publish.workspace = true
 [dependencies]
 hp3-package.workspace = true
 hp3-assets.workspace = true
+hp3-audio = { path = "../../crates/hp3-audio" }
 png = "0.17"

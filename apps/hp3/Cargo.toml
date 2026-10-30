@@ -18,3 +18,4 @@ sdl3 = { version = "0.20", features = ["build-from-source-static", "raw-window-h
 wgpu = "26"
 glam = "0.30"
 pollster = "0.4"
+hp3-audio = { path = "../../crates/hp3-audio" }

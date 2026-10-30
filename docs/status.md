@@ -102,6 +102,18 @@ Milestones are from the plan (M0 to M12).
   follow properly yet (Ron stands still while Harry runs, and `Run_Back` is looped for a pawn that is not
   moving), so their running animations look wrong.
 - Skeletal meshes: a material slot past the mesh's textures takes the last texture (Hermione's hair).
+- **Audio (M9, started)**: nearly all sounds are Bink audio (1126 effects, 2596 dialogue lines), a few are WAV,
+  music is Ogg Vorbis. `hp3-audio` has a pure-Rust Bink audio decoder (the DCT variant every sound uses; the
+  inverse-DFT variant is written but unused by this install; `hp3-pkg sounds <folder> <package> [out]` decodes a
+  package and writes WAVs), a mixer (pitch, volume, 3D falloff at 25 units per radius unit, panning, slot
+  overriding, music with fades) and Ogg music. The game's `PlaySound`/`PlayOwnedSound`/`StopSound`/`PlayMusic`/
+  `StopMusic`/`FindCurrentMusic` natives queue events the app plays through an SDL3 stream; `GetSoundDuration`
+  comes from the sound headers, so cutscene lines now last as long as their dialogue (the train intro ends at
+  about 100 s). Checked by numbers only (the decoded audio has a speech-like spectrum, the overlap of blocks
+  agrees much better with the DCT-III than with a DCT-IV, levels are sane); nobody has listened yet. The output
+  gain is 1/frame length (calibrated, not derived). Not yet: ambient sounds (`AmbientSound`), reverb/occlusion,
+  volume settings, lip-sync from the sound envelopes, music on a thread (a long track delays its start by a
+  fraction of a second), Android output.
 - M8 onwards: not started.
 
 ## Checking
