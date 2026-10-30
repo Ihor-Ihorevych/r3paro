@@ -159,6 +159,8 @@ pub struct Scene {
     /// Lightmap pages, `LIGHTMAP_PAGE` square, RGBA.
     pub lightmaps: Vec<Image>,
     pub player_starts: Vec<(GVec3, [i32; 3])>,
+    /// Where the sky zone's view is taken from (its `SkyZoneInfo`), when the map has one.
+    pub sky: Option<GVec3>,
     pub stats: SceneStats,
 }
 
@@ -536,6 +538,9 @@ fn add_actors(b: &mut Batcher<'_, '_>, map: &Rc<Package>, include: &dyn Fn(usize
             if chain.iter().any(|c| c.eq_ignore_ascii_case("PlayerStart")) {
                 return Some((None, location, rotation, 1.0, GVec3::ONE, Vec::new(), true));
             }
+            if chain.first().is_some_and(|c| c.eq_ignore_ascii_case("SkyZoneInfo")) {
+                return Some((None, location, rotation, -1.0, GVec3::ONE, Vec::new(), false));
+            }
             let mesh = f("StaticMesh").and_then(|t| t.as_obj())?;
             if f("bHidden").is_some_and(|t| t.bool_value) {
                 return None;
@@ -555,6 +560,10 @@ fn add_actors(b: &mut Batcher<'_, '_>, map: &Rc<Package>, include: &dyn Fn(usize
         });
         let Some(Some((mesh, location, rotation, scale, scale3d, skins, is_start))) = info else { continue };
         let pos = GVec3::new(location.x, location.y, location.z);
+        if mesh.is_none() && scale < 0.0 {
+            b.scene.sky = Some(pos);
+            continue;
+        }
         if is_start {
             b.scene.player_starts.push((pos, rotation));
             continue;

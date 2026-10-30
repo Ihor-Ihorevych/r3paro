@@ -360,7 +360,19 @@ impl Renderer {
             });
             draws.push(Draw { bind, vertices, indices, count: batch.indices.len() as u32, blend: batch.blend.is_some() });
         }
-        GpuScene { globals, globals_bg, draws }
+        // A second camera for the sky zone's view.
+        let sky_globals = d.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sky globals"),
+            size: 64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let sky_globals_bg = d.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.globals_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: sky_globals.as_entire_binding() }],
+        });
+        GpuScene { globals, globals_bg, draws, sky: scene.sky, sky_globals, sky_globals_bg }
     }
 
     /// Draws `scene` from `camera` into `color` (with `depth` of the same size).
@@ -381,6 +393,30 @@ impl Renderer {
         let view_proj = camera.view_proj(aspect);
         self.queue.write_buffer(&scene.globals, 0, bytemuck::cast_slice(&view_proj.to_cols_array()));
         let mut enc = self.device.create_command_encoder(&Default::default());
+        let clear = wgpu::LoadOp::Clear(wgpu::Color { r: 0.05, g: 0.05, b: 0.1, a: 1.0 });
+        // The sky first: the level seen from the sky zone with the camera's rotation, behind everything.
+        if let Some(sky) = scene.sky {
+            let sky_camera = Camera { position: sky, ..*camera };
+            self.queue.write_buffer(&scene.sky_globals, 0, bytemuck::cast_slice(&sky_camera.view_proj(aspect).to_cols_array()));
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("sky"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations { load: clear, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_bind_group(0, &scene.sky_globals_bg, &[]);
+            self.draw_batches(&mut pass, scene);
+        }
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene"),
@@ -389,7 +425,7 @@ impl Renderer {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.05, g: 0.05, b: 0.1, a: 1.0 }),
+                        load: if scene.sky.is_some() { wgpu::LoadOp::Load } else { clear },
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -402,19 +438,23 @@ impl Renderer {
                 occlusion_query_set: None,
             });
             pass.set_bind_group(0, &scene.globals_bg, &[]);
-            // Opaque batches first, then blended ones in order.
-            for blended in [false, true] {
-                pass.set_pipeline(if blended { &self.blend_pipeline } else { &self.pipeline });
-                for d in scene.draws.iter().filter(|d| d.blend == blended) {
-                    pass.set_bind_group(1, &d.bind, &[]);
-                    pass.set_vertex_buffer(0, d.vertices.slice(..));
-                    pass.set_index_buffer(d.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..d.count, 0, 0..1);
-                }
-            }
+            self.draw_batches(&mut pass, scene);
             extra(&mut pass);
         }
         enc.finish()
+    }
+
+    /// The scene's batches: opaque first, then blended ones in order (camera bind group already set).
+    fn draw_batches(&self, pass: &mut wgpu::RenderPass<'_>, scene: &GpuScene) {
+        for blended in [false, true] {
+            pass.set_pipeline(if blended { &self.blend_pipeline } else { &self.pipeline });
+            for d in scene.draws.iter().filter(|d| d.blend == blended) {
+                pass.set_bind_group(1, &d.bind, &[]);
+                pass.set_vertex_buffer(0, d.vertices.slice(..));
+                pass.set_index_buffer(d.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..d.count, 0, 0..1);
+            }
+        }
     }
 
     /// Renders `scene` offscreen from `camera` and returns `width * height` RGBA pixels.
@@ -507,4 +547,7 @@ pub struct GpuScene {
     globals: wgpu::Buffer,
     globals_bg: wgpu::BindGroup,
     draws: Vec<Draw>,
+    sky: Option<glam::Vec3>,
+    sky_globals: wgpu::Buffer,
+    sky_globals_bg: wgpu::BindGroup,
 }

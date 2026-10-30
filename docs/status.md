@@ -41,7 +41,9 @@ Milestones are from the plan (M0 to M12).
   and live actors as a whole by the lights around them. The light model is an approximation, not yet matched
   to HP3's renderer; `HP3_UNLIT=1` turns lighting off. Terrain: every layer of each terrain, textured by its
   stored `TerrainMatrix` and blended over the ones below by its alpha map, lit per vertex, with holes from
-  `QuadVisibilityBitmap`. Not yet: skyboxes, emitters, translucency, fog, dynamic lights, deco layers, HUD.
+  `QuadVisibilityBitmap`. Sky: the level is first drawn from the `SkyZoneInfo` with the camera's rotation
+  (the whole level for now, to be culled to the sky zone), then the scene over it. Not yet: emitters,
+  translucency, fog, dynamic lights, deco layers, HUD.
 - **M6 Movement, started**: swept-box collision against the level BSP, static mesh and terrain triangles and
   blocking actors; walking (friction, step-up of 24, sliding, floor snapping), falling and landing, flying,
   projectiles; touch events from collision cylinders; `Trace`, `FastTrace`, `TraceActors`. Holding W walks
