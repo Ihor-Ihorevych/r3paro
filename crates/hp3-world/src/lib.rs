@@ -77,6 +77,10 @@ pub struct World {
     pub particles: particles::Particles,
     /// The pawn's own `AirSpeed`, kept while flying in the debug modes.
     pub debug_air_speed: Option<f32>,
+    /// Property slots the per-tick physics loop reads, found once per frame.
+    pub phys_slots: Option<physics::Slots>,
+    /// Which classes are controllers (remembered, the per-actor loop asks every tick).
+    pub controller_classes: HashMap<hp3_script::StructId, bool>,
     /// A level switch asked for and due (`Level.NextURL`).
     pub pending_travel: Option<String>,
     actor_slots: HashMap<&'static str, Option<usize>>,
@@ -337,6 +341,8 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, c
         movies: Default::default(),
         particles: Default::default(),
         debug_air_speed: None,
+        phys_slots: None,
+        controller_classes: Default::default(),
         tick_profile: Default::default(),
         actor_slots: Default::default(),
         config,
@@ -575,6 +581,8 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     let ticked = actor_slot(vm, "bTicked");
     let life_span = actor_slot(vm, "LifeSpan");
     let player = world(vm).player;
+    let controller_class = vm.db.find("Controller");
+    let mut clock = std::time::Instant::now();
     for &a in &actors {
         if vm.db.objects.get(a).deleted {
             continue;
@@ -584,11 +592,14 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
             fire(vm, a, "PlayerTick", &mut [Value::Float(dt)]);
             input::clear_axes(vm, a);
         }
+        lap(vm, "actors: input", &mut clock, profile);
         anim::tick_actor(vm, a, dt);
+        lap(vm, "actors: anim", &mut clock, profile);
         if let Some(v) = ticked.and_then(|s| vm.db.objects.values_mut(a).and_then(|v| v.get_mut(s))) {
             *v = Value::Bool(parity);
         }
         fire(vm, a, "Tick", &mut [Value::Float(dt)]);
+        lap(vm, "actors: Tick event", &mut clock, profile);
         if vm.db.objects.get(a).deleted {
             continue;
         }
@@ -599,7 +610,9 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
                 w.errors.push(at);
             }
         }
+        lap(vm, "actors: state code", &mut clock, profile);
         tick_timer(vm, a, dt);
+        lap(vm, "actors: timer", &mut clock, profile);
         if let Some(s) = life_span
             && let Some(v) = vm.db.objects.values_mut(a).and_then(|v| v.get_mut(s))
             && let Value::Float(life) = v
@@ -613,9 +626,13 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
                 continue;
             }
         }
-        nav::tick_controller(vm, a, dt);
-        nav::face_focus(vm, a);
+        if is_controller(vm, controller_class, a) {
+            nav::tick_controller(vm, a, dt);
+            nav::face_focus(vm, a);
+        }
+        lap(vm, "actors: controller", &mut clock, profile);
         physics::step_actor(vm, a, dt);
+        lap(vm, "actors: physics", &mut clock, profile);
     }
     mark(vm, "actors");
     physics::update_touching(vm);
@@ -624,6 +641,25 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     mark(vm, "movement anims");
     anim::update_attachments(vm);
     mark(vm, "animation");
+}
+
+/// Whether an actor is a controller; answers are remembered per class.
+fn is_controller(vm: &mut Vm<'_>, controller_class: Option<hp3_script::StructId>, a: ObjId) -> bool {
+    let (Some(cc), Some(class)) = (controller_class, vm.db.objects.get(a).class) else { return false };
+    if let Some(&known) = world(vm).controller_classes.get(&class) {
+        return known;
+    }
+    let answer = vm.is_child_of(class, cc);
+    world(vm).controller_classes.insert(class, answer);
+    answer
+}
+
+/// Adds the time since the last lap to a tick-profile entry (when profiling).
+fn lap(vm: &mut Vm<'_>, phase: &'static str, clock: &mut std::time::Instant, profile: bool) {
+    if profile {
+        *world(vm).tick_profile.entry(phase).or_default() += clock.elapsed();
+        *clock = std::time::Instant::now();
+    }
 }
 
 /// Counts an actor's timer down; fires `Timer` when it runs out, and again each period if it loops.

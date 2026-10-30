@@ -69,7 +69,7 @@ fn refresh_actor_boxes(vm: &mut Vm<'_>) {
 
 /// Slots of the Actor properties the per-tick loops read.
 #[derive(Clone, Copy)]
-struct Slots {
+pub struct Slots {
     collide: Option<usize>,
     block: Option<usize>,
     block_players: Option<usize>,
@@ -160,65 +160,190 @@ fn gravity(vm: &mut Vm<'_>, a: ObjId) -> f32 {
     }
 }
 
+/// Ground friction of the volume a pawn stands in (8 where nothing says otherwise).
+fn ground_friction(vm: &mut Vm<'_>, a: ObjId) -> f32 {
+    match get(vm, a, "PhysicsVolume").as_obj() {
+        Some(v) => match get(vm, v, "GroundFriction").as_float() {
+            f if f > 0.0 => f,
+            _ => 8.0,
+        },
+        None => 8.0,
+    }
+}
+
+/// The velocity of a walking pawn after `dt` seconds of its acceleration.
+///
+/// With nothing pushing it brakes (twice the friction, and it stops dead when slow) instead of drifting to a
+/// stop. With acceleration, the part of its velocity not along the push bleeds off, the push is added (capped by
+/// `AccelRate`, less when the pawn walks or crouches), and the result is limited to its top speed (scaled by
+/// `DesiredSpeed` for computer-controlled pawns and by `WalkingPct` or `CrouchedPct`).
+fn ground_velocity(vm: &mut Vm<'_>, a: ObjId, accel: Vec3, mut vel: Vec3, dt: f32, human: bool) -> (Vec3, Vec3) {
+    let friction = ground_friction(vm, a);
+    let slow = get(vm, a, "bIsWalking").as_bool() || get(vm, a, "bIsCrouched").as_bool();
+    let crouched = get(vm, a, "bIsCrouched").as_bool();
+    let share = if crouched { get(vm, a, "CrouchedPct").as_float() } else { get(vm, a, "WalkingPct").as_float() };
+    let share = if share > 0.0 { share } else { 1.0 };
+    let accel_rate = get(vm, a, "AccelRate").as_float().max(1.0);
+    let mut accel = accel;
+    if accel.length_squared() <= 1e-6 {
+        // Braking, in steps of at most 0.03 s so it does not depend much on the frame rate.
+        let before = vel;
+        let mut left = dt;
+        let mut kept = Vec3::ZERO;
+        while left > 0.0 {
+            let step = left.min(0.03);
+            vel -= 2.0 * vel * step * friction;
+            if vel.dot(before) > 0.0 {
+                kept += vel * (step / dt);
+            }
+            left -= step;
+        }
+        vel = if kept.dot(before) < 0.0 || kept.length_squared() < 100.0 { Vec3::ZERO } else { kept };
+    } else {
+        let dir = accel.normalize();
+        let limit = if slow { accel_rate * share } else { accel_rate };
+        if accel.length() > limit {
+            accel = dir * limit;
+        }
+        let speed = vel.length();
+        vel -= (vel - dir * speed) * (dt * friction).min(1.0);
+        vel += accel * dt;
+    }
+    let mut top = get(vm, a, "GroundSpeed").as_float().max(1.0);
+    if !human {
+        let desired = get(vm, a, "DesiredSpeed").as_float();
+        top *= if desired > 0.0 { desired } else { 1.0 };
+    }
+    if slow {
+        top *= share;
+    }
+    if vel.length() > top {
+        vel = vel.normalize() * top;
+    }
+    (vel, accel)
+}
+
+/// A walking pawn for one tick.
+///
+/// A pawn without a controller stands still. Otherwise its velocity is worked out (`ground_velocity`) and the
+/// move is made in sub-steps of at most 0.05 s. Each step goes forward; a barrier is climbed if it is low enough
+/// (else the pawn slides along it); the pawn is put back on the floor and takes what it stands on as its
+/// `Base`. With no floor under it, a pawn that must not walk off ledges has the step undone, and any other one
+/// starts to fall. At the end the velocity is what the pawn actually moved.
 fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
-    let accel = vec(&get(vm, a, "Acceleration"));
+    let Some(controller) = get(vm, a, "Controller").as_obj() else {
+        set(vm, a, "Acceleration", value(Vec3::ZERO));
+        set(vm, a, "Velocity", value(Vec3::ZERO));
+        return;
+    };
+    let human = world(vm).player == Some(controller);
+    let mut accel = vec(&get(vm, a, "Acceleration"));
+    accel.z = 0.0;
     let mut vel = vec(&get(vm, a, "Velocity"));
-    // A walker at rest stays put without probing its floor (a floor that moves away is not noticed until
-    // the walker moves again).
-    if accel.length_squared() <= 1e-4 && vel.length_squared() <= 1e-4 {
+    vel.z = 0.0;
+    // A pawn at rest only looks at its floor now and then (staggered between pawns, every 32nd tick); moving
+    // ones always do.
+    let resting = accel.length_squared() <= 1e-6 && vel.length_squared() <= 1e-4;
+    if resting && (world(vm).frame + a.0 as u64) % 32 != 0 {
         return;
     }
-    vel.z = 0.0;
-    let max_speed = get(vm, a, "GroundSpeed").as_float().max(1.0);
-    let friction = 8.0;
-    if accel.length_squared() > 1e-4 {
-        let dir = accel.normalize();
-        vel -= (vel - dir * vel.length()) * (friction * dt).min(1.0);
-        vel += accel * dt;
-        if vel.length() > max_speed {
-            vel = vel.normalize() * max_speed;
-        }
+    let new_vel = if resting {
+        Vec3::ZERO
     } else {
-        let speed = vel.length();
-        let drop = (speed * friction * dt).min(speed);
-        vel = if speed > 0.0 { vel * ((speed - drop) / speed) } else { Vec3::ZERO };
-    }
-    set(vm, a, "Velocity", value(vel));
-    let delta = vel * dt;
-    if let Some(hit) = move_actor(vm, a, delta)
-        && hit.normal.z < WALKABLE_Z
-    {
-        // A wall: try stepping up over it, else slide along it.
-        if std::env::var_os("HP3_WALK_DEBUG").is_some() {
-            let name = hit.actor.map(|h| vm.db.names.get(vm.db.objects.get(h).name).to_string());
-            eprintln!("walk: hit {name:?} at {} normal {} time {}", hit.location, hit.normal, hit.time);
-        }
-        let remaining = delta * (1.0 - hit.time);
+        let (v, capped) = ground_velocity(vm, a, accel, vel, dt, human);
+        set(vm, a, "Acceleration", value(capped));
+        set(vm, a, "Velocity", value(v));
+        v
+    };
+    let start = vec(&get(vm, a, "Location"));
+    let old_base = get(vm, a, "Base").as_obj();
+    let can_jump = get(vm, a, "bCanJump").as_bool();
+    let walks_off = get(vm, a, "bCanWalkOffLedges").as_bool() || !(get(vm, a, "bIsWalking").as_bool() || get(vm, a, "bIsCrouched").as_bool());
+    let mut left = dt;
+    let mut asked_may_fall = false;
+    let mut steps = 0;
+    while left > 0.0 && steps < 8 {
+        steps += 1;
+        let tick = if left > 0.05 { 0.05f32.min(left * 0.5) } else { left };
+        left -= tick;
+        let delta = new_vel * tick;
         let before = vec(&get(vm, a, "Location"));
-        let up = move_actor(vm, a, Vec3::Z * MAX_STEP_HEIGHT);
-        let climbed = vec(&get(vm, a, "Location")).z - before.z;
-        let blocked = move_actor(vm, a, remaining).is_some_and(|h| h.normal.z < WALKABLE_Z);
-        if up.is_some() || blocked || climbed <= 0.0 {
-            set(vm, a, "Location", value(before));
-            let slide = remaining - hit.normal * remaining.dot(hit.normal);
-            move_and_slide(vm, a, slide);
-            fire(vm, a, "HitWall", &mut [value(hit.normal), Value::Object(hit.actor)]);
-        } else {
-            move_actor(vm, a, -Vec3::Z * (climbed + 2.0));
-        }
-    }
-    match floor_below(vm, a, MAX_STEP_HEIGHT + 2.0) {
-        Some(floor) => {
-            let loc = vec(&get(vm, a, "Location"));
-            let drop = (MAX_STEP_HEIGHT + 2.0) * floor.time;
-            if drop > 0.5 {
-                set(vm, a, "Location", value(loc - Vec3::Z * (drop - 0.5)));
+        if delta.length_squared() > 1e-8 {
+            if let Some(hit) = move_actor(vm, a, delta)
+                && hit.normal.z < WALKABLE_Z
+            {
+                climb_or_slide(vm, a, delta, hit);
             }
         }
-        None => {
-            set(vm, a, "Physics", Value::Byte(PHYS_FALLING));
-            fire(vm, a, "Falling", &mut []);
+        match floor_below(vm, a, MAX_STEP_HEIGHT + 2.0) {
+            Some(floor) => {
+                let loc = vec(&get(vm, a, "Location"));
+                let drop = (MAX_STEP_HEIGHT + 2.0) * floor.time;
+                if drop > 0.5 {
+                    set(vm, a, "Location", value(loc - Vec3::Z * (drop - 0.5)));
+                }
+                if get(vm, a, "Base").as_obj() != floor.actor {
+                    set(vm, a, "Base", Value::Object(floor.actor));
+                }
+            }
+            None => {
+                // Nothing to stand on. The controller gets a chance to stop the pawn once.
+                if !asked_may_fall && can_jump {
+                    asked_may_fall = true;
+                    fire(vm, controller, "MayFall", &mut []);
+                }
+                if !can_jump || !walks_off {
+                    // This pawn must not fall: undo the step and stop it.
+                    set(vm, a, "Location", value(before));
+                    set(vm, a, "Velocity", value(Vec3::ZERO));
+                    set(vm, a, "Acceleration", value(Vec3::ZERO));
+                    set(vm, controller, "MoveTimer", Value::Float(-1.0));
+                    return;
+                }
+                if get(vm, a, "Physics").as_byte() == PHYS_WALKING {
+                    fire(vm, a, "Falling", &mut []);
+                }
+                if get(vm, a, "Physics").as_byte() == PHYS_WALKING {
+                    set(vm, a, "Physics", Value::Byte(PHYS_FALLING));
+                }
+                set(vm, a, "Base", Value::Object(None));
+                // The rest of the tick is spent falling.
+                set(vm, a, "Velocity", value(Vec3::new(new_vel.x, new_vel.y, 0.0)));
+                if left > 0.0 {
+                    fall(vm, a, left);
+                }
+                return;
+            }
         }
+    }
+    let moved = vec(&get(vm, a, "Location")) - start;
+    let mut actual = moved / dt;
+    actual.z = 0.0;
+    set(vm, a, "Velocity", value(actual));
+    let _ = old_base;
+}
+
+/// A walker met a barrier: climb it when the step up is possible, otherwise slide along it (and let the script
+/// know with `HitWall`).
+fn climb_or_slide(vm: &mut Vm<'_>, a: ObjId, delta: Vec3, hit: Hit) {
+    let human = world(vm).player.is_some_and(|pc| get(vm, pc, "Pawn").as_obj() == Some(a));
+    let remaining = delta * (1.0 - hit.time);
+    let before = vec(&get(vm, a, "Location"));
+    let up = move_actor(vm, a, Vec3::Z * MAX_STEP_HEIGHT);
+    let climbed = vec(&get(vm, a, "Location")).z - before.z;
+    let blocked = move_actor(vm, a, remaining).is_some_and(|h| h.normal.z < WALKABLE_Z);
+    if up.is_some() || blocked || climbed <= 0.0 {
+        set(vm, a, "Location", value(before));
+        let slide = remaining - hit.normal * remaining.dot(hit.normal);
+        move_and_slide(vm, a, slide);
+        // Hitting another pawn is not hitting a wall; a pawn that is not pushing makes no wall event.
+        let hit_pawn = hit.actor.is_some_and(|o| is_pawn(vm, o));
+        let pushing = vec(&get(vm, a, "Acceleration")).length_squared() > 1e-6 || human;
+        if !hit_pawn && pushing {
+            fire(vm, a, "HitWall", &mut [value(hit.normal), Value::Object(hit.actor)]);
+        }
+    } else {
+        move_actor(vm, a, -Vec3::Z * (climbed + 2.0));
     }
 }
 
@@ -461,6 +586,8 @@ fn moving_brush(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
 /// Prepares a frame's physics: the blocking actors' boxes.
 pub fn begin_frame(vm: &mut Vm<'_>) {
     refresh_actor_boxes(vm);
+    let s = Slots::get(vm);
+    world(vm).phys_slots = Some(s);
 }
 
 /// Runs one actor's physics for `dt` seconds (nothing for static actors and those without physics).
@@ -468,7 +595,10 @@ pub fn step_actor(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     if vm.db.objects.get(a).deleted {
         return;
     }
-    let s = Slots::get(vm);
+    let s = match world(vm).phys_slots {
+        Some(s) => s,
+        None => Slots::get(vm),
+    };
     if crate::read(vm, a, s.physics).as_byte() == PHYS_NONE || crate::read(vm, a, s.is_static).as_bool() {
         return;
     }

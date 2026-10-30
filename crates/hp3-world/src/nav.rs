@@ -280,7 +280,7 @@ pub fn tick_controller(vm: &mut Vm<'_>, only: ObjId, dt: f32) {
             vm.finish_latent(c);
         }
     }
-    let moves: Vec<(ObjId, Move)> = world(vm).nav.moves.iter().filter(|(k, _)| **k == only).map(|(k, v)| (*k, *v)).collect();
+    let moves: Vec<(ObjId, Move)> = world(vm).nav.moves.get(&only).map(|m| (only, *m)).into_iter().collect();
     for (c, mut m) in moves {
         let pawn = get(vm, c, "Pawn").as_obj().filter(|&p| !vm.db.objects.get(p).deleted);
         let dest = match m.target {
