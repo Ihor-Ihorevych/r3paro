@@ -9,6 +9,49 @@ use std::process::ExitCode;
 use hp3_package::PackageSet;
 use hp3_script::ClassDb;
 
+/// HP3_TRIGGER=<tag> triggers the actors with that tag (as an event of that name would), instigated by the
+/// player's pawn.
+fn trigger_tag(vm: &mut hp3_script::Vm<'_>) {
+    let Ok(tag) = std::env::var("HP3_TRIGGER") else { return };
+    {
+        let n = vm.db.names.intern(&tag);
+        let pawn = hp3_world::world(vm).player.and_then(|pc| hp3_world::get(vm, pc, "Pawn").as_obj());
+        let actors = hp3_world::world(vm).actors.clone();
+        for a in actors {
+            if hp3_world::get(vm, a, "Tag").as_name() == n {
+                println!("triggering {}", hp3_script::natives::object_path(vm, a));
+                hp3_world::fire(vm, a, "Trigger", &mut [hp3_script::Value::Object(pawn), hp3_script::Value::Object(pawn)]);
+            }
+        }
+    }
+}
+
+/// HP3_LIST_CLASS=<class> lists the level's actors of that class with their main properties.
+fn list_class(vm: &mut hp3_script::Vm<'_>) {
+    if let Ok(class) = std::env::var("HP3_LIST_CLASS") {
+        let actors = hp3_world::world(vm).actors.clone();
+        let want = vm.db.find(&class);
+        for a in actors {
+            if want.is_none() || !vm.db.objects.get(a).class.zip(want).is_some_and(|(c, w)| vm.is_child_of(c, w)) {
+                continue;
+            }
+            let name = hp3_script::natives::object_path(vm, a);
+            let mut info = String::new();
+            for n in ["Tag", "Event", "Location", "CollisionRadius", "CollisionHeight", "bCollideActors", "TriggerType", "bTriggerOnceOnly", "CutName", "bInitiallyActive"] {
+                let v = hp3_world::get(vm, a, n);
+                let v = match v {
+                    hp3_script::Value::Empty => continue,
+                    hp3_script::Value::Name(x) => vm.db.names.get(x).to_string(),
+                    other => format!("{other:?}"),
+                };
+                info.push_str(&format!(" {n}={v}"));
+            }
+            let state = vm.state_of(a).map(|s| vm.db.names.get(vm.db.structs[s.0 as usize].name).to_string());
+            println!("  {name} state {state:?}{info}");
+        }
+    }
+}
+
 /// Performs a level switch the game asked for; returns whether one happened.
 fn follow_travel(vm: &mut hp3_script::Vm<'_>) -> bool {
     let Some(url) = hp3_world::take_travel(vm) else { return false };
@@ -146,11 +189,16 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
         }
     }
     let t = std::time::Instant::now();
-    for _ in 0..frames {
+    let trigger_at: u32 = std::env::var("HP3_TRIGGER_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+    for frame in 0..frames {
+        if frame == trigger_at {
+            trigger_tag(&mut vm);
+        }
         hp3_world::tick(&mut vm, 1.0 / 60.0);
         follow_travel(&mut vm);
     }
     let tick_time = t.elapsed();
+    list_class(&mut vm);
     let w = hp3_world::world(&mut vm);
     let (actors, spawned, errors) = (w.actors.len(), w.spawned, std::mem::take(&mut w.errors));
     println!(
@@ -195,7 +243,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                     }
                     println!("  terrain {} scale {:?} at {:?}", hp3_script::natives::object_path(&vm, a), hp3_world::get(&mut vm, a, "TerrainScale"), hp3_world::get(&mut vm, a, "Location"));
                     let Some(slot) = hp3_world::slot(&mut vm, a, "Layers") else { continue };
-                    for i in 0..4 {
+                    for i in 0..32 {
                         let Some(l) = vm.db.objects.values(a).and_then(|v| v.get(slot + i)).cloned() else { continue };
                         let f = l.fields().to_vec();
                         if f.first().and_then(hp3_script::Value::as_obj).is_none() {
@@ -245,7 +293,8 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                         hp3_world::tick(&mut vm, 1.0 / 60.0);
                         if follow_travel(&mut vm) {
                             // The new level runs a while, as after a normal load.
-                            for _ in 0..120 {
+                            let after: u32 = std::env::var("HP3_AFTER_TRAVEL").ok().and_then(|v| v.parse().ok()).unwrap_or(120);
+                            for _ in 0..after {
                                 hp3_world::tick(&mut vm, 1.0 / 60.0);
                             }
                         }

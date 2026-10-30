@@ -96,6 +96,25 @@ fn font_info(vm: &mut Vm<'_>, font: ObjId) -> Option<Rc<FontInfo>> {
         world(vm).canvas.fonts.insert(font, info.clone());
         return info;
     }
+    // Languages HP3's bitmap fonts do not cover draw every text with a system font of the same height.
+    if crate::fonts::need_sap_font(vm) && vm.db.objects.get(font).key.is_some() {
+        let height = (|| {
+            let (pkg, index) = vm.db.objects.get(font).key.clone()?;
+            let p = vm.db.set.get(&pkg).ok()?;
+            let chain = vm.db.set.export_chain(&p, index);
+            let Some(Asset::Font(f)) = crate::native_asset(&p, index, &chain) else { return None };
+            Some(f.glyphs.iter().map(|g| g.height).max().unwrap_or(16))
+        })();
+        let family = world(vm).config.localize("SAPFont", "all", "Font1Name").or_else(|| world(vm).config.localize("SAPFont", "all", "BigFontName"));
+        if let Some(h) = height
+            && let Some(native) = crate::fonts::create(vm, family.as_deref().unwrap_or("Arial"), (h as f32 * 0.8).round().max(8.0) as u32)
+            && native != font
+        {
+            let info = font_info(vm, native);
+            world(vm).canvas.fonts.insert(font, info.clone());
+            return info;
+        }
+    }
     let info = (|| {
         let (pkg, index) = vm.db.objects.get(font).key.clone()?;
         let p = vm.db.set.get(&pkg).ok()?;

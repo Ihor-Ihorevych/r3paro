@@ -124,7 +124,7 @@ fn rasterize(vm: &mut Vm<'_>, family: &str, px: u32) -> Option<ObjId> {
     let name = vm.db.names.intern(&format!("NativeFont_{family}_{px}"));
     let font_obj = vm.new_object(font_class, name);
     let page = vm.new_object(tex_class, name);
-    let image = Image { width: WIDTH as u32, height: atlas_h as u32, rgba, masked: false };
+    let image = Image { width: WIDTH as u32, height: atlas_h as u32, rgba, masked: false, translucent: false };
     let nf = &mut world(vm).native_fonts;
     nf.images.insert(page, Rc::new(image));
     nf.fonts.insert(font_obj, Rc::new((font, page)));

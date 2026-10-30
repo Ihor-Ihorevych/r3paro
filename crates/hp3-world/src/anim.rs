@@ -31,6 +31,21 @@ pub struct Channel {
 pub struct ActorAnim {
     pub set: Option<Rc<AnimSet>>,
     pub channels: Vec<Channel>,
+    /// Bone controllers (`SetBoneRotation`): lower-case bone name to (pitch, yaw, roll) and weight.
+    pub bone_turns: Vec<(String, [i32; 3], f32)>,
+}
+
+/// An actor's bone controller rotations as (bone index, matrix) for a skeleton.
+pub fn turns_for(skel: &hp3_anim::Skeleton, turns: &[(String, [i32; 3], f32)]) -> Vec<(usize, glam::Mat4)> {
+    turns
+        .iter()
+        .filter_map(|(bone, rot, alpha)| {
+            let i = skel.find(bone)?;
+            let full = glam::Quat::from_mat4(&hp3_anim::rotator_matrix(*rot));
+            let q = glam::Quat::IDENTITY.slerp(full, alpha.clamp(0.0, 1.0));
+            Some((i, glam::Mat4::from_quat(q)))
+        })
+        .collect()
 }
 
 /// A skeletal mesh's skeleton and its mesh-to-actor transform.
@@ -139,7 +154,8 @@ pub fn bone_matrix(vm: &mut Vm<'_>, a: ObjId, bone: &str) -> Option<glam::Mat4> 
                     m
                 }
             };
-            hp3_anim::bones(&skel.skeleton, Some((set, &map)), ch.sequence, ch.frame)
+            let turns = world(vm).anim.actors.get(&a).map(|x| turns_for(&skel.skeleton, &x.bone_turns)).unwrap_or_default();
+            hp3_anim::bones_with(&skel.skeleton, Some((set, &map)), ch.sequence, ch.frame, &turns)
         }
         None => hp3_anim::bones(&skel.skeleton, None, None, 0.0),
     };
@@ -491,6 +507,24 @@ pub fn register(vm: &mut Vm<'_>) {
         let bone = vm.db.names.get(a[0].as_name()).to_string();
         let r = this.and_then(|o| bone_matrix(vm, o, &bone)).map(|m| hp3_anim::matrix_rotator(&m)).unwrap_or([0; 3]);
         Ok(rotator_value(r))
+    });
+    // SetBoneRotation(BoneName, rotator BoneTurn, optional int Space, optional float Alpha): a rotation added
+    // to the bone in its own space (the space argument is not told apart yet).
+    vm.register("Actor.SetBoneRotation", |vm, this, a| {
+        let Some(o) = this else { return Ok(Value::Empty) };
+        let bone = vm.db.names.get(a[0].as_name()).to_ascii_lowercase();
+        let r: Vec<i32> = a.get(1).map(|v| v.fields().iter().map(Value::as_int).collect()).unwrap_or_default();
+        let rot = [r.first().copied().unwrap_or(0), r.get(1).copied().unwrap_or(0), r.get(2).copied().unwrap_or(0)];
+        let alpha = match a.get(3) {
+            None | Some(Value::Empty) => 1.0,
+            Some(v) => v.as_float(),
+        };
+        let x = world(vm).anim.actors.entry(o).or_default();
+        x.bone_turns.retain(|t| t.0 != bone);
+        if alpha > 0.0 && rot != [0, 0, 0] {
+            x.bone_turns.push((bone, rot, alpha));
+        }
+        Ok(Value::Empty)
     });
     // LinkMesh(NewMesh, optional bKeepAnim)
     vm.register("Actor.LinkMesh", |vm, this, a| {

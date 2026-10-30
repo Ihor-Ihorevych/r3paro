@@ -303,8 +303,11 @@ fn add_terrain(b: &mut Batcher<'_, '_>, map: &Rc<Package>, inputs: &MapInputs) {
         for (li, layer) in layers.iter().enumerate() {
             let Some(texture) = b.texture_key(&layer.texture) else { continue };
             let alpha = if li == 0 { None } else { layer.alpha_map.as_ref().and_then(|k| b.alpha_key(k)) };
+            // A layer without an alpha map ends the drawn layers: the ones after it are editor helpers (deco
+            // placement, red and white), which the game does not show. A heuristic, not yet checked against
+            // HP3's renderer.
             if li > 0 && alpha.is_none() {
-                continue;
+                break;
             }
             let m = layer.matrix;
             let mut batch = Batch { texture: Some(texture), lightmap: None, blend: alpha, vertices: Vec::with_capacity(w * h), indices: Vec::new() };
@@ -464,7 +467,7 @@ fn build_lightmaps(model: &hp3_assets::model::Model, lighting: &Lighting) -> Vec
                     rgba[i * 4 + k] = (texels[i * 3 + k] * 0.5 * 255.0).clamp(0.0, 255.0) as u8;
                 }
             }
-            Image { width: n as u32, height: n as u32, rgba, masked: false }
+            Image { width: n as u32, height: n as u32, rgba, masked: false, translucent: false }
         })
         .collect()
 }

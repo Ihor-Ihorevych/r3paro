@@ -40,6 +40,13 @@ struct VsOut {
     return vec4<f32>(c.rgb * light, 1.0);
 }
 
+// Alpha-blended surfaces: lit like the others, covering what is below by their own alpha.
+@fragment fn fs_alpha(i: VsOut) -> @location(0) vec4<f32> {
+    let c = textureSample(tex, samp, i.uv);
+    let light = textureSample(lightmap, lsamp, i.light_uv).rgb * i.color * 4.0;
+    return vec4<f32>(c.rgb * light, c.a);
+}
+
 // Terrain layers: lit by the vertex color, covering what is below by the alpha map in the lightmap slot.
 @fragment fn fs_blend(i: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, i.uv);
@@ -60,6 +67,8 @@ pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
     /// Alpha-blended over the opaque scene, without depth writes (terrain layers).
     blend_pipeline: wgpu::RenderPipeline,
+    /// Surfaces blended by their texture's alpha, after the rest.
+    alpha_pipeline: wgpu::RenderPipeline,
     globals_layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -213,6 +222,41 @@ impl Renderer {
             multiview: None,
             cache: None,
         });
+        let alpha_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scene-alpha"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &VERTEX_ATTRIBUTES,
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_alpha"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview: None,
+            cache: None,
+        });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::Repeat,
             address_mode_v: wgpu::AddressMode::Repeat,
@@ -231,6 +275,7 @@ impl Renderer {
             queue,
             pipeline,
             blend_pipeline,
+            alpha_pipeline,
             globals_layout,
             texture_layout,
             sampler,
@@ -358,7 +403,9 @@ impl Renderer {
                 contents: bytemuck::cast_slice(&batch.indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
-            draws.push(Draw { bind, vertices, indices, count: batch.indices.len() as u32, blend: batch.blend.is_some() });
+            let translucent = batch.texture.as_ref().and_then(|k| scene.images.get(k)).is_some_and(|i| i.translucent);
+            let pass = if batch.blend.is_some() { 1 } else if translucent { 2 } else { 0 };
+            draws.push(Draw { bind, vertices, indices, count: batch.indices.len() as u32, pass });
         }
         // A second camera for the sky zone's view.
         let sky_globals = d.create_buffer(&wgpu::BufferDescriptor {
@@ -446,9 +493,14 @@ impl Renderer {
 
     /// The scene's batches: opaque first, then blended ones in order (camera bind group already set).
     fn draw_batches(&self, pass: &mut wgpu::RenderPass<'_>, scene: &GpuScene) {
-        for blended in [false, true] {
-            pass.set_pipeline(if blended { &self.blend_pipeline } else { &self.pipeline });
-            for d in scene.draws.iter().filter(|d| d.blend == blended) {
+        // Opaque, then terrain layers, then alpha-blended surfaces.
+        for which in 0..3u8 {
+            pass.set_pipeline(match which {
+                0 => &self.pipeline,
+                1 => &self.blend_pipeline,
+                _ => &self.alpha_pipeline,
+            });
+            for d in scene.draws.iter().filter(|d| d.pass == which) {
                 pass.set_bind_group(1, &d.bind, &[]);
                 pass.set_vertex_buffer(0, d.vertices.slice(..));
                 pass.set_index_buffer(d.indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -549,7 +601,8 @@ struct Draw {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     count: u32,
-    blend: bool,
+    /// 0 opaque, 1 terrain layer, 2 alpha-blended.
+    pass: u8,
 }
 
 /// A scene uploaded to the GPU.

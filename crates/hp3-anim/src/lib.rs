@@ -67,9 +67,18 @@ impl Skeleton {
 
 /// Bone-to-mesh matrices from bone-to-parent poses (parents come before children).
 fn world_matrices(parents: &[usize], poses: &[BonePose]) -> Vec<Mat4> {
+    world_matrices_with(parents, poses, &[])
+}
+
+fn world_matrices_with(parents: &[usize], poses: &[BonePose], turns: &[(usize, Mat4)]) -> Vec<Mat4> {
     let mut out: Vec<Mat4> = Vec::with_capacity(poses.len());
     for (i, p) in poses.iter().enumerate() {
-        let local = p.matrix();
+        let mut local = p.matrix();
+        for (b, m) in turns {
+            if *b == i {
+                local *= *m;
+            }
+        }
         let m = if i == 0 || parents[i] >= i { local } else { out[parents[i]] * local };
         out.push(m);
     }
@@ -183,6 +192,18 @@ pub fn mesh_to_actor(mesh: &SkeletalMesh) -> Mat4 {
 
 /// Bone-to-mesh matrices for a sequence at `frame` (0 to its frame count); the reference pose without one.
 pub fn bones(skel: &Skeleton, set: Option<(&AnimSet, &[Option<usize>])>, seq: Option<usize>, frame: f32) -> Vec<Mat4> {
+    bones_with(skel, set, seq, frame, &[])
+}
+
+/// Like `bones`, with extra rotations of some bones in their own space (bone controllers), as (bone index,
+/// rotation matrix).
+pub fn bones_with(
+    skel: &Skeleton,
+    set: Option<(&AnimSet, &[Option<usize>])>,
+    seq: Option<usize>,
+    frame: f32,
+    turns: &[(usize, Mat4)],
+) -> Vec<Mat4> {
     let mut poses = skel.reference.clone();
     if let (Some((set, map)), Some(seq)) = (set, seq)
         && let Some(s) = set.sequences.get(seq)
@@ -199,7 +220,7 @@ pub fn bones(skel: &Skeleton, set: Option<(&AnimSet, &[Option<usize>])>, seq: Op
             }
         }
     }
-    world_matrices(&skel.parents, &poses)
+    world_matrices_with(&skel.parents, &poses, turns)
 }
 
 impl Skeleton {
@@ -211,7 +232,18 @@ impl Skeleton {
 
 /// Skin matrices (bind pose to posed, in mesh space) for a sequence at `frame` (0 to its frame count).
 pub fn pose(skel: &Skeleton, set: Option<(&AnimSet, &[Option<usize>])>, seq: Option<usize>, frame: f32) -> Vec<Mat4> {
-    let world = bones(skel, set, seq, frame);
+    pose_with(skel, set, seq, frame, &[])
+}
+
+/// Like `pose`, with bone controller rotations (see `bones_with`).
+pub fn pose_with(
+    skel: &Skeleton,
+    set: Option<(&AnimSet, &[Option<usize>])>,
+    seq: Option<usize>,
+    frame: f32,
+    turns: &[(usize, Mat4)],
+) -> Vec<Mat4> {
+    let world = bones_with(skel, set, seq, frame, turns);
     world.iter().zip(&skel.inv_reference_world).map(|(w, inv)| *w * *inv).collect()
 }
 

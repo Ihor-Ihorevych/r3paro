@@ -207,6 +207,27 @@ pub fn hud_quads(vm: &mut Vm<'_>, loader: &Loader<'_>, cache: &mut HudCache, wid
     out
 }
 
+/// The screen flash over everything: `FlashScale` darkens or tints the picture, `FlashFog` adds a color (fades
+/// to black or white in cutscenes). Full-screen quads to append after the HUD.
+pub fn screen_flash(vm: &mut Vm<'_>, width: u32, height: u32) -> Vec<hp3_render::overlay::Quad> {
+    use hp3_render::overlay::{Blend, Quad};
+    let Some(pc) = world(vm).player else { return Vec::new() };
+    let scale = vec3(&get(vm, pc, "FlashScale"));
+    let fog = vec3(&get(vm, pc, "FlashFog"));
+    let rect = [0.0, 0.0, width as f32, height as f32];
+    let mut out = Vec::new();
+    if scale != Vec3::ONE && scale.max_element() >= 0.0 {
+        // Modulated blending doubles: dst * src * 2.
+        let c = (scale.clamp(Vec3::ZERO, Vec3::splat(2.0)) * 0.5).extend(1.0).to_array();
+        out.push(Quad { texture: None, rect, uv: [0.0, 0.0, 1.0, 1.0], color: c, blend: Blend::Modulate });
+    }
+    if fog.max_element() > 0.0 {
+        let c = fog.clamp(Vec3::ZERO, Vec3::ONE).extend(1.0).to_array();
+        out.push(Quad { texture: None, rect, uv: [0.0, 0.0, 1.0, 1.0], color: c, blend: Blend::Additive });
+    }
+    out
+}
+
 /// The package export behind an object, if it came from a package.
 fn export_of(vm: &Vm<'_>, o: ObjId) -> Option<(Rc<Package>, usize)> {
     let (pkg, index) = vm.db.objects.get(o).key.clone()?;
@@ -280,17 +301,20 @@ impl MeshCache {
             .anim
             .actors
             .get(&actor)
-            .map(|a| (a.set.clone(), a.channels.first().cloned()));
+            .map(|a| (a.set.clone(), a.channels.first().cloned(), a.bone_turns.clone()));
         let s = self.skinned.get_mut(&actor)?;
-        let (set, channel) = state.unwrap_or((None, None));
+        let (set, channel, turns) = state.unwrap_or((None, None, Vec::new()));
         let (seq, frame) = channel.map(|c| (c.sequence, c.frame)).unwrap_or((None, 0.0));
-        let key = (seq, frame.to_bits());
+        // Bone controllers change the pose too: they are part of what was last written.
+        let turn_sum: i64 = turns.iter().map(|t| t.1.iter().map(|&v| v as i64).sum::<i64>() + (t.2 * 1000.0) as i64).sum();
+        let key = (seq, frame.to_bits() ^ (turn_sum as u32));
         if s.last != Some(key) {
             let hp3_assets::Asset::SkeletalMesh(m) = &*s.asset else { return None };
             let skin = match &set {
                 Some(set) => {
                     let map = s.bone_maps.entry(Rc::as_ptr(set) as usize).or_insert_with(|| set.bone_map(&s.skeleton));
-                    hp3_anim::pose(&s.skeleton, Some((set, map)), seq, frame)
+                    let t = hp3_world::anim::turns_for(&s.skeleton, &turns);
+                    hp3_anim::pose_with(&s.skeleton, Some((set, map)), seq, frame, &t)
                 }
                 None => hp3_anim::pose(&s.skeleton, None, None, 0.0),
             };

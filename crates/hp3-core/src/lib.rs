@@ -47,12 +47,18 @@ impl Config {
         for lang in [self.language.clone(), "int".to_string()] {
             let file = format!("{}.{}", package.to_ascii_lowercase(), lang);
             if !self.localized.contains_key(&file) {
-                let found = std::fs::read_dir(&self.system).ok().and_then(|entries| {
-                    entries
-                        .flatten()
-                        .map(|e| e.path())
-                        .find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&file)))
-                });
+                // A package may name a subfolder of System (`Cutscenes0Intro`); each part matches ignoring case.
+                let parts: Vec<&str> = file.split(['\\', '/']).filter(|p| !p.is_empty()).collect();
+                let mut dir = Some(self.system.clone());
+                for (i, part) in parts.iter().enumerate() {
+                    let is_last = i + 1 == parts.len();
+                    dir = dir.and_then(|d| {
+                        std::fs::read_dir(&d).ok()?.flatten().map(|e| e.path()).find(|p| {
+                            (p.is_dir() != is_last) && p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(part))
+                        })
+                    });
+                }
+                let found = dir;
                 self.localized.insert(file.clone(), found.and_then(|p| Ini::load(&p).ok()));
             }
             if let Some(Some(ini)) = self.localized.get(&file)

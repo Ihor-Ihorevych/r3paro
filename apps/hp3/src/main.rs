@@ -73,29 +73,19 @@ fn mouse_name(b: MouseButton) -> Option<&'static str> {
 
 /// The game's view: the player controller's `PlayerCalcView`.
 fn game_camera(vm: &mut Vm<'_>) -> Option<Camera> {
-    let pc = hp3_world::world(vm).player?;
-    let mut args = [Value::Object(None), Value::Empty, Value::Empty];
-    vm.event(pc, "PlayerCalcView", &mut args).ok()?;
-    let loc = args[1].fields();
-    let rot = args[2].fields();
-    let at_origin = loc.iter().all(|v| v.as_float() == 0.0);
-    if loc.len() != 3 || rot.len() != 3 || at_origin {
-        // The game's camera is not running (a map loaded directly skips the flow that starts it): follow the
-        // pawn from behind instead.
-        let pawn = hp3_world::get(vm, pc, "Pawn").as_obj()?;
-        let p = hp3_world::physics::vec(&hp3_world::get(vm, pawn, "Location"));
-        let r = hp3_world::get(vm, pc, "Rotation");
-        let r: Vec<i32> = r.fields().iter().map(Value::as_int).collect();
-        let yaw = r.get(1).copied().unwrap_or(0);
-        let k = std::f32::consts::TAU / 65536.0;
-        let back = Vec3::new((yaw as f32 * k).cos(), (yaw as f32 * k).sin(), 0.0);
-        return Some(Camera { position: p - back * 220.0 + Vec3::Z * 90.0, rotation: [-2500, yaw, 0], fov_degrees: 90.0 });
+    if let Some((position, rotation, fov)) = hp3_world::player_view(vm) {
+        return Some(Camera { position, rotation, fov_degrees: fov });
     }
-    Some(Camera {
-        position: Vec3::new(loc[0].as_float(), loc[1].as_float(), loc[2].as_float()),
-        rotation: [rot[0].as_int(), rot[1].as_int(), rot[2].as_int()],
-        fov_degrees: 90.0,
-    })
+    // The game's camera is not running: follow the pawn from behind instead.
+    let pc = hp3_world::world(vm).player?;
+    let pawn = hp3_world::get(vm, pc, "Pawn").as_obj()?;
+    let p = hp3_world::physics::vec(&hp3_world::get(vm, pawn, "Location"));
+    let r = hp3_world::get(vm, pc, "Rotation");
+    let r: Vec<i32> = r.fields().iter().map(Value::as_int).collect();
+    let yaw = r.get(1).copied().unwrap_or(0);
+    let k = std::f32::consts::TAU / 65536.0;
+    let back = Vec3::new((yaw as f32 * k).cos(), (yaw as f32 * k).sin(), 0.0);
+    Some(Camera { position: p - back * 220.0 + Vec3::Z * 90.0, rotation: [-2500, yaw, 0], fov_degrees: 90.0 })
 }
 
 fn main() -> ExitCode {
@@ -324,7 +314,8 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
         let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut mesh_cache, lighting.as_ref());
         let refs: Vec<_> = instances.iter().map(|(m, t, l)| (m.as_ref(), *t, *l)).collect();
         let cmd = dynamic.draw(&renderer, &gpu_scene, &refs, &camera, &view, &depth, width as f32 / height as f32);
-        let quads = hp3_engine::hud_quads(&mut vm, &loader, &mut hud_cache, width, height);
+        let mut quads = hp3_engine::hud_quads(&mut vm, &loader, &mut hud_cache, width, height);
+        quads.extend(hp3_engine::screen_flash(&mut vm, width, height));
         let images = |k: &hp3_assets::loader::ObjKey| hud_cache.image(&loader, k);
         let hud = overlay.draw(&renderer, &quads, &images, &view, width, height);
         renderer.queue.submit([cmd, hud]);

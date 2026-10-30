@@ -63,6 +63,8 @@ pub struct World {
     pub native_fonts: fonts::NativeFonts,
     /// Options of the URL the level was loaded with (`?Name=Value...`).
     pub url_options: String,
+    /// HP3's `WorldInfo` object (game states, persistent values), kept across levels.
+    pub world_info: Option<ObjId>,
     /// A level switch asked for and due (`Level.NextURL`).
     pub pending_travel: Option<String>,
     actor_slots: HashMap<&'static str, Option<usize>>,
@@ -174,6 +176,14 @@ fn world_options_set(options: &str) {
     NEXT_OPTIONS.with(|o| *o.borrow_mut() = options.to_string());
 }
 
+thread_local! {
+    static NEXT_WORLD_INFO: std::cell::Cell<Option<ObjId>> = const { std::cell::Cell::new(None) };
+}
+
+fn take_world_info() -> Option<ObjId> {
+    NEXT_WORLD_INFO.with(|w| w.take())
+}
+
 fn take_world_options() -> String {
     NEXT_OPTIONS.with(|o| std::mem::take(&mut *o.borrow_mut()))
 }
@@ -221,6 +231,7 @@ pub fn travel(vm: &mut Vm<'_>, url: &str) -> Result<Rc<Package>, VmError> {
     }
     let options = url.find('?').map(|i| url[i..].split('#').next().unwrap_or("").to_string()).unwrap_or_default();
     world_options_set(&options);
+    NEXT_WORLD_INFO.with(|w| w.set(old.world_info));
     load_with(vm, &map, old.config, carried)?;
     Ok(map)
 }
@@ -305,12 +316,24 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, c
         native_fonts: Default::default(),
         pending_travel: None,
         url_options: String::new(),
+        world_info: None,
         tick_profile: Default::default(),
         actor_slots: Default::default(),
         config,
     }));
     let collision = build_collision(vm, map, level_model, &actors);
     world(vm).collision = collision;
+    // HP3's world info (game states, persistent values) lives across levels: made once, given to each level.
+    let world_info = take_world_info().or_else(|| {
+        let class = world(vm).config.get("Engine.Engine", "WorldInfo").map(str::to_string)?;
+        let c = find_object(vm, &class).and_then(|o| vm.class_of(o))?;
+        let n = vm.db.names.intern("WorldInfo");
+        Some(vm.new_object(c, n))
+    });
+    world(vm).world_info = world_info;
+    if let (Some(li), Some(wi)) = (level_info, world_info) {
+        set(vm, li, "WorldInfo", Value::Object(Some(wi)));
+    }
     // The game exists before the level's actors begin play; they read Level.Game.
     if let Some(gc) = game_class.and_then(|g| find_object(vm, g)) {
         let game = natives::spawn(vm, level_info, &[Value::Object(Some(gc))])?.as_obj();
@@ -321,6 +344,10 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, c
             fire(vm, g, "InitGame", &mut [Value::Str(options.clone()), Value::Str(String::new())]);
             world(vm).url_options = options;
         }
+    }
+    // Actors that do not belong to the current game state are hidden and stop colliding.
+    for &a in &actors {
+        fire(vm, a, "FilterForCurrentGameState", &mut []);
     }
     for &a in &actors {
         fire(vm, a, "PreBeginPlay", &mut []);
@@ -333,6 +360,10 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, c
     }
     for &a in &actors {
         fire(vm, a, "SetInitialState", &mut []);
+    }
+    // The persistent store has given the level its saved state (none yet): actors apply it.
+    for &a in &actors {
+        fire(vm, a, "PostPersistentDataRestored", &mut []);
     }
     if let Some(g) = world(vm).game {
         let options = world(vm).url_options.clone();
@@ -416,6 +447,31 @@ fn arrive_from(vm: &mut Vm<'_>, pawn: ObjId) {
     }
 }
 
+/// The player's view this frame from the game's `PlayerCalcView`: location, rotation (pitch, yaw, roll) and
+/// horizontal field of view. `None` when the game gives no view (location at the origin).
+pub fn player_view(vm: &mut Vm<'_>) -> Option<(glam::Vec3, [i32; 3], f32)> {
+    let pc = world(vm).player?;
+    // HP3 computes a new view only when `bTicked` differs from `bViewUpdated` (once per frame); the
+    // renderer asks once per drawn frame, so it always gets a fresh one.
+    let ticked = get(vm, pc, "bTicked").as_bool();
+    set(vm, pc, "bViewUpdated", Value::Bool(!ticked));
+    let mut args = [Value::Object(None), Value::Empty, Value::Empty];
+    vm.event(pc, "PlayerCalcView", &mut args).ok()?;
+    let (loc, rot) = (args[1].fields(), args[2].fields());
+    if loc.len() != 3 || rot.len() != 3 || loc.iter().all(|v| v.as_float() == 0.0) {
+        return None;
+    }
+    let fov = match get(vm, pc, "FovAngle").as_float() {
+        f if f > 1.0 && f < 179.0 => f,
+        _ => 90.0,
+    };
+    Some((
+        glam::Vec3::new(loc[0].as_float(), loc[1].as_float(), loc[2].as_float()),
+        [rot[0].as_int(), rot[1].as_int(), rot[2].as_int()],
+        fov,
+    ))
+}
+
 /// Advances the level by `dt` seconds: actor ticks, timers, then state code.
 pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     let actors = {
@@ -437,6 +493,12 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
                 world(vm).pending_travel = Some(next);
             }
         }
+    }
+    if world(vm).frame == 1
+        && let Some(pc) = world(vm).player
+    {
+        // The engine tells the player's controller before the level's first tick.
+        fire(vm, pc, "OnEnginePreFirstTick", &mut []);
     }
     let profile = std::env::var_os("HP3_TICK_PROFILE").is_some();
     let mut t = std::time::Instant::now();

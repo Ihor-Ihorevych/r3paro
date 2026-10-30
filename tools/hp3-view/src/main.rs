@@ -138,7 +138,21 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
             hp3_world::world(&mut vm).input.key_down(k.trim());
         }
     }
-    for _ in 0..ticks {
+    // HP3_TRIGGER=<tag> triggers the actors with that tag at tick HP3_TRIGGER_AT (default 60).
+    let trigger_at: u32 = std::env::var("HP3_TRIGGER_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+    for frame in 0..ticks {
+        if frame == trigger_at
+            && let Ok(tag) = std::env::var("HP3_TRIGGER")
+        {
+            let n = vm.db.names.intern(&tag);
+            let pawn = hp3_world::world(&mut vm).player.and_then(|pc| hp3_world::get(&mut vm, pc, "Pawn").as_obj());
+            let actors = hp3_world::world(&mut vm).actors.clone();
+            for a in actors {
+                if hp3_world::get(&mut vm, a, "Tag").as_name() == n {
+                    hp3_world::fire(&mut vm, a, "Trigger", &mut [Value::Object(pawn), Value::Object(pawn)]);
+                }
+            }
+        }
         hp3_world::tick(&mut vm, 1.0 / 60.0);
     }
     // HP3_SHOW_HUD=1 fades every HUD item in (they rest hidden until the game shows them).
@@ -188,7 +202,8 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
     let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut cache, lighting.as_ref());
     eprintln!("{} static batches, {} live actors drawn", scene.batches.len(), instances.len());
     let pc = hp3_world::world(&mut vm).player.ok_or("no player")?;
-    let mut pawn = hp3_world::get(&mut vm, pc, "Pawn").as_obj().ok_or("no pawn")?;
+    // The pawn, or (in a cutscene, which takes the pawn from the player) the controller itself.
+    let mut pawn = hp3_world::get(&mut vm, pc, "Pawn").as_obj().unwrap_or(pc);
     // HP3_VIEW_CLASS=<class>[:n] frames the n-th actor of that class instead of the player.
     if let Ok(spec) = std::env::var("HP3_VIEW_CLASS") {
         let (class, n) = spec.split_once(':').map(|(c, n)| (c.to_string(), n.parse().unwrap_or(0))).unwrap_or((spec.clone(), 0));
@@ -209,17 +224,9 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
     let mut camera = Camera { position: p - back * 160.0 + Vec3::Z * 50.0, rotation: [-1500, yaw, 0], fov_degrees: 90.0 };
     // The game's own camera, when it runs and no actor was asked for.
     if std::env::var_os("HP3_VIEW_CLASS").is_none() {
-        let mut args = [Value::Object(None), Value::Empty, Value::Empty];
-        if vm.event(pc, "PlayerCalcView", &mut args).is_ok() {
-            let (loc, rot) = (args[1].fields().to_vec(), args[2].fields().to_vec());
-            if loc.len() == 3 && rot.len() == 3 && loc.iter().any(|v| v.as_float() != 0.0) {
-                eprintln!("game camera at {:?} rotation {:?}", loc, rot);
-                camera = Camera {
-                    position: Vec3::new(loc[0].as_float(), loc[1].as_float(), loc[2].as_float()),
-                    rotation: [rot[0].as_int(), rot[1].as_int(), rot[2].as_int()],
-                    fov_degrees: 90.0,
-                };
-            }
+        if let Some((position, rotation, fov)) = hp3_world::player_view(&mut vm) {
+            eprintln!("game camera at {position:?} rotation {rotation:?} fov {fov}");
+            camera = Camera { position, rotation, fov_degrees: fov };
         }
     }
     // HP3_VIEW_CAM=x,y,z,pitch,yaw places the camera explicitly.
@@ -239,6 +246,8 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
     } else {
         Vec::new()
     };
+    let mut quads = quads;
+    quads.extend(hp3_engine::screen_flash(&mut vm, w, h));
     eprintln!("{} HUD quads", quads.len());
     let overlay = hp3_render::overlay::Overlay::new(&renderer);
     let images = |k: &hp3_assets::loader::ObjKey| hud_cache.image(&loader, k);
