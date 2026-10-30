@@ -111,9 +111,12 @@ Milestones are from the plan (M0 to M12).
   comes from the sound headers, so cutscene lines now last as long as their dialogue (the train intro ends at
   about 100 s). Checked by numbers only (the decoded audio has a speech-like spectrum, the overlap of blocks
   agrees much better with the DCT-III than with a DCT-IV, levels are sane); nobody has listened yet. The output
-  gain is 1/frame length (calibrated, not derived). Not yet: ambient sounds (`AmbientSound`), reverb/occlusion,
-  volume settings, lip-sync from the sound envelopes, music on a thread (a long track delays its start by a
+  gain is 1/frame length (calibrated, not derived). Ambient sounds (`AmbientSound`) loop at their actors while the listener is
+  within reach, and the game's `[ALAudio.ALAudioSubsystem]` volumes are used. Not yet: reverb/occlusion, lip-sync from the sound envelopes, music on a thread (a long track delays its start by a
   fraction of a second), Android output.
+- **Movies**: this install has no movie files and no Bink video decoder exists yet, so `Movie.Play` logs the
+  skipped movie and reports it ended on the next tick; the game carries on (the studio logos of the preamble
+  need a HUD that does not exist at that point and are skipped anyway).
 - M8 onwards: not started.
 
 ## Checking

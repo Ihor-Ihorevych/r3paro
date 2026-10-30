@@ -12,6 +12,7 @@ pub mod fonts;
 pub mod nav;
 pub mod gui;
 pub mod input;
+pub mod movie;
 pub mod interactions;
 pub mod natives;
 pub mod physics;
@@ -70,6 +71,7 @@ pub struct World {
     pub save_requested: bool,
     /// Sounds and music the game asked for, for the platform to play.
     pub audio: audio::Audio,
+    pub movies: movie::Movies,
     /// A level switch asked for and due (`Level.NextURL`).
     pub pending_travel: Option<String>,
     actor_slots: HashMap<&'static str, Option<usize>>,
@@ -248,6 +250,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, c
     let actor_class = vm.db.find("Actor").ok_or_else(|| VmError::Runtime("no Actor class".into()))?;
     natives::register(vm);
     audio::register(vm);
+    movie::register(vm);
     anim::register(vm);
     nav::register(vm);
     canvas::register(vm);
@@ -325,6 +328,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, c
         world_info: None,
         save_requested: false,
         audio: Default::default(),
+        movies: Default::default(),
         tick_profile: Default::default(),
         actor_slots: Default::default(),
         config,
@@ -491,6 +495,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     if let Some(li) = world(vm).level_info {
         let t = world(vm).time;
         set(vm, li, "TimeSeconds", Value::Float(t));
+        movie::tick(vm);
         // A save the game asked for (LevelAction = saving) happens in the engine's next frame, which then
         // clears the action. Saving itself is not implemented yet.
         const LEVACT_SAVING: u8 = 2;
