@@ -331,6 +331,30 @@ pub fn read_model(r: &mut Reader<'_>) -> Result<Model> {
     })
 }
 
+#[derive(Clone, Debug)]
+pub struct ConvexFace {
+    pub plane: Plane,
+    pub vertices: Vec<Vec3>,
+}
+
+/// A convex hull used for volumes' collision.
+#[derive(Clone, Debug)]
+pub struct ConvexVolume {
+    pub bounds: PrimitiveBounds,
+    pub faces: Vec<ConvexFace>,
+    pub edges: Vec<[i32; 4]>,
+    pub hull_bounds: Bounds,
+}
+
+pub fn read_convex_volume(r: &mut Reader<'_>) -> Result<ConvexVolume> {
+    Ok(ConvexVolume {
+        bounds: PrimitiveBounds::read(r)?,
+        faces: r.array(|r| Ok(ConvexFace { plane: Plane::read(r)?, vertices: r.array(Vec3::read)? }))?,
+        edges: r.array(|r| Ok([r.i32()?, r.i32()?, r.i32()?, r.i32()?]))?,
+        hull_bounds: Bounds::read(r)?,
+    })
+}
+
 pub fn read_polys(r: &mut Reader<'_>) -> Result<Polys> {
     let num = r.i32()?;
     let _max = r.i32()?;

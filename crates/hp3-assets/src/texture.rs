@@ -29,6 +29,24 @@ pub struct Texture {
     pub mips: Vec<Mip>,
 }
 
+/// Procedural textures (fire, water, ice): an ordinary mip chain plus, for fire, its spark sources.
+#[derive(Clone, Debug)]
+pub struct Procedural {
+    pub texture: Texture,
+    /// Fire sparks: type, heat, x, y and four type-specific bytes.
+    pub sparks: Vec<[u8; 8]>,
+}
+
+pub fn read_procedural(class: &str, r: &mut Reader<'_>) -> Result<Procedural> {
+    let texture = read_texture(r)?;
+    let sparks = if class == "FireTexture" {
+        r.array(|r| Ok(r.bytes(8)?.try_into().unwrap()))?
+    } else {
+        Vec::new()
+    };
+    Ok(Procedural { texture, sparks })
+}
+
 pub fn read_texture(r: &mut Reader<'_>) -> Result<Texture> {
     let mips = r.array(|r| {
         let data = r.lazy_bytes()?;

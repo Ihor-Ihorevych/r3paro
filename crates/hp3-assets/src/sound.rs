@@ -13,13 +13,16 @@ pub struct Sound {
     pub unknown: i32,
 }
 
+/// Lowest package version seen with the envelope and trailing value; every HP3 sound package is 129.
+const EXTRAS_VERSION: u16 = 127;
+
 pub fn read_sound(pkg: &Package, r: &mut Reader<'_>) -> Result<Sound> {
     let file_type = pkg.name(r.ci()? as usize).to_string();
     let data = r.lazy_bytes()?;
     let data_len = data.len();
     let data_offset = r.file_pos() - data_len;
-    // Sounds in execdemo.uax end right after the data.
-    if r.at_end() {
+    // Older packages (execdemo.uax is version 126) end right after the data.
+    if pkg.summary.version < EXTRAS_VERSION {
         return Ok(Sound { file_type, data_offset, data_len, envelope: None, unknown: -1 });
     }
     let envelope = match r.i32()? {
