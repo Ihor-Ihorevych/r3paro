@@ -1,6 +1,6 @@
 //! The interpreter: runs compiled functions against the object table.
 
-use std::collections::HashMap;
+use crate::fx::FxHashMap as HashMap;
 use std::rc::Rc;
 
 use crate::class_db::{ClassDb, PropType, StructId, StructKind};
@@ -53,6 +53,16 @@ impl Frame {
     }
 }
 
+/// What calls need to know about a function, computed once.
+struct FuncInfo {
+    /// Parameters in order: slot, property flags, type.
+    params: Vec<(usize, u32, PropType)>,
+    ret: Option<usize>,
+    native: bool,
+    /// Whether the function is a state (its code runs as state code).
+    is_state: bool,
+}
+
 /// A running `foreach`: the values each iteration writes to the out arguments.
 struct IterState {
     items: Vec<Vec<Value>>,
@@ -96,7 +106,7 @@ enum Step {
 #[derive(Clone, Debug)]
 pub struct Place {
     root: Root,
-    path: Vec<Step>,
+    path: smallvec::SmallVec<[Step; 4]>,
 }
 
 enum Flow {
@@ -126,12 +136,13 @@ pub struct Vm<'s> {
     /// Where each object's state code resumes.
     pub state_pc: HashMap<ObjId, usize>,
     /// Objects that changed state while their state code ran.
-    pub(crate) state_changed: std::collections::HashSet<ObjId>,
+    pub(crate) state_changed: crate::fx::FxHashSet<ObjId>,
     /// Statement being executed, for iterators to find their loop body.
     current_pc: usize,
     /// World data of the crate that embeds the VM.
     pub ext: Option<Box<dyn std::any::Any>>,
-    native_cache: HashMap<StructId, Option<NativeFn>>,
+    /// Resolved natives, indexed by function struct id (outer `None`: not looked up yet).
+    native_cache: Vec<Option<Option<NativeFn>>>,
     trivial: HashMap<StructId, bool>,
     /// Count statements per function when set.
     pub profile: bool,
@@ -140,6 +151,10 @@ pub struct Vm<'s> {
     /// `Engine.Actor`, when loaded: actors are never loaded lazily.
     actor_class: Option<StructId>,
     pub profile_counts: HashMap<StructId, u64>,
+    /// Calls and time spent per native function, when profiling.
+    pub profile_natives: HashMap<StructId, (u64, std::time::Duration)>,
+    /// Per-function call information, indexed by struct id.
+    func_info: Vec<Option<Rc<FuncInfo>>>,
     function_cache: HashMap<(StructId, Name), Option<StructId>>,
     /// Skip unimplemented natives instead of failing, counting them in `missing`.
     pub lenient: bool,
@@ -151,7 +166,7 @@ pub struct Vm<'s> {
 impl<'s> Vm<'s> {
     /// Builds a VM over a class database whose classes are already loaded.
     pub fn new(db: ClassDb<'s>) -> Self {
-        let mut native_decls = HashMap::new();
+        let mut native_decls = HashMap::default();
         for (i, s) in db.structs.iter().enumerate() {
             if s.kind == StructKind::Function && s.function_flags & FUNC_NATIVE != 0 && s.native_index != 0 {
                 native_decls.entry(s.native_index).or_insert(StructId(i as u32));
@@ -161,7 +176,7 @@ impl<'s> Vm<'s> {
         Vm {
             actor_class,
             db,
-            code: HashMap::new(),
+            code: HashMap::default(),
             native_decls,
             natives: natives::registry(),
             log: Vec::new(),
@@ -169,19 +184,21 @@ impl<'s> Vm<'s> {
             steps: 0,
             rng: 0x1234_5678,
             short_circuit: [None, None],
-            iterators: HashMap::new(),
-            latent: HashMap::new(),
-            state_pc: HashMap::new(),
+            iterators: HashMap::default(),
+            latent: HashMap::default(),
+            state_pc: HashMap::default(),
             state_changed: Default::default(),
             current_pc: 0,
             ext: None,
-            last_state: HashMap::new(),
-            native_cache: HashMap::new(),
-            trivial: HashMap::new(),
+            last_state: HashMap::default(),
+            native_cache: Vec::new(),
+            trivial: HashMap::default(),
             profile: false,
             trace_states: false,
-            profile_counts: HashMap::new(),
-            function_cache: HashMap::new(),
+            profile_counts: HashMap::default(),
+            profile_natives: HashMap::default(),
+            func_info: Vec::new(),
+            function_cache: HashMap::default(),
             lenient: false,
             missing: Default::default(),
         }
@@ -393,16 +410,23 @@ impl<'s> Vm<'s> {
     }
 
     fn read(&mut self, p: &Place, frame: &mut Frame) -> Value {
+        self.with_value(p, frame, Value::clone)
+    }
+
+    /// Calls `f` with the value at a place (`Value::Empty` when there is none), without copying it.
+    fn with_value<R>(&mut self, p: &Place, frame: &mut Frame, f: impl FnOnce(&Value) -> R) -> R {
+        let visit = f;
+        let empty = Value::Empty;
         let (mut cur, steps): (&Value, &[Step]) = match &p.root {
             Root::Temp(v) => (v, &p.path[..]),
             root => {
-                let Some(vals) = self.root_vec(root, frame) else { return Value::Empty };
+                let Some(vals) = self.root_vec(root, frame) else { return visit(&empty) };
                 match p.path.first() {
                     Some(Step::Slot(s)) => match vals.get(*s) {
                         Some(v) => (v, &p.path[1..]),
-                        None => return Value::Empty,
+                        None => return visit(&empty),
                     },
-                    _ => return Value::Empty,
+                    _ => return visit(&empty),
                 }
             }
         };
@@ -410,16 +434,16 @@ impl<'s> Vm<'s> {
             cur = match (step, cur) {
                 (Step::Slot(s), Value::Struct(f)) => match f.get(*s) {
                     Some(v) => v,
-                    None => return Value::Empty,
+                    None => return visit(&empty),
                 },
                 (Step::Index(i), Value::Array(a)) => match a.get(*i) {
                     Some(v) => v,
-                    None => return Value::Empty,
+                    None => return visit(&empty),
                 },
-                _ => return Value::Empty,
+                _ => return visit(&empty),
             };
         }
-        cur.clone()
+        visit(cur)
     }
 
     fn write(&mut self, p: &Place, frame: &mut Frame, value: Value) {
@@ -447,16 +471,16 @@ impl<'s> Vm<'s> {
 
     fn place(&mut self, e: &Expr, frame: &mut Frame, ctx: Option<ObjId>) -> VmResult<Place> {
         Ok(match e {
-            Expr::Local(s) => Place { root: Root::Local, path: vec![Step::Slot(*s)] },
+            Expr::Local(s) => Place { root: Root::Local, path: smallvec::smallvec![Step::Slot(*s)] },
             Expr::Instance(s) => match ctx.or(frame.this) {
-                Some(o) => Place { root: Root::Instance(o), path: vec![Step::Slot(*s)] },
-                None => Place { root: Root::Temp(Value::Empty), path: vec![] },
+                Some(o) => Place { root: Root::Instance(o), path: smallvec::smallvec![Step::Slot(*s)] },
+                None => Place { root: Root::Temp(Value::Empty), path: smallvec::SmallVec::new() },
             },
             Expr::Default(s) => {
                 let class = ctx.or(frame.this).and_then(|o| self.class_of(o));
                 match class {
-                    Some(c) => Place { root: Root::Default(c), path: vec![Step::Slot(*s)] },
-                    None => Place { root: Root::Temp(Value::Empty), path: vec![] },
+                    Some(c) => Place { root: Root::Default(c), path: smallvec::smallvec![Step::Slot(*s)] },
+                    None => Place { root: Root::Temp(Value::Empty), path: smallvec::SmallVec::new() },
                 }
             }
             Expr::ArrayElement(idx, arr) => {
@@ -477,7 +501,7 @@ impl<'s> Vm<'s> {
                 let mut p = self.place(s, frame, ctx)?;
                 if let Root::Temp(v) = &p.root {
                     let member = v.fields().get(*m).cloned().unwrap_or_default();
-                    return Ok(Place { root: Root::Temp(member), path: vec![] });
+                    return Ok(Place { root: Root::Temp(member), path: smallvec::SmallVec::new() });
                 }
                 p.path.push(Step::Slot(*m));
                 p
@@ -489,11 +513,11 @@ impl<'s> Vm<'s> {
                     None => {
                         let at = self.function_path(frame.func);
                         self.warn(format!("{at}: accessed none"));
-                        Place { root: Root::Temp(Value::Empty), path: vec![] }
+                        Place { root: Root::Temp(Value::Empty), path: smallvec::SmallVec::new() }
                     }
                 }
             }
-            other => Place { root: Root::Temp(self.eval(other, frame, ctx)?), path: vec![] },
+            other => Place { root: Root::Temp(self.eval(other, frame, ctx)?), path: smallvec::SmallVec::new() },
         })
     }
 
@@ -504,9 +528,13 @@ impl<'s> Vm<'s> {
             Expr::Const(v) => v.clone(),
             Expr::SelfObj => Value::Object(frame.this),
             Expr::Nothing | Expr::EndParms => Value::Empty,
-            Expr::Local(_)
-            | Expr::Instance(_)
-            | Expr::Default(_)
+            // The common reads, without building a place.
+            Expr::Local(s) => frame.locals.get(*s).cloned().unwrap_or_default(),
+            Expr::Instance(s) => match ctx.or(frame.this) {
+                Some(o) => self.db.objects.values(o).and_then(|v| v.get(*s)).cloned().unwrap_or_default(),
+                None => Value::Empty,
+            },
+            Expr::Default(_)
             | Expr::ArrayElement(..)
             | Expr::DynArrayElement(..)
             | Expr::StructMember(..) => {
@@ -541,10 +569,13 @@ impl<'s> Vm<'s> {
                 self.eval(inner, frame, ctx)?;
                 Value::Empty
             }
-            Expr::DynArrayLength(arr) => match self.eval(arr, frame, ctx)? {
-                Value::Array(a) => Value::Int(a.len() as i32),
-                _ => Value::Int(0),
-            },
+            Expr::DynArrayLength(arr) => {
+                let p = self.place(arr, frame, ctx)?;
+                Value::Int(self.with_value(&p, frame, |v| match v {
+                    Value::Array(a) => a.len() as i32,
+                    _ => 0,
+                }))
+            }
             Expr::DynArrayInsert(arr, at, count) | Expr::DynArrayRemove(arr, at, count) => {
                 let p = self.place(arr, frame, ctx)?;
                 let at = self.eval(at, frame, ctx)?.as_int().max(0) as usize;
@@ -660,6 +691,30 @@ impl<'s> Vm<'s> {
         })
     }
 
+    fn func_info(&mut self, f: StructId) -> Rc<FuncInfo> {
+        let i = f.0 as usize;
+        if let Some(Some(info)) = self.func_info.get(i) {
+            return info.clone();
+        }
+        let def = self.db.get(f);
+        let info = Rc::new(FuncInfo {
+            params: def
+                .props
+                .iter()
+                .filter(|p| p.flags & CPF_PARM != 0 && p.flags & CPF_RETURN_PARM == 0)
+                .map(|p| (p.slot, p.flags, p.ty.clone()))
+                .collect(),
+            ret: def.props.iter().find(|p| p.flags & CPF_RETURN_PARM != 0).map(|p| p.slot),
+            native: def.function_flags & FUNC_NATIVE != 0,
+            is_state: def.kind == StructKind::State,
+        });
+        if self.func_info.len() <= i {
+            self.func_info.resize(i + 1, None);
+        }
+        self.func_info[i] = Some(info.clone());
+        info
+    }
+
     /// Calls function `f` on `this` with argument expressions evaluated in `frame`.
     fn call(&mut self, f: StructId, this: Option<ObjId>, args: &[Expr], frame: &mut Frame, ctx: Option<ObjId>) -> VmResult<Value> {
         if let Some(i) = self.short_circuit.iter().position(|s| *s == Some(f))
@@ -672,18 +727,11 @@ impl<'s> Vm<'s> {
             }
             return Ok(Value::Bool(self.eval(&args[1], frame, None)?.as_bool()));
         }
-        let params: Vec<(usize, u32, PropType)> = self
-            .db
-            .get(f)
-            .props
-            .iter()
-            .filter(|p| p.flags & CPF_PARM != 0 && p.flags & CPF_RETURN_PARM == 0)
-            .map(|p| (p.slot, p.flags, p.ty.clone()))
-            .collect();
-        let native = self.db.get(f).function_flags & FUNC_NATIVE != 0;
-        let mut values = Vec::with_capacity(params.len());
+        let info = self.func_info(f);
+        let native = info.native;
+        let mut values = Vec::with_capacity(info.params.len());
         let mut out_places = Vec::new();
-        for (i, (slot, flags, ty)) in params.iter().enumerate() {
+        for (i, (_slot, flags, ty)) in info.params.iter().enumerate() {
             let arg = args.get(i);
             let v = match arg {
                 None | Some(Expr::Nothing) => None,
@@ -701,13 +749,13 @@ impl<'s> Vm<'s> {
                 None if native => Value::Empty,
                 None => self.db.default_value(ty),
             };
-            values.push((*slot, v));
+            values.push(v);
         }
         let _ = ctx;
-        let mut arg_values: Vec<Value> = values.iter().map(|(_, v)| v.clone()).collect();
-        let result = self.invoke(f, this, &mut arg_values)?;
+        let result = self.invoke(f, this, &mut values)?;
         for (i, p) in out_places {
-            self.write(&p, frame, arg_values[i].clone());
+            let v = std::mem::take(&mut values[i]);
+            self.write(&p, frame, v);
         }
         Ok(result)
     }
@@ -719,12 +767,16 @@ impl<'s> Vm<'s> {
         }
         let def = self.db.get(f);
         if def.function_flags & FUNC_NATIVE != 0 {
-            let native = match self.native_cache.get(&f) {
-                Some(n) => *n,
-                None => {
+            let native = match self.native_cache.get(f.0 as usize) {
+                Some(Some(n)) => *n,
+                _ => {
                     let key = self.function_path(f).to_ascii_lowercase();
                     let n = self.natives.get(&key).copied();
-                    self.native_cache.insert(f, n);
+                    let i = f.0 as usize;
+                    if self.native_cache.len() <= i {
+                        self.native_cache.resize(i + 1, None);
+                    }
+                    self.native_cache[i] = Some(n);
                     n
                 }
             };
@@ -738,19 +790,22 @@ impl<'s> Vm<'s> {
                 let ret = def.props.iter().find(|p| p.flags & CPF_RETURN_PARM != 0).map(|p| p.ty.clone());
                 return Ok(ret.map(|t| self.db.default_value(&t)).unwrap_or(Value::Empty));
             };
+            if self.profile {
+                let t = std::time::Instant::now();
+                let r = native(self, this, args);
+                let e = self.profile_natives.entry(f).or_default();
+                e.0 += 1;
+                e.1 += t.elapsed();
+                return r;
+            }
             return native(self, this, args);
         }
-        let params: Vec<usize> = def
-            .props
-            .iter()
-            .filter(|p| p.flags & CPF_PARM != 0 && p.flags & CPF_RETURN_PARM == 0)
-            .map(|p| p.slot)
-            .collect();
-        let ret = def.props.iter().find(|p| p.flags & CPF_RETURN_PARM != 0).map(|p| p.slot);
         let mut frame = Frame::new(f, this, def.defaults.clone());
-        for (i, slot) in params.iter().enumerate() {
-            if let Some(v) = args.get(i) {
-                frame.locals[*slot] = coerce(&frame.locals[*slot], v.clone());
+        let info = self.func_info(f);
+        let ret = info.ret;
+        for (i, (slot, _, _)) in info.params.iter().enumerate() {
+            if let Some(v) = args.get_mut(i) {
+                frame.locals[*slot] = coerce(&frame.locals[*slot], std::mem::take(v));
             }
         }
         let code = self.code(f);
@@ -758,12 +813,13 @@ impl<'s> Vm<'s> {
         let r = self.run(&code, &mut frame, 0);
         self.depth -= 1;
         r?;
-        for (i, slot) in params.iter().enumerate() {
+        // Out parameters are written back; arguments were moved into the frame, so every one is restored.
+        for (i, (slot, _, _)) in info.params.iter().enumerate() {
             if let Some(a) = args.get_mut(i) {
-                *a = frame.locals[*slot].clone();
+                *a = std::mem::take(&mut frame.locals[*slot]);
             }
         }
-        Ok(ret.map(|s| frame.locals[s].clone()).unwrap_or(Value::Empty))
+        Ok(ret.map(|s| std::mem::take(&mut frame.locals[s])).unwrap_or(Value::Empty))
     }
 
     pub(crate) fn run_state_code(&mut self, code: &Code, frame: &mut Frame, start: usize) -> VmResult<RunEnd> {
@@ -775,8 +831,9 @@ impl<'s> Vm<'s> {
 
     fn run(&mut self, code: &Code, frame: &mut Frame, start: usize) -> VmResult<RunEnd> {
         let mut pc = start;
-        let ret_slot = self.db.get(frame.func).props.iter().find(|p| p.flags & CPF_RETURN_PARM != 0).map(|p| p.slot);
-        let state_obj = frame.this.filter(|_| self.db.get(frame.func).kind == StructKind::State);
+        let info = self.func_info(frame.func);
+        let ret_slot = info.ret;
+        let state_obj = frame.this.filter(|_| info.is_state);
         let mut budget: u64 = 10_000_000;
         while pc < code.statements.len() {
             self.steps += 1;
@@ -892,7 +949,16 @@ impl<'s> Vm<'s> {
                     }
                 }
                 let body = self.current_pc + 1;
-                let items = iter(self, iter_this, &values)?;
+                let items = if self.profile {
+                    let t = std::time::Instant::now();
+                    let r = iter(self, iter_this, &values)?;
+                    let e = self.profile_natives.entry(f).or_default();
+                    e.0 += 1;
+                    e.1 += t.elapsed();
+                    r
+                } else {
+                    iter(self, iter_this, &values)?
+                };
                 if items.is_empty() {
                     return Ok(Flow::Jump(*end));
                 }

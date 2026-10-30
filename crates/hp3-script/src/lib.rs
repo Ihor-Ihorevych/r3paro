@@ -1,5 +1,6 @@
 //! UnrealScript virtual machine: class database, values, interpreter and native registry.
 
+pub mod fx;
 pub mod class_db;
 pub mod compile;
 pub mod names;

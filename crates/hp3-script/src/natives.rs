@@ -4,7 +4,7 @@
 //! Every function here is written from the script declarations and standard UnrealScript semantics
 //! (NOT yet verified against HP3's Core.dll).
 
-use std::collections::HashMap;
+use crate::fx::FxHashMap as HashMap;
 
 use crate::names::Name;
 use crate::value::{ObjId, Value};

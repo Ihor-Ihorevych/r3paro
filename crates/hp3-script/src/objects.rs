@@ -1,7 +1,7 @@
 //! The object table: every object scripts can reference, whether it lives in a package or was created at run
 //! time. Package objects get an entry when first referenced and are filled in when first needed.
 
-use std::collections::HashMap;
+use crate::fx::FxHashMap as HashMap;
 
 use crate::class_db::StructId;
 use crate::names::Name;

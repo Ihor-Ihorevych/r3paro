@@ -239,6 +239,12 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
     if vm.profile {
         let mut p: Vec<_> = vm.profile_counts.iter().map(|(f, n)| (*n, *f)).collect();
         p.sort_by(|a, b| b.0.cmp(&a.0));
+        let mut n: Vec<_> = vm.profile_natives.iter().map(|(f, (c, t))| (*t, *c, *f)).collect();
+        n.sort_by(|a, b| b.0.cmp(&a.0));
+        println!("time per native:");
+        for (t, c, f) in n.iter().take(15) {
+            println!("  {:>10.1} ms {c:9} calls {}", t.as_secs_f64() * 1000.0, vm.function_path(*f));
+        }
         println!("statements per function:");
         let top = std::env::var("HP3_PROFILE").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
         for (n, f) in p.iter().take(top) {

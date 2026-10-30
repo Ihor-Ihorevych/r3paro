@@ -1,6 +1,6 @@
 //! Global name table: case-insensitive interned strings, as script names compare.
 
-use std::collections::HashMap;
+use crate::fx::FxHashMap as HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub struct Name(pub u32);
@@ -13,11 +13,13 @@ impl Name {
 pub struct Names {
     strings: Vec<String>,
     index: HashMap<String, Name>,
+    /// Spellings already looked up, as written: finds them without lowercasing.
+    exact: HashMap<String, Name>,
 }
 
 impl Default for Names {
     fn default() -> Self {
-        let mut n = Names { strings: Vec::new(), index: HashMap::new() };
+        let mut n = Names { strings: Vec::new(), index: HashMap::default(), exact: HashMap::default() };
         n.intern("None");
         n
     }
@@ -25,13 +27,20 @@ impl Default for Names {
 
 impl Names {
     pub fn intern(&mut self, s: &str) -> Name {
-        let key = s.to_ascii_lowercase();
-        if let Some(&n) = self.index.get(&key) {
+        if let Some(&n) = self.exact.get(s) {
             return n;
         }
-        let n = Name(self.strings.len() as u32);
-        self.strings.push(s.to_string());
-        self.index.insert(key, n);
+        let key = s.to_ascii_lowercase();
+        let n = match self.index.get(&key) {
+            Some(&n) => n,
+            None => {
+                let n = Name(self.strings.len() as u32);
+                self.strings.push(s.to_string());
+                self.index.insert(key, n);
+                n
+            }
+        };
+        self.exact.insert(s.to_string(), n);
         n
     }
 

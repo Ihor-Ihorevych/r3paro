@@ -1,7 +1,7 @@
 //! Turns a struct's bytecode into an expression tree with every reference resolved: variable slots, functions,
 //! natives and jump targets as statement indices.
 
-use std::collections::HashMap;
+use crate::fx::FxHashMap as HashMap;
 use std::rc::Rc;
 
 use hp3_package::bytecode::{Operand, Token, op};
@@ -321,7 +321,7 @@ impl<'a, 'd> Compiler<'a, 'd> {
                 *target = by_offset.get(&(*target as u32)).copied().unwrap_or(end);
             }
         };
-        let mut labels = HashMap::new();
+        let mut labels = HashMap::default();
         for s in &mut statements {
             match s {
                 Expr::Jump(t) | Expr::JumpIfNot(t, _) | Expr::Case(t, _) | Expr::Iterator(_, t) => fix(t),

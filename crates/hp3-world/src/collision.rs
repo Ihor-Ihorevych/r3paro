@@ -4,7 +4,7 @@
 //! Written from the decoded data and standard swept-box techniques; NOT yet verified against HP3's Engine.dll,
 //! whose collision rules (cylinders, hulls, per-poly flags) will be matched against traces from the retail game.
 
-use std::collections::HashMap;
+use hp3_script::fx::FxHashMap as HashMap;
 
 use glam::Vec3;
 use hp3_assets::model::Model;
@@ -99,7 +99,7 @@ impl Collision {
         // Triangles in the cells the swept box covers.
         let min = start.min(end) - extent;
         let max = start.max(end) + extent;
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = hp3_script::fx::FxHashSet::default();
         for x in cell(min.x)..=cell(max.x) {
             for y in cell(min.y)..=cell(max.y) {
                 let Some(list) = self.grid.get(&(x, y)) else { continue };

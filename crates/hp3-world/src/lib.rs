@@ -10,7 +10,7 @@ pub mod input;
 pub mod natives;
 pub mod physics;
 
-use std::collections::HashMap;
+use hp3_script::fx::FxHashMap as HashMap;
 use std::rc::Rc;
 
 use hp3_assets::Asset;
@@ -37,6 +37,10 @@ pub struct World {
     pub timers: HashMap<ObjId, Timer>,
     pub actor_class: StructId,
     slots: HashMap<(StructId, Name), Option<usize>>,
+    /// Ticks run so far.
+    pub frame: u64,
+    /// Actors bucketed by position for radius queries, rebuilt when stale.
+    pub grid: Option<natives::Grid>,
     /// Script errors raised while running events, with where they happened.
     pub errors: Vec<String>,
     pub spawned: usize,
@@ -44,7 +48,7 @@ pub struct World {
     pub input: input::Input,
     pub collision: collision::Collision,
     /// Pairs of actors currently touching (lower id first).
-    pub touching: std::collections::HashSet<(ObjId, ObjId)>,
+    pub touching: hp3_script::fx::FxHashSet<(ObjId, ObjId)>,
     pub anim: anim::Animation,
     pub nav: nav::Navigation,
     /// Opacity set by `SetOpacity` (1 when absent).
@@ -168,9 +172,11 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Res
         game: None,
         player: None,
         time: 0.0,
-        timers: HashMap::new(),
+        timers: HashMap::default(),
         actor_class,
-        slots: HashMap::new(),
+        slots: HashMap::default(),
+        frame: 0,
+        grid: None,
         errors: Vec::new(),
         spawned: 0,
         input: input::Input::from_config(&config),
@@ -230,6 +236,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     let actors = {
         let w = world(vm);
         w.time += dt;
+        w.frame += 1;
         w.actors.clone()
     };
     if let Some(li) = world(vm).level_info {

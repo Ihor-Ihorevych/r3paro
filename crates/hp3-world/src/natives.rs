@@ -56,6 +56,71 @@ pub fn spawn(vm: &mut Vm<'_>, spawner: Option<ObjId>, a: &[Value]) -> Result<Val
     Ok(Value::Object(Some(obj)))
 }
 
+/// Actors bucketed into vertical columns of `GRID_CELL` units by where they were when it was built.
+use hp3_script::fx::FxHashMap as HashMap;
+
+pub struct Grid {
+    frame: u64,
+    actors: usize,
+    cells: HashMap<(i32, i32), Vec<ObjId>>,
+}
+
+const GRID_CELL: f32 = 1024.0;
+/// How far an actor may have moved since the grid was built and still be found.
+const GRID_SLACK: f32 = 512.0;
+
+fn location_slot(vm: &mut Vm<'_>, a: ObjId) -> Option<usize> {
+    crate::slot(vm, a, "Location")
+}
+
+fn location_at(vm: &Vm<'_>, a: ObjId, slot: usize) -> Option<glam::Vec3> {
+    match vm.db.objects.values(a)?.get(slot)? {
+        Value::Struct(f) if f.len() >= 3 => Some(glam::Vec3::new(f[0].as_float(), f[1].as_float(), f[2].as_float())),
+        _ => None,
+    }
+}
+
+/// Actors that may be within `radius` of `center` (a superset; callers check the distance).
+fn actors_near(vm: &mut Vm<'_>, center: glam::Vec3, radius: f32, loc_slot: usize) -> Vec<ObjId> {
+    let (frame, count) = {
+        let w = world(vm);
+        (w.frame, w.actors.len())
+    };
+    let stale = world(vm).grid.as_ref().is_none_or(|g| g.frame != frame || g.actors != count);
+    if stale {
+        let actors = world(vm).actors.clone();
+        let mut cells: HashMap<(i32, i32), Vec<ObjId>> = HashMap::default();
+        for a in actors {
+            if let Some(p) = location_at(vm, a, loc_slot) {
+                cells.entry(((p.x / GRID_CELL).floor() as i32, (p.y / GRID_CELL).floor() as i32)).or_default().push(a);
+            }
+        }
+        world(vm).grid = Some(Grid { frame, actors: count, cells });
+    }
+    let r = radius + GRID_SLACK;
+    let (x0, x1) = (((center.x - r) / GRID_CELL).floor() as i32, ((center.x + r) / GRID_CELL).floor() as i32);
+    let (y0, y1) = (((center.y - r) / GRID_CELL).floor() as i32, ((center.y + r) / GRID_CELL).floor() as i32);
+    let g = world(vm).grid.as_ref().expect("grid built above");
+    let mut out = Vec::new();
+    // Very large radii cover most cells: walk the cells that exist instead.
+    if ((x1 - x0 + 1) as i64) * ((y1 - y0 + 1) as i64) > g.cells.len() as i64 {
+        for ((cx, cy), v) in &g.cells {
+            if (x0..=x1).contains(cx) && (y0..=y1).contains(cy) {
+                out.extend_from_slice(v);
+            }
+        }
+    } else {
+        for cx in x0..=x1 {
+            for cy in y0..=y1 {
+                if let Some(v) = g.cells.get(&(cx, cy)) {
+                    out.extend_from_slice(v);
+                }
+            }
+        }
+    }
+    out
+}
+
 fn actors_of(vm: &mut Vm<'_>, class: Option<ObjId>, tag: Name) -> Vec<ObjId> {
     let class = class.and_then(|c| vm.class_of(c));
     let actors = world(vm).actors.clone();
@@ -370,16 +435,40 @@ pub fn register(vm: &mut Vm<'_>) {
             let Some(o) = this else { return Ok(Vec::new()) };
             let radius = a.get(2).map(Value::as_float).unwrap_or(0.0);
             let center = if given(a, 3) { vec3(&a[3]) } else { vec3(&get(vm, o, "Location")) };
-            let found = actors_of(vm, obj_arg(a, 0), Name::NONE);
-            let mut out = Vec::new();
-            for x in found {
-                let p = vec3(&get(vm, x, "Location"));
-                let d2 = (0..3).map(|i| (p[i] - center[i]).powi(2)).sum::<f32>();
-                if d2 <= radius * radius {
-                    let mut item = a.to_vec();
-                    item[1] = Value::Object(Some(x));
-                    out.push(item);
+            // Distance first, straight from the location slot every actor shares; class checks only in range.
+            let class = obj_arg(a, 0).and_then(|c| vm.class_of(c));
+            let Some(loc_slot) = location_slot(vm, o) else { return Ok(Vec::new()) };
+            let r2 = radius * radius;
+            let center = glam::Vec3::from(center);
+            let mut actors = actors_near(vm, center, radius, loc_slot);
+            // Creation order, as a full scan of the actor list gives.
+            actors.sort_unstable();
+            if std::env::var("HP3_GRID_CHECK").is_ok() {
+                let all = world(vm).actors.clone();
+                let brute = all.iter().filter(|&&x| location_at(vm, x, loc_slot).is_some_and(|p| p.distance_squared(center) <= r2)).count();
+                let grid = actors.iter().filter(|&&x| location_at(vm, x, loc_slot).is_some_and(|p| p.distance_squared(center) <= r2)).count();
+                if brute != grid {
+                    eprintln!("grid mismatch: brute {brute} grid {grid} radius {radius}");
                 }
+            }
+            let mut out = Vec::new();
+            for &x in &actors {
+                let e = vm.db.objects.get(x);
+                if e.deleted {
+                    continue;
+                }
+                let Some(p) = location_at(vm, x, loc_slot) else { continue };
+                if p.distance_squared(center) > r2 {
+                    continue;
+                }
+                if let (Some(want), Some(have)) = (class, e.class)
+                    && !vm.is_child_of(have, want)
+                {
+                    continue;
+                }
+                let mut item = a.to_vec();
+                item[1] = Value::Object(Some(x));
+                out.push(item);
             }
             Ok(out)
         });

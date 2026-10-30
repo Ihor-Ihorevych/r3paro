@@ -4,7 +4,7 @@
 //! The layout does not follow any native memory layout: each property gets `array_dim` consecutive slots in a
 //! `Vec<Value>`, inherited properties first. Natives find properties by name.
 
-use std::collections::HashMap;
+use crate::fx::FxHashMap as HashMap;
 use std::rc::Rc;
 
 use hp3_package::bytecode::Token;
@@ -142,9 +142,9 @@ impl<'s> ClassDb<'s> {
             set,
             names: Names::default(),
             structs: Vec::new(),
-            by_key: HashMap::new(),
-            package_names: HashMap::new(),
-            native_classes: HashMap::new(),
+            by_key: HashMap::default(),
+            package_names: HashMap::default(),
+            native_classes: HashMap::default(),
             objects: ObjectTable::default(),
             stats: LoadStats::default(),
         }
@@ -268,7 +268,7 @@ impl<'s> ClassDb<'s> {
             kind,
             super_,
             props: Vec::new(),
-            by_name: HashMap::new(),
+            by_name: HashMap::default(),
             slots: 0,
             defaults: Vec::new(),
             pkg: pkg.clone(),
@@ -280,11 +280,11 @@ impl<'s> ClassDb<'s> {
             function_flags: function.1,
             operator_precedence: function.2,
             state_info,
-            functions: HashMap::new(),
-            states: HashMap::new(),
+            functions: HashMap::default(),
+            states: HashMap::default(),
         });
-        let mut functions = HashMap::new();
-        let mut states = HashMap::new();
+        let mut functions = HashMap::default();
+        let mut states = HashMap::default();
         let mut own = Vec::new();
         let mut child = structure.children;
         let mut guard = 0;
@@ -455,8 +455,8 @@ impl<'s> ClassDb<'s> {
                         function_flags: 0,
                         operator_precedence: 0,
                         state_info: (0, 0, 0, 0),
-                        functions: HashMap::new(),
-                        states: HashMap::new(),
+                        functions: HashMap::default(),
+                        states: HashMap::default(),
                     };
                     self.structs.push(def);
                     id

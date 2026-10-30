@@ -5,7 +5,9 @@
 //! Engine.dll. Reachability is a simplified line test (no jump or fall analysis) and route costs are the
 //! reach specs' distances plus the nodes' `cost` and `ExtraCost`.
 
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
+
+use hp3_script::fx::FxHashMap as HashMap;
 
 use glam::Vec3;
 use hp3_script::vm::Latent;
@@ -58,7 +60,7 @@ fn graph(vm: &mut Vm<'_>) -> std::rc::Rc<Graph> {
     }
     let mut g = Graph::default();
     let actors = world(vm).actors.clone();
-    let mut index = HashMap::new();
+    let mut index = HashMap::default();
     if let Some(nav) = vm.db.find("NavigationPoint") {
         for a in actors {
             let e = vm.db.objects.get(a);

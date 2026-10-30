@@ -274,7 +274,7 @@ pub fn update_touching(vm: &mut Vm<'_>) {
         let moving = get(vm, a, "Physics").as_byte() != PHYS_NONE && !get(vm, a, "bStatic").as_bool();
         colliders.push((a, vec(&get(vm, a, "Location")), e.x, e.z, moving));
     }
-    let mut now: std::collections::HashSet<(ObjId, ObjId)> = Default::default();
+    let mut now: hp3_script::fx::FxHashSet<(ObjId, ObjId)> = Default::default();
     for (i, m) in colliders.iter().enumerate() {
         if !m.4 {
             continue;

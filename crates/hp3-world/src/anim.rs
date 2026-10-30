@@ -4,7 +4,7 @@
 //! Written from the script declarations and standard Unreal animation behaviour; NOT yet verified against
 //! HP3's Engine.dll (blending, tweening and notifies are approximations or missing).
 
-use std::collections::HashMap;
+use hp3_script::fx::FxHashMap as HashMap;
 use std::rc::Rc;
 
 use hp3_anim::AnimSet;

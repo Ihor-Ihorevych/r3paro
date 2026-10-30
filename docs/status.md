@@ -26,8 +26,10 @@ Milestones are from the plan (M0 to M12).
   game class from the config (`HGame.HGame`), runs begin-play and the player login, and ticks events, timers
   and state code. `hp3-run levels <HP3 folder>` does this for every map: all 34 load, 33 log in a player
   (Entry has none, as it should), and play raises no script errors. Sound natives are still placeholders.
-- Known issue: the interpreter runs at about 0.5 µs per statement; Adv1 needs about 9 ms per tick and
-  HP3_InsideHub about 160 ms. A performance pass is planned (fewer value copies, faster property access).
+- Performance: the interpreter runs at about 0.2 to 0.5 µs per statement; on a laptop Adv1 needs about 3 ms
+  per tick and HP3_InsideHub, the largest map, 12 to 16 ms (it was 160 ms: radius queries now use a spatial
+  grid, and calls cache their function information). Runs are deterministic: hash maps use a fixed hash, so
+  timers, latent actions and events are processed in the same order every time.
 - **M5 Playable render, in progress**: `hp3 <HP3 folder> [map]` opens an SDL3 window and draws the level with
   wgpu while its scripts run at 60 Hz. Keyboard and mouse go through the game's key bindings; the view is the
   game's own `PlayerCalcView`, or a camera behind the pawn while the game's camera is not running (a map loaded

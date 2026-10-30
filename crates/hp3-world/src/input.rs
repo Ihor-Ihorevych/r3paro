@@ -5,7 +5,7 @@
 //! Written from the ini format and the scripts that read the properties; NOT yet verified against HP3's
 //! Engine.dll input code.
 
-use std::collections::{HashMap, HashSet};
+use hp3_script::fx::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use hp3_script::{ObjId, Value, Vm};
 
@@ -99,8 +99,8 @@ fn param(words: &[&str], name: &str) -> Option<f32> {
 /// tick.
 pub fn apply(vm: &mut Vm<'_>, pc: ObjId) {
     let input = std::mem::take(&mut world(vm).input);
-    let mut axes: HashMap<String, f32> = HashMap::new();
-    let mut buttons: HashMap<String, bool> = HashMap::new();
+    let mut axes: HashMap<String, f32> = HashMap::default();
+    let mut buttons: HashMap<String, bool> = HashMap::default();
     let mut execs: Vec<String> = Vec::new();
     let held: Vec<String> = input.held.iter().cloned().collect();
     let mut keys: Vec<(String, f32)> = held.into_iter().map(|k| (k, 1.0)).collect();
