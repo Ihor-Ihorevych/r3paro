@@ -2,11 +2,14 @@
 //!
 //! `read_native` dispatches on the native class `hp3_package::object` picked for the export.
 
+pub mod anim;
 pub mod common;
 pub mod font;
 pub mod karma;
 pub mod level;
+pub mod lod_mesh;
 pub mod model;
+pub mod skeletal;
 pub mod sound;
 pub mod static_mesh;
 pub mod texture;
@@ -31,13 +34,16 @@ pub enum Asset {
     MeshProps(karma::MeshProps),
     Procedural(texture::Procedural),
     Font(font::Font),
+    MeshAnimation(Box<anim::MeshAnimation>),
+    SkeletalMesh(Box<skeletal::SkeletalMesh>),
+    VertMesh(Box<lod_mesh::VertMesh>),
 }
 
 /// Decodes the native data of `class` from `r`. `None` when the class's layout is not known yet.
 pub fn read_native(class: &str, pkg: &Package, r: &mut Reader<'_>) -> Option<Result<Asset>> {
     Some(match class {
         "Palette" => texture::read_palette(r).map(Asset::Palette),
-        "Texture" | "Cubemap" => texture::read_texture(r).map(Asset::Texture),
+        "Texture" | "Cubemap" | "MovieTexture" => texture::read_texture(r).map(Asset::Texture),
         "FireTexture" | "WetTexture" | "IceTexture" | "WaterTexture" | "WaveTexture" => {
             texture::read_procedural(class, r).map(Asset::Procedural)
         }
@@ -48,6 +54,9 @@ pub fn read_native(class: &str, pkg: &Package, r: &mut Reader<'_>) -> Option<Res
         "StaticMeshInstance" => level::read_static_mesh_instance(r).map(Asset::StaticMeshInstance),
         "Level" => level::read_level(r).map(|l| Asset::Level(Box::new(l))),
         "TerrainSector" => level::read_terrain_sector(r).map(Asset::TerrainSector),
+        "VertMesh" => lod_mesh::read_vert_mesh(r).map(|m| Asset::VertMesh(Box::new(m))),
+        "SkeletalMesh" => skeletal::read_skeletal_mesh(r).map(|m| Asset::SkeletalMesh(Box::new(m))),
+        "MeshAnimation" => anim::read_mesh_animation(r).map(|a| Asset::MeshAnimation(Box::new(a))),
         "Font" => font::read_font(pkg.summary.version, r).map(Asset::Font),
         "KMeshProps" => karma::read_mesh_props(r).map(Asset::MeshProps),
         "ConvexVolume" => model::read_convex_volume(r).map(Asset::ConvexVolume),
