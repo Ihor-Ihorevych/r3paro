@@ -97,10 +97,10 @@ Milestones are from the plan (M0 to M12).
   front (`Howl rate=.8`), `AnimEnd` reaching the pawn's controller, `bMoveToSuccess`, reachability against the
   level's geometry only, movers (keyframe interpolation, riders, moving collision) and the save request's level
   action being cleared. Saving itself is not implemented. No sound or dialogue timing yet: lines wait their
-  default time. Known issue: after the intro the game camera sits outside the corridor wall. Making
-  `TraceActors` report static meshes or BSP fixes that but sends the camera's direction search (`UpdateDistance`)
-  into a near-endless loop in enclosed maps (the train, DungeonHUB), so it is left out until that loop's exit
-  condition is understood.
+  default time.
+  Harry now walks the corridor at full speed and the camera stays inside it. Known issue: the companions do not
+  follow properly yet (Ron stands still while Harry runs, and `Run_Back` is looped for a pawn that is not
+  moving), so their running animations look wrong.
 - Skeletal meshes: a material slot past the mesh's textures takes the last texture (Hermione's hair).
 - M8 onwards: not started.
 
