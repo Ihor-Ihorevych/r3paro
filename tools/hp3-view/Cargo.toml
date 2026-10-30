@@ -1,0 +1,14 @@
+[package]
+name = "hp3-view"
+description = "Static map and asset viewer; renders screenshots headless."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+hp3-package.workspace = true
+hp3-assets.workspace = true
+hp3-render = { path = "../../crates/hp3-render" }
+glam = "0.30"
+png = "0.17"

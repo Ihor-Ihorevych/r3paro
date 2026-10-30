@@ -7,6 +7,7 @@ pub mod common;
 pub mod font;
 pub mod karma;
 pub mod level;
+pub mod loader;
 pub mod lod_mesh;
 pub mod model;
 pub mod skeletal;

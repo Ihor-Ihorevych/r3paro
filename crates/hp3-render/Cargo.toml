@@ -1,8 +1,16 @@
 [package]
 name = "hp3-render"
+description = "The wgpu renderer."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
+hp3-package.workspace = true
+hp3-assets.workspace = true
+wgpu = "26"
+glam = { version = "0.30", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+log.workspace = true

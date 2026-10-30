@@ -116,6 +116,31 @@ impl PackageSet {
         self.loaded.borrow_mut().clear();
     }
 
+    /// Package and export index an object reference of `pkg` points to, following imports into other packages.
+    pub fn resolve(&self, pkg: &Rc<Package>, r: ObjRef) -> Option<(Rc<Package>, usize)> {
+        if let Some(e) = r.export() {
+            return (e < pkg.exports.len()).then(|| (pkg.clone(), e));
+        }
+        let i = r.import()?;
+        let imp = pkg.imports.get(i)?;
+        let class = pkg.name(imp.class_name).to_string();
+        let mut parts = Vec::new();
+        let mut cur = r;
+        while !cur.is_none() {
+            parts.push(pkg.ref_name(cur).to_string());
+            cur = pkg.ref_outer(cur);
+            if parts.len() > 32 {
+                return None;
+            }
+        }
+        let top = parts.pop()?;
+        parts.reverse();
+        let target = self.get(&top).ok()?;
+        let path = format!("{}@{class}", parts.join("."));
+        let index = target.find_export_path(&path).or_else(|| target.find_export_path(&parts.join(".")))?;
+        Some((target, index))
+    }
+
     /// Class hierarchy of an export, most derived first, ending in `Object`.
     pub fn export_chain(&self, pkg: &Package, index: usize) -> Rc<Vec<String>> {
         let class = pkg.exports[index].class;
