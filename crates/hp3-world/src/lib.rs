@@ -35,6 +35,7 @@ pub struct World {
     /// Script errors raised while running events, with where they happened.
     pub errors: Vec<String>,
     pub spawned: usize,
+    pub config: hp3_core::Config,
 }
 
 /// The world stored in the VM. Panics if no level is loaded.
@@ -97,7 +98,9 @@ pub fn fire(vm: &mut Vm<'_>, obj: ObjId, event: &str, args: &mut [Value]) -> Val
 
 /// Loads `map` into the VM, spawns the game (`Package.Class`, e.g. `HGame.HGame`), runs the begin-play
 /// sequence of its actors and logs in the local player.
-pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, game_class: Option<&str>) -> Result<(), VmError> {
+pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Result<(), VmError> {
+    let game_class = config.get("Engine.Engine", "DefaultGame").map(str::to_string);
+    let game_class = game_class.as_deref();
     let actor_class = vm.db.find("Actor").ok_or_else(|| VmError::Runtime("no Actor class".into()))?;
     natives::register(vm);
     // Every scripted object of the map, so references between them resolve to live instances.
@@ -150,6 +153,7 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, game_class: Option<&str>) -> Res
         slots: HashMap::new(),
         errors: Vec::new(),
         spawned: 0,
+        config,
     }));
     // The game exists before the level's actors begin play; they read Level.Game.
     if let Some(gc) = game_class.and_then(|g| find_object(vm, g)) {

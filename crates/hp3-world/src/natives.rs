@@ -11,6 +11,11 @@ fn obj_arg(a: &[Value], i: usize) -> Option<ObjId> {
     a.get(i).and_then(Value::as_obj)
 }
 
+fn vec3(v: &Value) -> [f32; 3] {
+    let f = v.fields();
+    [0, 1, 2].map(|i| f.get(i).map(Value::as_float).unwrap_or(0.0))
+}
+
 fn given(a: &[Value], i: usize) -> bool {
     !matches!(a.get(i), None | Some(Value::Empty))
 }
@@ -325,6 +330,117 @@ pub fn register(vm: &mut Vm<'_>) {
     vm.register("Projector.AttachProjector", |_vm, _this, _a| Ok(Value::Empty));
     vm.register("Projector.DetachProjector", |_vm, _this, _a| Ok(Value::Empty));
     vm.register("SceneManager.GetTotalSceneTime", |_vm, _this, _a| Ok(Value::Float(0.0)));
+    vm.register("Object.Localize", |vm, _this, a| {
+        let (section, key, package) = (a[0].as_str().to_string(), a[1].as_str().to_string(), a[2].as_str().to_string());
+        let found = world(vm).config.localize(&package, &section, &key);
+        Ok(Value::Str(found.unwrap_or_else(|| format!("<?{}?{package}.{section}.{key}?>", world(vm).config.language))))
+    });
+    vm.register_iterator("Actor.TouchingActors", |vm, this, a| {
+        let Some(o) = this else { return Ok(Vec::new()) };
+        let touching = get(vm, o, "Touching");
+        let class = obj_arg(a, 0).and_then(|c| vm.class_of(c));
+        let mut out = Vec::new();
+        let list: Vec<Value> = match touching {
+            Value::Array(v) => v,
+            other => vec![other],
+        };
+        for t in list.iter().filter_map(Value::as_obj) {
+            let ok = match (class, vm.db.objects.get(t).class) {
+                (Some(want), Some(have)) => vm.is_child_of(have, want),
+                _ => true,
+            };
+            if ok && !vm.db.objects.get(t).deleted {
+                out.push(vec![a[0].clone(), Value::Object(Some(t))]);
+            }
+        }
+        Ok(out)
+    });
+    vm.register("Object.SetPropertyText", |vm, this, a| {
+        if let Some(o) = this {
+            let (prop, text) = (a[0].as_str().to_string(), a[1].as_str().to_string());
+            let cur = get(vm, o, &prop);
+            let v = match cur {
+                Value::Int(_) => Value::Int(text.trim().parse().unwrap_or(0)),
+                Value::Float(_) => Value::Float(text.trim().parse().unwrap_or(0.0)),
+                Value::Byte(_) => Value::Byte(text.trim().parse().unwrap_or(0)),
+                Value::Bool(_) => Value::Bool(text.trim().eq_ignore_ascii_case("true") || text.trim() == "1"),
+                Value::Name(_) => Value::Name(vm.db.names.intern(text.trim())),
+                Value::Str(_) => Value::Str(text),
+                Value::Object(_) => Value::Object(crate::find_object(vm, text.trim())),
+                _ => return Ok(Value::Empty),
+            };
+            set(vm, o, &prop, v);
+        }
+        Ok(Value::Empty)
+    });
+    vm.register("Object.GetPropertyText", |vm, this, a| {
+        let Some(o) = this else { return Ok(Value::Str(String::new())) };
+        let v = get(vm, o, a[0].as_str());
+        Ok(Value::Str(match v {
+            Value::Int(i) => i.to_string(),
+            Value::Float(f) => hp3_script::natives::float_to_string(f),
+            Value::Byte(b) => b.to_string(),
+            Value::Bool(b) => if b { "True".into() } else { "False".into() },
+            Value::Name(n) => vm.db.names.get(n).to_string(),
+            Value::Str(s) => s,
+            Value::Object(Some(x)) => hp3_script::natives::object_path(vm, x),
+            _ => String::new(),
+        }))
+    });
+    // Spatial iterators: (BaseClass, out Actor, Radius, optional Loc). Visibility needs traces, which do not
+    // exist yet, so the visible variants match everything in range.
+    for name in ["Actor.RadiusActors", "Actor.VisibleActors", "Actor.VisibleCollidingActors", "Actor.CollidingActors"] {
+        vm.register_iterator(name, |vm, this, a| {
+            let Some(o) = this else { return Ok(Vec::new()) };
+            let radius = a.get(2).map(Value::as_float).unwrap_or(0.0);
+            let center = if given(a, 3) { vec3(&a[3]) } else { vec3(&get(vm, o, "Location")) };
+            let found = actors_of(vm, obj_arg(a, 0), Name::NONE);
+            let mut out = Vec::new();
+            for x in found {
+                let p = vec3(&get(vm, x, "Location"));
+                let d2 = (0..3).map(|i| (p[i] - center[i]).powi(2)).sum::<f32>();
+                if d2 <= radius * radius {
+                    let mut item = a.to_vec();
+                    item[1] = Value::Object(Some(x));
+                    out.push(item);
+                }
+            }
+            Ok(out)
+        });
+    }
+    vm.register_iterator("Actor.BasedActors", |vm, this, a| {
+        let found: Vec<ObjId> = actors_of(vm, obj_arg(a, 0), Name::NONE).into_iter().filter(|&x| get(vm, x, "Base").as_obj() == this).collect();
+        Ok(found.into_iter().map(|x| vec![a[0].clone(), Value::Object(Some(x))]).collect())
+    });
+    // HP3: a duplicate of this object.
+    vm.register("Object.Copy", |vm, this, _a| {
+        let Some(o) = this else { return Ok(Value::Object(None)) };
+        let e = vm.db.objects.get(o).clone();
+        let (Some(class), Some(values)) = (e.class, vm.db.objects.values(o).cloned()) else { return Ok(Value::Object(None)) };
+        let copy = vm.db.objects.add(e.name, class, values);
+        Ok(Value::Object(Some(copy)))
+    });
+    vm.register("LevelInfo.IsDemoBuild", |_vm, _this, _a| Ok(Value::Bool(false)));
+    vm.register("Actor.AttachToBone", |vm, this, a| {
+        if let Some(att) = obj_arg(a, 0) {
+            set(vm, att, "Base", Value::Object(this));
+        }
+        Ok(Value::Bool(true))
+    });
+    vm.register("Actor.GetAnimParams", |vm, this, a| {
+        if let Some(o) = this
+            && a.len() >= 4
+        {
+            a[1] = get(vm, o, "AnimSequence");
+            a[2] = Value::Float(0.0);
+            a[3] = Value::Float(1.0);
+        }
+        Ok(Value::Empty)
+    });
+    // Skin tint and animation timing: placeholders until rendering and animation exist.
+    vm.register("Actor.SetSkinColor", |_vm, _this, _a| Ok(Value::Empty));
+    vm.register("Actor.SetAnimTime", |_vm, _this, _a| Ok(Value::Empty));
+    vm.register("Actor.AnimBlendToAlpha", |_vm, _this, _a| Ok(Value::Empty));
     vm.register("Object.DynamicLoadObject", |vm, _this, a| {
         let path = a[0].as_str().to_string();
         let found = crate::find_object(vm, &path);

@@ -48,8 +48,8 @@ impl Vm<'_> {
     pub fn event(&mut self, obj: ObjId, name: &str, args: &mut [Value]) -> VmResult<Value> {
         let Some(n) = self.db.names.find(name) else { return Ok(Value::Empty) };
         match self.find_function(Some(obj), None, n) {
-            Some(f) => self.invoke(f, Some(obj), args),
-            None => Ok(Value::Empty),
+            Some(f) if !self.is_trivial(f) => self.invoke(f, Some(obj), args),
+            _ => Ok(Value::Empty),
         }
     }
 

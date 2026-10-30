@@ -131,6 +131,12 @@ pub struct Vm<'s> {
     current_pc: usize,
     /// World data of the crate that embeds the VM.
     pub ext: Option<Box<dyn std::any::Any>>,
+    native_cache: HashMap<StructId, Option<NativeFn>>,
+    trivial: HashMap<StructId, bool>,
+    /// Count statements per function when set.
+    pub profile: bool,
+    pub profile_counts: HashMap<StructId, u64>,
+    function_cache: HashMap<(StructId, Name), Option<StructId>>,
     /// Skip unimplemented natives instead of failing, counting them in `missing`.
     pub lenient: bool,
     pub missing: std::collections::BTreeMap<String, u64>,
@@ -164,6 +170,11 @@ impl<'s> Vm<'s> {
             current_pc: 0,
             ext: None,
             last_state: HashMap::new(),
+            native_cache: HashMap::new(),
+            trivial: HashMap::new(),
+            profile: false,
+            profile_counts: HashMap::new(),
+            function_cache: HashMap::new(),
             lenient: false,
             missing: Default::default(),
         }
@@ -192,8 +203,25 @@ impl<'s> Vm<'s> {
         }
     }
 
+    /// Whether a script function does nothing (an empty event body): only returns and no-ops.
+    pub fn is_trivial(&mut self, f: StructId) -> bool {
+        if let Some(&t) = self.trivial.get(&f) {
+            return t;
+        }
+        let t = self.db.get(f).function_flags & FUNC_NATIVE == 0 && {
+            let code = self.code(f);
+            code.statements.iter().all(|s| {
+                matches!(s, Expr::Nothing | Expr::ReturnNothing | Expr::EndParms)
+                    || matches!(s, Expr::Return(v) if matches!(**v, Expr::Nothing))
+            })
+        };
+        self.trivial.insert(f, t);
+        t
+    }
+
     /// Adds or replaces a native, by `Class.Function`.
     pub fn register(&mut self, path: &str, f: NativeFn) {
+        self.native_cache.clear();
         self.natives.insert(path.to_ascii_lowercase(), f);
     }
 
@@ -248,26 +276,33 @@ impl<'s> Vm<'s> {
     }
 
     /// Finds a function by name for an object: its current state first, then its class chain.
-    pub fn find_function(&self, obj: Option<ObjId>, class: Option<StructId>, name: Name) -> Option<StructId> {
+    pub fn find_function(&mut self, obj: Option<ObjId>, class: Option<StructId>, name: Name) -> Option<StructId> {
         if let Some(o) = obj
             && let ObjKind::Instance { state: Some(st), .. } = &self.db.objects.get(o).kind
+            && let Some(f) = self.lookup_in_chain(*st, name)
         {
-            let mut s = Some(*st);
-            while let Some(sid) = s {
-                if let Some(&f) = self.db.get(sid).functions.get(&name) {
-                    return Some(f);
-                }
-                s = self.db.get(sid).super_;
-            }
+            return Some(f);
         }
-        let mut c = class.or_else(|| obj.and_then(|o| self.class_of(o)));
+        let c = class.or_else(|| obj.and_then(|o| self.class_of(o)))?;
+        self.lookup_in_chain(c, name)
+    }
+
+    /// A function declared in `start` or its super chain, cached per (struct, name).
+    fn lookup_in_chain(&mut self, start: StructId, name: Name) -> Option<StructId> {
+        if let Some(r) = self.function_cache.get(&(start, name)) {
+            return *r;
+        }
+        let mut c = Some(start);
+        let mut found = None;
         while let Some(cid) = c {
             if let Some(&f) = self.db.get(cid).functions.get(&name) {
-                return Some(f);
+                found = Some(f);
+                break;
             }
             c = self.db.get(cid).super_;
         }
-        None
+        self.function_cache.insert((start, name), found);
+        found
     }
 
     /// Creates an instance of a class with its default values.
@@ -607,9 +642,17 @@ impl<'s> Vm<'s> {
         }
         let def = self.db.get(f);
         if def.function_flags & FUNC_NATIVE != 0 {
-            let path = self.function_path(f);
-            let key = path.to_ascii_lowercase();
-            let Some(native) = self.natives.get(&key).copied() else {
+            let native = match self.native_cache.get(&f) {
+                Some(n) => *n,
+                None => {
+                    let key = self.function_path(f).to_ascii_lowercase();
+                    let n = self.natives.get(&key).copied();
+                    self.native_cache.insert(f, n);
+                    n
+                }
+            };
+            let Some(native) = native else {
+                let path = self.function_path(f);
                 if !self.lenient {
                     return Err(VmError::Unimplemented(path));
                 }
@@ -665,6 +708,9 @@ impl<'s> Vm<'s> {
                 return Err(VmError::Runtime(format!("runaway loop in {}", self.function_path(frame.func))));
             }
             self.current_pc = pc;
+            if self.profile {
+                *self.profile_counts.entry(frame.func).or_default() += 1;
+            }
             let flow = self.exec(&code.statements[pc], code, frame, ret_slot)?;
             // State code stops when the object leaves the state or a latent action starts.
             if let Some(o) = state_obj {

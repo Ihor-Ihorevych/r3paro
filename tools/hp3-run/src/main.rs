@@ -38,9 +38,10 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
     let mut db = ClassDb::new(&set);
     db.load_all_classes();
     let mut vm = hp3_script::Vm::new(db);
+    vm.profile = std::env::var_os("HP3_PROFILE").is_some();
     let pkg = set.get(map)?;
     let t = std::time::Instant::now();
-    hp3_world::load(&mut vm, &pkg, Some("HGame.HGame"))?;
+    hp3_world::load(&mut vm, &pkg, hp3_core::Config::load(root))?;
     let load_time = t.elapsed();
     let steps_after_load = vm.steps;
     let t = std::time::Instant::now();
@@ -70,6 +71,14 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
     println!("{} unimplemented natives hit:", missing.len());
     for (n, c) in missing.iter().take(40) {
         println!("  {c:7} {n}");
+    }
+    if vm.profile {
+        let mut p: Vec<_> = vm.profile_counts.iter().map(|(f, n)| (*n, *f)).collect();
+        p.sort_by(|a, b| b.0.cmp(&a.0));
+        println!("statements per function:");
+        for (n, f) in p.iter().take(20) {
+            println!("  {n:10} {}", vm.function_path(*f));
+        }
     }
     let mut logs: BTreeMap<&str, usize> = BTreeMap::new();
     for l in &vm.log {

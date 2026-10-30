@@ -10,4 +10,5 @@ publish.workspace = true
 hp3-package.workspace = true
 hp3-assets.workspace = true
 hp3-script.workspace = true
+hp3-core.workspace = true
 log.workspace = true
