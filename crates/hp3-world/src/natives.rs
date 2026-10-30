@@ -420,6 +420,44 @@ pub fn register(vm: &mut Vm<'_>) {
         let copy = vm.db.objects.add(e.name, class, values);
         Ok(Value::Object(Some(copy)))
     });
+    // Trace(out HitLocation, out HitNormal, TraceEnd, optional TraceStart, optional bTraceActors,
+    //       optional Extent, optional out Material): the actor hit, Level for world geometry, or None.
+    vm.register("Actor.Trace", |vm, this, a| {
+        let Some(o) = this else { return Ok(Value::Object(None)) };
+        let end = crate::physics::vec(&a[2]);
+        let start = if given(a, 3) { crate::physics::vec(&a[3]) } else { crate::physics::vec(&get(vm, o, "Location")) };
+        let trace_actors = a.get(4).is_some_and(Value::as_bool);
+        let extent = if given(a, 5) { crate::physics::vec(&a[5]) } else { glam::Vec3::ZERO };
+        let w = world(vm);
+        let saved = if trace_actors { None } else { Some(std::mem::take(&mut w.collision.actors)) };
+        let hit = w.collision.trace(start, end, extent, Some(o));
+        if let Some(saved) = saved {
+            w.collision.actors = saved;
+        }
+        let level = w.level_info;
+        match hit {
+            Some(h) => {
+                a[0] = crate::physics::value(h.location);
+                a[1] = crate::physics::value(h.normal);
+                Ok(Value::Object(h.actor.or(level)))
+            }
+            None => {
+                a[0] = crate::physics::value(end);
+                a[1] = crate::physics::value(glam::Vec3::ZERO);
+                Ok(Value::Object(None))
+            }
+        }
+    });
+    vm.register("Actor.FastTrace", |vm, this, a| {
+        let Some(o) = this else { return Ok(Value::Bool(true)) };
+        let end = crate::physics::vec(&a[0]);
+        let start = if given(a, 1) { crate::physics::vec(&a[1]) } else { crate::physics::vec(&get(vm, o, "Location")) };
+        let w = world(vm);
+        let saved = std::mem::take(&mut w.collision.actors);
+        let clear = w.collision.trace(start, end, glam::Vec3::ZERO, Some(o)).is_none();
+        w.collision.actors = saved;
+        Ok(Value::Bool(clear))
+    });
     vm.register("LevelInfo.IsDemoBuild", |_vm, _this, _a| Ok(Value::Bool(false)));
     vm.register("Actor.AttachToBone", |vm, this, a| {
         if let Some(att) = obj_arg(a, 0) {

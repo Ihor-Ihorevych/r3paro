@@ -135,6 +135,8 @@ pub struct Vm<'s> {
     trivial: HashMap<StructId, bool>,
     /// Count statements per function when set.
     pub profile: bool,
+    /// Log every state change.
+    pub trace_states: bool,
     pub profile_counts: HashMap<StructId, u64>,
     function_cache: HashMap<(StructId, Name), Option<StructId>>,
     /// Skip unimplemented natives instead of failing, counting them in `missing`.
@@ -173,6 +175,7 @@ impl<'s> Vm<'s> {
             native_cache: HashMap::new(),
             trivial: HashMap::new(),
             profile: false,
+            trace_states: false,
             profile_counts: HashMap::new(),
             function_cache: HashMap::new(),
             lenient: false,

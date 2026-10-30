@@ -72,6 +72,13 @@ impl Vm<'_> {
             return Ok(());
         }
         let old = self.state_of(obj);
+        if self.trace_states {
+            let who = self.db.names.get(self.db.objects.get(obj).name).to_string();
+            let from = old.map(|s| self.db.names.get(self.db.get(s).name).to_string());
+            let to = new_state.map(|s| self.db.names.get(self.db.get(s).name).to_string());
+            let line = format!("state: {who} {from:?} -> {to:?}");
+            self.log.push(line);
+        }
         if old != new_state {
             if old.is_some() {
                 self.event(obj, "EndState", &mut [])?;

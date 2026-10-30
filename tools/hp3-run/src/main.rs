@@ -101,6 +101,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
     db.load_all_classes();
     let mut vm = hp3_script::Vm::new(db);
     vm.profile = std::env::var_os("HP3_PROFILE").is_some();
+    vm.trace_states = std::env::var_os("HP3_TRACE_STATES").is_some();
     let pkg = set.get(map)?;
     let t = std::time::Instant::now();
     hp3_world::load(&mut vm, &pkg, hp3_core::Config::load(root))?;
@@ -160,6 +161,16 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                 println!("  pawn's controller is {cc:?} in state {st:?}");
             }
             println!("  pc.PlayerInput = {:?}", hp3_world::get(&mut vm, pc, "PlayerInput"));
+            let mut args = [hp3_script::Value::Object(None), hp3_script::Value::Empty, hp3_script::Value::Empty];
+            let r = vm.event(pc, "PlayerCalcView", &mut args);
+            println!("  PlayerCalcView -> {r:?}: view actor {:?}, location {:?}, rotation {:?}", args[0], args[1], args[2]);
+            if let Some(cam) = args[0].as_obj() {
+                let cc = vm.db.objects.get(cam).class.map(|c| vm.db.names.get(vm.db.get(c).name).to_string());
+                let st = vm.state_of(cam).map(|s| vm.db.names.get(vm.db.get(s).name).to_string());
+                let loc = hp3_world::get(&mut vm, cam, "Location");
+                let phys = hp3_world::get(&mut vm, cam, "Physics");
+                println!("  view actor {cc:?} state {st:?} at {loc:?} physics {phys:?} latent {:?}", vm.latent.get(&cam));
+            }
             let pclass = vm.db.objects.get(p).class.map(|c| vm.db.names.get(vm.db.get(c).name).to_string());
             let loc = hp3_world::get(&mut vm, p, "Location");
             let phys = hp3_world::get(&mut vm, p, "Physics");
@@ -199,6 +210,11 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
         *logs.entry(l.as_str()).or_default() += 1;
     }
     println!("{} log lines ({} distinct); first ones:", vm.log.len(), logs.len());
+    if vm.trace_states {
+        for l in vm.log.iter().filter(|l| l.starts_with("state:")) {
+            println!("  {l}");
+        }
+    }
     for (l, n) in logs.iter().take(20) {
         println!("  {n:5} {l}");
     }

@@ -41,6 +41,8 @@ pub struct World {
     pub config: hp3_core::Config,
     pub input: input::Input,
     pub collision: collision::Collision,
+    /// Pairs of actors currently touching (lower id first).
+    pub touching: std::collections::HashSet<(ObjId, ObjId)>,
 }
 
 /// The world stored in the VM. Panics if no level is loaded.
@@ -165,6 +167,7 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Res
         spawned: 0,
         input: input::Input::from_config(&config),
         collision: collision::Collision::default(),
+        touching: Default::default(),
         config,
     }));
     let collision = build_collision(vm, map, level_model, &actors);
@@ -200,6 +203,13 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Res
             fire(vm, g, "PostLogin", &mut [Value::Object(Some(pc))]);
         }
         follow_player(vm);
+        // A loaded map finishes by accepting the player's travel: pawn first, then its controller.
+        if let Some(pc) = world(vm).player {
+            if let Some(pawn) = get(vm, pc, "Pawn").as_obj() {
+                fire(vm, pawn, "TravelPostAccept", &mut []);
+            }
+            fire(vm, pc, "TravelPostAccept", &mut []);
+        }
     }
     Ok(())
 }
@@ -222,6 +232,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         fire(vm, pc, "PlayerTick", &mut [Value::Float(dt)]);
     }
     physics::step(vm, dt);
+    physics::update_touching(vm);
     for &a in &actors {
         if vm.db.objects.get(a).deleted {
             continue;

@@ -252,6 +252,77 @@ fn turn_to_desired(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     set(vm, a, "Rotation", Value::Struct(out.into()));
 }
 
+/// Collision cylinders overlap: horizontal distance under the radii's sum and vertical under the heights'.
+fn cylinders_overlap(a: (Vec3, f32, f32), b: (Vec3, f32, f32)) -> bool {
+    let d = a.0 - b.0;
+    (d.x * d.x + d.y * d.y).sqrt() < a.1 + b.1 && d.z.abs() < a.2 + b.2
+}
+
+/// Updates who touches whom for non-static colliding actors, firing `Touch` and `UnTouch` on both sides and
+/// keeping each actor's `Touching` array current.
+pub fn update_touching(vm: &mut Vm<'_>) {
+    let actors = world(vm).actors.clone();
+    let mut colliders = Vec::new();
+    for a in actors {
+        if vm.db.objects.get(a).deleted || !get(vm, a, "bCollideActors").as_bool() {
+            continue;
+        }
+        let e = extent(vm, a);
+        if e.x <= 0.0 && e.z <= 0.0 {
+            continue;
+        }
+        let moving = get(vm, a, "Physics").as_byte() != PHYS_NONE && !get(vm, a, "bStatic").as_bool();
+        colliders.push((a, vec(&get(vm, a, "Location")), e.x, e.z, moving));
+    }
+    let mut now: std::collections::HashSet<(ObjId, ObjId)> = Default::default();
+    for (i, m) in colliders.iter().enumerate() {
+        if !m.4 {
+            continue;
+        }
+        for (j, o) in colliders.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            if cylinders_overlap((m.1, m.2, m.3), (o.1, o.2, o.3)) {
+                let pair = if m.0 < o.0 { (m.0, o.0) } else { (o.0, m.0) };
+                now.insert(pair);
+            }
+        }
+    }
+    let before = std::mem::take(&mut world(vm).touching);
+    for &(a, b) in now.difference(&before) {
+        add_touching(vm, a, b);
+        add_touching(vm, b, a);
+        fire(vm, a, "Touch", &mut [Value::Object(Some(b))]);
+        fire(vm, b, "Touch", &mut [Value::Object(Some(a))]);
+    }
+    for &(a, b) in before.difference(&now) {
+        remove_touching(vm, a, b);
+        remove_touching(vm, b, a);
+        fire(vm, a, "UnTouch", &mut [Value::Object(Some(b))]);
+        fire(vm, b, "UnTouch", &mut [Value::Object(Some(a))]);
+    }
+    world(vm).touching = now;
+}
+
+fn add_touching(vm: &mut Vm<'_>, a: ObjId, other: ObjId) {
+    let mut list = match get(vm, a, "Touching") {
+        Value::Array(v) => v,
+        _ => Vec::new(),
+    };
+    if !list.iter().any(|v| v.as_obj() == Some(other)) {
+        list.push(Value::Object(Some(other)));
+        set(vm, a, "Touching", Value::Array(list));
+    }
+}
+
+fn remove_touching(vm: &mut Vm<'_>, a: ObjId, other: ObjId) {
+    if let Value::Array(mut list) = get(vm, a, "Touching") {
+        list.retain(|v| v.as_obj() != Some(other));
+        set(vm, a, "Touching", Value::Array(list));
+    }
+}
+
 /// Runs one physics step for every moving actor.
 pub fn step(vm: &mut Vm<'_>, dt: f32) {
     refresh_actor_boxes(vm);
