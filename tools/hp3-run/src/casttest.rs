@@ -19,6 +19,12 @@ pub struct CastTest {
     before: String,
     start_actors: HashSet<ObjId>,
     start_loc: Vec3,
+    /// Every state the target went through after the cast, with the tick (from the cast) it entered it.
+    history: Vec<(u32, String)>,
+    report_at: u32,
+    waited: u32,
+    /// Where the player's pawn was put, and which pawn it was.
+    caster: Option<(ObjId, Vec3)>,
 }
 
 impl CastTest {
@@ -36,12 +42,25 @@ impl CastTest {
             before: String::new(),
             start_actors: Default::default(),
             start_loc: Vec3::ZERO,
+            history: Vec::new(),
+            waited: 0,
+            caster: None,
+            report_at: std::env::var("HP3_CAST_REPORT").ok().and_then(|v| v.parse().ok()).unwrap_or(260),
         })
     }
 }
 
 fn state_name(vm: &mut Vm<'_>, a: ObjId) -> String {
     vm.state_of(a).map(|s| vm.db.names.get(vm.db.get(s).name).to_string()).unwrap_or_else(|| "-".into())
+}
+
+/// A creature's state together with its controller's (where its behaviour usually lives).
+fn behaviour(vm: &mut Vm<'_>, a: ObjId) -> String {
+    let own = state_name(vm, a);
+    match get(vm, a, "Controller").as_obj() {
+        Some(c) => format!("{own}/{}", state_name(vm, c)),
+        None => own,
+    }
 }
 
 fn name_of(vm: &mut Vm<'_>, a: ObjId) -> String {
@@ -58,16 +77,55 @@ fn v3(v: Vec3) -> Value {
 
 /// One step of the test, called before each tick.
 pub fn step(vm: &mut Vm<'_>, t: &mut CastTest, frame: u32) {
+    if frame == 1
+        && let Some(id) = std::env::var("HP3_PATH_OF").ok().and_then(|v| v.parse::<u32>().ok())
+    {
+        println!("cast: object {id} is {}", hp3_script::natives::object_path(vm, ObjId(id)));
+    }
     if frame < t.at {
         return;
     }
     let r = frame - t.at;
-    if r == 0 {
+    if t.target.is_none() {
+        // Wait until the player has control (opening cutscenes and loading screens are over).
+        let ready = hp3_world::world(vm).player.is_some_and(|pc| {
+            get(vm, pc, "Pawn").as_obj().is_some() && state_name(vm, pc) == "PlayerWalking"
+        });
+        if !ready {
+            if frame % 600 == 0 {
+                println!("cast: waiting for the player to have control (tick {frame})");
+            }
+            t.at += 1;
+            return;
+        }
+    }
+    let r = if t.target.is_none() { 0 } else { r };
+    if t.target.is_none() {
+        t.at = frame;
+    }
+    if t.target.is_none() {
         println!("cast: starting at tick {frame}");
     }
     let Some(pc) = hp3_world::world(vm).player else { return };
-    let Some(pawn) = get(vm, pc, "Pawn").as_obj() else { return };
-    if r == 0 {
+    let Some(pawn) = get(vm, pc, "Pawn").as_obj() else {
+        // The player may have handed control to something else (a possessed creature): keep watching the target.
+        if let Some(target) = t.target {
+            let now_state = state_name(vm, target);
+            if t.history.last().is_none_or(|(_, s)| *s != now_state) {
+                t.history.push((r, now_state));
+            }
+            if r % 120 == 0 {
+                let view = get(vm, pc, "ViewTarget").as_obj().map(|v| name_of(vm, v));
+                println!("cast: r={r} the player has no pawn (controller state {}, view target {view:?})", state_name(vm, pc));
+            }
+            if r == t.report_at {
+                report_result(vm, t, target);
+                std::process::exit(0);
+            }
+        }
+        return;
+    };
+    if t.target.is_none() {
         place(vm, t, pc, pawn);
         if std::env::var_os("HP3_CAST_SPAWNTEST").is_some()
             && let Some(c) = vm.db.find(&t.spell).map(|s| vm.db.get(s).object)
@@ -82,6 +140,28 @@ pub fn step(vm: &mut Vm<'_>, t: &mut CastTest, frame: u32) {
         }
     }
     let Some(target) = t.target else { return };
+    // HP3_CAST_WAIT=1: an activated creature is only a target once it is vulnerable; wait for that.
+    if std::env::var_os("HP3_CAST_WAIT").is_some() && t.waited < 2400 && get(vm, target, "vulnerableToClass").as_obj().is_none() {
+        t.waited += 1;
+        let now_state = behaviour(vm, target);
+        if t.waited % 300 == 1 {
+            let latent = format!("{:?}", vm.latent.get(&target));
+            let vuln = get(vm, target, "vulnerableToClass").as_obj().map(|c| name_of(vm, c));
+            println!(
+                "cast: waiting, target {} state {now_state} latent {latent} hidden {} proj {} vuln {vuln:?} loc {}",
+                name_of(vm, target),
+                get(vm, target, "bHidden").as_bool(),
+                get(vm, target, "bProjTarget").as_bool(),
+                vec(&get(vm, target, "Location"))
+            );
+        }
+        let tagged = format!("{now_state}(waiting)");
+        if t.history.last().is_none_or(|(_, s)| *s != tagged) {
+            t.history.push((0, tagged));
+        }
+        t.at += 1;
+        return;
+    }
     // Keep the camera on the target while the cursor settles.
     if (30..110).contains(&r)
         && let Some(cam) = get(vm, pc, "Camera").as_obj()
@@ -97,6 +177,30 @@ pub fn step(vm: &mut Vm<'_>, t: &mut CastTest, frame: u32) {
         }
         set(vm, pc, "Rotation", rot(pitch, yaw));
     }
+    let now_state = behaviour(vm, target);
+    if t.history.last().is_none_or(|(_, s)| *s != now_state) {
+        t.history.push((r, now_state.clone()));
+    }
+    // HP3_CAST_PROPS=A,B: print these properties of the target (and of the caster as "pawn.X") every 60 ticks.
+    if r >= 100 && r % 60 == 0
+        && let Ok(names) = std::env::var("HP3_CAST_PROPS")
+    {
+        let mut line = format!("cast: r={r} {now_state}");
+        for n in names.split(',') {
+            let (who, prop) = match n.strip_prefix("pawn.") {
+                Some(p) => (pawn, p),
+                None => (target, n),
+            };
+            let v = get(vm, who, prop);
+            let text = match &v {
+                Value::Float(f) => format!("{f:.2}"),
+                Value::Struct(_) => format!("{}", vec(&v)),
+                other => format!("{other:?}"),
+            };
+            line.push_str(&format!(" {n}={text}"));
+        }
+        println!("{line}");
+    }
     if r == 40 {
         let wand = get(vm, pawn, "Weapon").as_obj();
         let class = vm.db.find(&t.spell).map(|s| vm.db.get(s).object);
@@ -110,20 +214,35 @@ pub fn step(vm: &mut Vm<'_>, t: &mut CastTest, frame: u32) {
     if r == 50 {
         hp3_world::world(vm).input.key_down("LeftMouse");
     }
+    // HP3_CAST_DIRECT=1: the spell is born on the target instead of flying there, which exercises the target's
+    // reaction without depending on the geometry between Harry and it.
+    if r == 100 && std::env::var_os("HP3_CAST_DIRECT").is_some() {
+        direct_hit(vm, t, pawn, target);
+    }
     if r == 90 {
         report_cursor(vm);
     }
     if r == 110 {
         hp3_world::world(vm).input.key_up("LeftMouse");
     }
-    if r >= 30 && r <= 150 && r % 8 == 0 {
+    // HP3_CAST_TAP=<r>: press and release fire again at that tick (letting go of a hook, for one).
+    if let Some(tap) = std::env::var("HP3_CAST_TAP").ok().and_then(|v| v.parse::<u32>().ok()) {
+        if r == tap {
+            hp3_world::world(vm).input.key_down("LeftMouse");
+        }
+        if r == tap + 6 {
+            hp3_world::world(vm).input.key_up("LeftMouse");
+        }
+    }
+    if std::env::var_os("HP3_CAST_STATES").is_some() && r >= 30 && r <= 150 && r % 8 == 0 {
         println!("cast: r={r} harry state {} bJustCast {}", state_name(vm, pawn), get(vm, pawn, "bJustCast").as_bool());
     }
     if (100..=200).contains(&r) && r % 2 == 0 {
         report_spell(vm, r);
     }
-    if r == 260 {
+    if r == t.report_at {
         report_result(vm, t, target);
+        std::process::exit(0);
     }
 }
 
@@ -145,31 +264,55 @@ fn place(vm: &mut Vm<'_>, t: &mut CastTest, pc: ObjId, pawn: ObjId) {
     let at = vec(&get(vm, target, "Location"));
     t.start_loc = at;
     t.before = state_name(vm, target);
-    // Stand where the line to the target is clear and there is floor.
+    // Stand where there is floor and the corridor a spell would fly through (its own size, from the wand's
+    // height to the target) is clear.
+    let aim_up = get(vm, target, "CollisionHeight").as_float().max(0.0);
     let mut chosen = None;
-    for k in 0..16 {
-        let yaw = k * 4096;
-        let ang = yaw as f32 * std::f32::consts::TAU / 65536.0;
-        let dir = Vec3::new(ang.cos(), ang.sin(), 0.0);
-        let pos = at - dir * t.dist;
-        let col = &hp3_world::world(vm).collision;
-        let Some(f) = col.trace_static(pos + Vec3::Z * 80.0, pos - Vec3::Z * 300.0, Vec3::ZERO) else { continue };
-        let stand = f.location + Vec3::Z * 40.0;
-        if col.trace_static(stand + Vec3::Z * 20.0, at + Vec3::Z * 20.0, Vec3::ZERO).is_none() {
-            chosen = Some((stand, yaw));
-            break;
+    let mut best: Option<(f32, Vec3, i32)> = None;
+    'search: for dist in [t.dist, 300.0, 200.0, 400.0, 150.0, 500.0] {
+        for k in 0..32 {
+            let yaw = k * 2048;
+            let ang = yaw as f32 * std::f32::consts::TAU / 65536.0;
+            let dir = Vec3::new(ang.cos(), ang.sin(), 0.0);
+            let pos = at - dir * dist;
+            let col = &hp3_world::world(vm).collision;
+            let Some(f) = col.trace_static(pos + Vec3::Z * 80.0, pos - Vec3::Z * 300.0, Vec3::ZERO) else { continue };
+            let stand = f.location + Vec3::Z * 40.0;
+            let corridor = Vec3::new(10.0, 10.0, 10.0);
+            let top = at + Vec3::Z * (aim_up + 6.0);
+            let low = col.trace_static(stand + Vec3::Z * 10.0, top, corridor).map_or(1.0, |h| h.time);
+            let high = col.trace_static(stand + Vec3::Z * 30.0, top + Vec3::Z * 10.0, corridor).map_or(1.0, |h| h.time);
+            // The camera sits behind and above the pawn; it has to see the target too.
+            let cam = stand - dir * 140.0 + Vec3::Z * 90.0;
+            let seen = col.trace_static(cam, at + Vec3::Z * aim_up, Vec3::ZERO).map_or(1.0, |h| h.time);
+            if low >= 1.0 && high >= 1.0 && seen >= 1.0 {
+                chosen = Some((stand, yaw));
+                break 'search;
+            }
+            let score = low.min(high).min(seen);
+            if best.is_none_or(|b| score > b.0) {
+                best = Some((score, stand, yaw));
+            }
         }
+    }
+    if chosen.is_none()
+        && let Some((score, stand, yaw)) = best
+    {
+        println!("cast: no fully clear spot; using the best one ({:.0}% of the way clear)", score * 100.0);
+        chosen = Some((stand, yaw));
     }
     let Some((stand, yaw)) = chosen else {
         println!("cast: no clear spot in front of the target");
         std::process::exit(4)
     };
+    t.caster = Some((pawn, stand));
     set(vm, pawn, "Location", v3(stand));
     set(vm, pawn, "Velocity", v3(Vec3::ZERO));
     set(vm, pawn, "Rotation", rot(0, yaw));
     set(vm, pc, "Rotation", rot(0, yaw));
     // HP3_CAST_ACTIVATE=1 sends the target the Trigger event the level's own logic would (puzzle targets start inert).
-    if std::env::var_os("HP3_CAST_ACTIVATE").is_some() {
+    let inert = get(vm, target, "vulnerableToClass").as_obj().is_none() || !get(vm, target, "bProjTarget").as_bool();
+    if std::env::var_os("HP3_CAST_ACTIVATE").is_some() && inert {
         fire(vm, target, "Trigger", &mut [Value::Object(Some(pawn)), Value::Object(Some(pawn))]);
     }
     let vulnerable = get(vm, target, "vulnerableToClass").as_obj().map(|c| name_of(vm, c));
@@ -213,7 +356,7 @@ fn report_cursor(vm: &mut Vm<'_>) {
 }
 
 fn report_result(vm: &mut Vm<'_>, t: &CastTest, target: ObjId) {
-    let after = state_name(vm, target);
+    let after = behaviour(vm, target);
     let moved = vec(&get(vm, target, "Location")).distance(t.start_loc);
     let now = hp3_world::world(vm).actors.clone();
     let mut kinds: BTreeMap<String, usize> = Default::default();
@@ -222,11 +365,22 @@ fn report_result(vm: &mut Vm<'_>, t: &CastTest, target: ObjId) {
         *kinds.entry(n.trim_end_matches(|c: char| c.is_ascii_digit()).to_string()).or_default() += 1;
     }
     let deleted = vm.db.objects.get(target).deleted;
+    if let Some((pawn, start)) = t.caster {
+        let now = vec(&get(vm, pawn, "Location"));
+        println!(
+            "cast: caster {} moved {:.0} to {now}, physics {}, state {}",
+            name_of(vm, pawn),
+            now.distance(start),
+            get(vm, pawn, "Physics").as_byte(),
+            state_name(vm, pawn)
+        );
+    }
+    let path: Vec<String> = t.history.iter().map(|(r, s)| format!("{s}@{r}")).collect();
     println!(
-        "castresult {}->{}: state {} -> {after}, hidden {}, deleted {deleted}, moved {moved:.0}; spawned {kinds:?}",
+        "castresult {}->{}: states [{}], now {after}, hidden {}, deleted {deleted}, moved {moved:.0}; spawned {kinds:?}",
         t.spell,
         t.class,
-        t.before,
+        path.join(" > "),
         get(vm, target, "bHidden").as_bool()
     );
 }
@@ -259,4 +413,24 @@ fn report_spell(vm: &mut Vm<'_>, r: u32) {
             vec(&get(vm, a, "CurrentDir"))
         );
     }
+}
+
+/// Spawns the spell on the target, initialises and launches it like the wand does.
+fn direct_hit(vm: &mut Vm<'_>, t: &CastTest, pawn: ObjId, target: ObjId) {
+    let Some(class) = vm.db.find(&t.spell).map(|s| vm.db.get(s).object) else { return };
+    let at = get(vm, target, "Location");
+    let args = [Value::Object(Some(class)), Value::Object(Some(pawn)), Value::Empty, at.clone(), Value::Empty];
+    let Ok(Value::Object(Some(spell))) = hp3_world::natives::spawn(vm, None, &args) else {
+        println!("cast: direct spawn failed");
+        return;
+    };
+    let wand = get(vm, pawn, "Weapon");
+    fire(
+        vm,
+        spell,
+        "InitSpell",
+        &mut [Value::Object(Some(pawn)), Value::Object(Some(target)), v3(Vec3::ZERO), Value::Float(0.0), wand],
+    );
+    fire(vm, spell, "Launch", &mut []);
+    println!("cast: direct hit with {} at {}", name_of(vm, spell), vec(&at));
 }

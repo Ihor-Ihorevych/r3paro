@@ -53,8 +53,23 @@ pub struct Collision {
     /// Whether the trace being made is for the player's pawn (which `bBlockPlayers` blocks) or for any other
     /// actor (which `bBlockActors` blocks).
     player_mover: bool,
+    /// For the trace being made: the thing moving is not stopped by blocking actors (it does not have
+    /// `bBlockActors`) or by the level's geometry (it does not have `bCollideWorld`).
+    passes_actors: bool,
+    passes_world: bool,
     /// Movers: their triangles in their own space, placed by a transform that follows them.
     pub movers: Vec<MoverShape>,
+}
+
+/// How the thing being moved collides with others.
+#[derive(Clone, Copy)]
+pub struct Mover {
+    /// The player's pawn (which `bBlockPlayers` actors block).
+    pub player: bool,
+    /// It has `bBlockActors`: blocking actors stop it.
+    pub blocks_actors: bool,
+    /// It has `bCollideWorld`: the level's geometry stops it.
+    pub collide_world: bool,
 }
 
 /// A mover's collision: triangles in mover space and the current mover-to-world placement.
@@ -164,6 +179,18 @@ impl Collision {
         hit
     }
 
+    /// Like `trace_as`, for a thing that may pass through actors or through the level.
+    pub fn trace_for(&mut self, how: Mover, start: Vec3, end: Vec3, extent: Vec3, ignore: Option<ObjId>) -> Option<Hit> {
+        self.player_mover = how.player;
+        self.passes_actors = !how.blocks_actors;
+        self.passes_world = !how.collide_world;
+        let hit = self.trace_with(start, end, extent, ignore, true);
+        self.player_mover = false;
+        self.passes_actors = false;
+        self.passes_world = false;
+        hit
+    }
+
     /// The level's geometry only: BSP, meshes and terrain, not actors.
     pub fn trace_static(&self, start: Vec3, end: Vec3, extent: Vec3) -> Option<Hit> {
         self.trace_with(start, end, extent, None, false)
@@ -177,6 +204,7 @@ impl Collision {
             }
         };
         if let Some(model) = &self.model
+            && !self.passes_world
             && !model.nodes.is_empty()
         {
             let mut out = None;
@@ -193,6 +221,9 @@ impl Collision {
             for y in cell(min.y)..=cell(max.y) {
                 let Some(list) = self.grid.get(&(x, y)) else { continue };
                 for &i in list {
+                    if self.passes_world {
+                        break;
+                    }
                     if !seen.insert(i) {
                         continue;
                     }
@@ -207,14 +238,14 @@ impl Collision {
             }
         }
         for m in &self.movers {
-            if Some(m.actor) == ignore {
+            if Some(m.actor) == ignore || self.passes_actors {
                 continue;
             }
             if let Some(h) = m.trace(start, end, extent) {
                 keep(h);
             }
         }
-        for b in self.actors.iter().filter(|_| actors) {
+        for b in self.actors.iter().filter(|_| actors && !self.passes_actors) {
             if Some(b.actor) == ignore || !(if self.player_mover { b.blocks_players } else { b.blocks_actors }) {
                 continue;
             }

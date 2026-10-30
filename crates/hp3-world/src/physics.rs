@@ -17,6 +17,7 @@ pub const PHYS_SWIMMING: u8 = 3;
 pub const PHYS_FLYING: u8 = 4;
 pub const PHYS_ROTATING: u8 = 5;
 pub const PHYS_PROJECTILE: u8 = 6;
+pub const PHYS_TRAILER: u8 = 10;
 
 /// HP3's maximum step height.
 pub const MAX_STEP_HEIGHT: f32 = 24.0;
@@ -110,7 +111,18 @@ pub fn move_actor(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<Hit> {
     }
     let ext = extent(vm, a);
     let player = is_player_pawn(vm, a);
-    let hit = world(vm).collision.trace_as(player, loc, loc + delta, ext, Some(a));
+    // Pawns always collide with the level and with blocking actors; any other actor does so only with its
+    // `bCollideWorld` / `bBlockActors` (a spell flies through the creatures it touches).
+    let how = if is_pawn(vm, a) {
+        crate::collision::Mover { player, blocks_actors: true, collide_world: true }
+    } else {
+        crate::collision::Mover {
+            player,
+            blocks_actors: get(vm, a, "bBlockActors").as_bool(),
+            collide_world: get(vm, a, "bCollideWorld").as_bool(),
+        }
+    };
+    let hit = world(vm).collision.trace_for(how, loc, loc + delta, ext, Some(a));
     let time = hit.map(|h| h.time).unwrap_or(1.0);
     set(vm, a, "Location", value(loc + delta * time));
     hit
@@ -353,6 +365,8 @@ fn fall(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     let air = get(vm, a, "AirControl").as_float();
     vel += Vec3::new(accel.x, accel.y, 0.0) * air * dt;
     vel.z += gravity(vm, a) * dt;
+    // A pawn can be pushed by a steady acceleration of its own (Carpe Retractum pulls with it) on top of gravity.
+    vel += vec(&get(vm, a, "ConstantAcceleration")) * dt;
     let terminal = 4000.0;
     vel.z = vel.z.max(-terminal);
     set(vm, a, "Velocity", value(vel));
@@ -389,14 +403,10 @@ fn projectile(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     let vel = vec(&get(vm, a, "Velocity")) + vec(&get(vm, a, "Acceleration")) * dt;
     set(vm, a, "Velocity", value(vel));
     if let Some(hit) = move_actor(vm, a, vel * dt) {
-        match hit.actor {
-            Some(other) => {
-                fire(vm, a, "Touch", &mut [Value::Object(Some(other))]);
-            }
-            None => {
-                fire(vm, a, "HitWall", &mut [value(hit.normal), Value::Object(None)]);
-            }
-        }
+        // Stopped by the level or by an actor that blocks it: the script hears `HitWall` with what stopped it
+        // (the level itself for its geometry). Actors it only overlaps are touched, not hit.
+        let wall = hit.actor.or(world(vm).level_info);
+        fire(vm, a, "HitWall", &mut [value(hit.normal), Value::Object(wall)]);
     }
 }
 
@@ -521,6 +531,10 @@ pub fn step_actor(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         PHYS_FLYING | PHYS_SWIMMING => fly(vm, a, dt),
         PHYS_ROTATING => rotate(vm, a, dt),
         PHYS_PROJECTILE => projectile(vm, a, dt),
+        PHYS_TRAILER => {
+            trailer(vm, a);
+            return;
+        }
         _ => return,
     }
     if is_pawn(vm, a) {
@@ -528,6 +542,60 @@ pub fn step_actor(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     } else {
         turn_to_desired(vm, a, dt);
     }
+}
+
+/// The direction a rotator (pitch, yaw in 65536ths of a turn) points.
+fn rotator_direction(r: &Value) -> Vec3 {
+    let f = r.fields();
+    let k = std::f32::consts::TAU / 65536.0;
+    let (pitch, yaw) = (f.first().map_or(0, Value::as_int) as f32 * k, f.get(1).map_or(0, Value::as_int) as f32 * k);
+    Vec3::new(pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), pitch.sin())
+}
+
+/// The rotator (roll 0) that points along `v`.
+fn direction_rotator(v: Vec3) -> Value {
+    let k = 65536.0 / std::f32::consts::TAU;
+    let yaw = (v.y.atan2(v.x) * k).round() as i32 & 0xFFFF;
+    let pitch = (v.z.atan2(v.truncate().length()) * k).round() as i32 & 0xFFFF;
+    Value::Struct(vec![Value::Int(pitch), Value::Int(yaw), Value::Int(0)].into())
+}
+
+/// `PHYS_Trailer`: the actor stays with its owner (effects, proxy triggers). Nothing happens without an owner or
+/// while the actor is attached to a base. A sprite may keep the owner's pivot offset or trail behind it
+/// (`bTrailerPrePivot`, `bTrailerSameRotation` with `Mass` as the distance). Others take the owner's place and
+/// face against its movement (pointing up when it stands still), or its own rotation with `bTrailerSameRotation`;
+/// `bTrailerAllowRotation` leaves their rotation alone.
+fn trailer(vm: &mut Vm<'_>, a: ObjId) {
+    let Some(owner) = get(vm, a, "Owner").as_obj() else { return };
+    if get(vm, a, "Base").as_obj().is_some() {
+        return;
+    }
+    let mut at = vec(&get(vm, owner, "Location"));
+    let same_rotation = get(vm, a, "bTrailerSameRotation").as_bool();
+    if get(vm, a, "DrawType").as_byte() == 1 {
+        if get(vm, a, "bTrailerPrePivot").as_bool() {
+            at += vec(&get(vm, a, "PrePivot"));
+        } else if same_rotation {
+            at -= get(vm, a, "Mass").as_float() * rotator_direction(&get(vm, owner, "Rotation"));
+        }
+        set(vm, a, "Location", value(at));
+        return;
+    }
+    set(vm, a, "Location", value(at));
+    if get(vm, a, "bTrailerAllowRotation").as_bool() {
+        return;
+    }
+    let rotation = if same_rotation {
+        get(vm, owner, "Rotation")
+    } else {
+        let velocity = vec(&get(vm, owner, "Velocity"));
+        if velocity.length_squared() < 1e-4 {
+            Value::Struct(vec![Value::Int(16384), Value::Int(0), Value::Int(0)].into())
+        } else {
+            direction_rotator(-velocity)
+        }
+    };
+    set(vm, a, "Rotation", rotation);
 }
 
 fn is_pawn(vm: &mut Vm<'_>, a: ObjId) -> bool {

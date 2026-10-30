@@ -129,6 +129,21 @@ Milestones are from the plan (M0 to M12).
   quads. Rate: `InitialParticlesPerSecond` is the working rate when `AutomaticInitialSpawning` is on. Beams are
   drawn as stretched quads but their end points and noise are not done; no collision, attractors, revolution,
   mesh or trail emitters. Not seen yet: the spell cursor and the cast "ray" (script-driven; see below).
+- **Spells reach their targets** (engine side, behaviour from the reference): touches are re-checked when an actor
+  moves (`SetLocation`, `Move`, `MoveSmooth`), resizes, changes its collision flag, spawns or is destroyed, with a
+  frame pass for the rest (`touch.rs`); movers are tested by their geometry and never against each other; an
+  actor is stopped by blocking actors only if both have `bBlockActors`, and by the level only with `bCollideWorld`
+  (a spell flies through creatures it touches); projectile physics sends `HitWall` with the stopping actor (the
+  level for its geometry). `AddNotify` / `AddAnimNotifys` raise script events as sequences play (the cast pose
+  calls `finalizeSpell` at its release frame), with `EnableChannelNotify` and the per-channel
+  `GetAnimSequence/Rate/Time/Frame`. `SetPhysics` to a non-resting mode drops the base (a launched spell leaves the
+  wand), and `SetBase` raises `Attach` / `Detach`. Config properties are read from the file a class names
+  (`config(Spells)` is `Spells.ini`), and a class keeps its own default unless it inherited the value.
+  `hp3-run` has a cast harness (`HP3_CAST=<Spell>:<TargetClass>:<n>@<tick>`, with `HP3_CAST_ACTIVATE`,
+  `HP3_CAST_WAIT`, `HP3_CAST_DIRECT`) that places the player, aims the game's camera, holds fire, and reports the
+  target's states and what spawned. Verified so far: Alohomora on chest spawners, Depulso on knight spawners,
+  `KnightCollapse` and flying books, Lumos on gargoyles, Spongify on pads, Rictusempra on Poxies, Lapifors and
+  Draconifors on their statues (the player takes over the dragon), Carpe Retractum on its targets.
 - **Debug keys** in the app: F11 level list, G ghost (no collision), F fly (with collision), H back to walking.
 - Open: the spell cursor emitter stays empty (its rate is set by script during targeting, not yet observed to
   happen); companions sometimes block the player (Ron standing in InsideHub).
