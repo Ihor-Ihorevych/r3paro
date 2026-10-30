@@ -178,19 +178,7 @@ pub fn register(vm: &mut Vm<'_>) {
     vm.register("Actor.Spawn", |vm, this, a| spawn(vm, this, a));
     vm.register("Actor.Destroy", |vm, this, _a| {
         let Some(o) = this else { return Ok(Value::Bool(false)) };
-        if vm.db.objects.get(o).deleted {
-            return Ok(Value::Bool(true));
-        }
-        if get(vm, o, "bStatic").as_bool() || get(vm, o, "bNoDelete").as_bool() {
-            return Ok(Value::Bool(false));
-        }
-        fire(vm, o, "Destroyed", &mut []);
-        vm.db.objects.get_mut(o).deleted = true;
-        let w = world(vm);
-        w.actors.retain(|&x| x != o);
-        w.timers.remove(&o);
-        vm.latent.remove(&o);
-        Ok(Value::Bool(true))
+        Ok(Value::Bool(crate::destroy_actor(vm, o)))
     });
     vm.register_iterator("Actor.AllActors", |vm, _this, a| {
         let tag = a.get(2).map(Value::as_name).unwrap_or(Name::NONE);
@@ -597,7 +585,6 @@ pub fn register(vm: &mut Vm<'_>) {
         Ok(Value::Bool(crate::collision::point_inside(&model, at)))
     });
     // Emitters are not simulated yet; triggering one does nothing.
-    vm.register("ParticleEmitter.Trigger", |_vm, _this, _a| Ok(Value::Empty));
     // SetOpacity(float): kept for the renderer.
     vm.register("Actor.SetOpacity", |vm, this, a| {
         if let Some(o) = this {

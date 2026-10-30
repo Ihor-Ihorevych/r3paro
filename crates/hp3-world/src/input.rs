@@ -104,8 +104,12 @@ pub fn apply(vm: &mut Vm<'_>, pc: ObjId) {
     let mut execs: Vec<String> = Vec::new();
     let held: Vec<String> = input.held.iter().cloned().collect();
     let mut keys: Vec<(String, f32)> = held.into_iter().map(|k| (k, 1.0)).collect();
-    keys.push(("mousex".into(), input.mouse.0));
-    keys.push(("mousey".into(), -input.mouse.1));
+    // The chase camera does not look with the mouse.
+    let chase = !world(vm).chase.off;
+    if !chase {
+        keys.push(("mousex".into(), input.mouse.0));
+        keys.push(("mousey".into(), -input.mouse.1));
+    }
     for (key, amount) in &keys {
         for cmd in input.commands(key) {
             let words: Vec<&str> = cmd.split_whitespace().collect();
@@ -134,6 +138,11 @@ pub fn apply(vm: &mut Vm<'_>, pc: ObjId) {
                 _ => execs.push(cmd),
             }
         }
+    }
+    // With the chase camera, left and right turn the heading instead of strafing.
+    if chase {
+        let turn = axes.remove("aStrafe").unwrap_or(0.0);
+        crate::chase::update(vm, pc, turn, 1.0 / 60.0);
     }
     // Axes reset every tick; the input script turns them into movement.
     for name in ["aBaseX", "aBaseY", "aBaseZ", "aMouseX", "aMouseY", "aForward", "aTurn", "aStrafe", "aUp", "aLookUp"] {

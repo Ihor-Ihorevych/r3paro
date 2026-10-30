@@ -5,6 +5,7 @@
 
 pub mod anim;
 pub mod audio;
+pub mod chase;
 pub mod debug_move;
 pub mod canvas;
 pub mod collision;
@@ -77,6 +78,7 @@ pub struct World {
     pub particles: particles::Particles,
     /// The pawn's own `AirSpeed`, kept while flying in the debug modes.
     pub debug_air_speed: Option<f32>,
+    pub chase: chase::Chase,
     /// A level switch asked for and due (`Level.NextURL`).
     pub pending_travel: Option<String>,
     actor_slots: HashMap<&'static str, Option<usize>>,
@@ -255,6 +257,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, c
     let actor_class = vm.db.find("Actor").ok_or_else(|| VmError::Runtime("no Actor class".into()))?;
     natives::register(vm);
     audio::register(vm);
+    particles::register(vm);
     movie::register(vm);
     anim::register(vm);
     nav::register(vm);
@@ -336,6 +339,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, c
         movies: Default::default(),
         particles: Default::default(),
         debug_air_speed: None,
+        chase: Default::default(),
         tick_profile: Default::default(),
         actor_slots: Default::default(),
         config,
@@ -504,6 +508,9 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         set(vm, li, "TimeSeconds", Value::Float(t));
         movie::tick(vm);
         particles::tick(vm, dt);
+        for a in particles::finished_actors(vm) {
+            destroy_actor(vm, a);
+        }
         // A save the game asked for (LevelAction = saving) happens in the engine's next frame, which then
         // clears the action. Saving itself is not implemented yet.
         const LEVACT_SAVING: u8 = 2;
@@ -647,6 +654,24 @@ pub fn mesh_offset(vm: &mut Vm<'_>, a: ObjId) -> glam::Vec3 {
         }
     }
     offset
+}
+
+/// Destroys an actor (`Destroy`): its `Destroyed` event runs and it leaves the level. Static and no-delete actors
+/// stay; returns whether the actor is gone.
+pub fn destroy_actor(vm: &mut Vm<'_>, o: ObjId) -> bool {
+    if vm.db.objects.get(o).deleted {
+        return true;
+    }
+    if get(vm, o, "bStatic").as_bool() || get(vm, o, "bNoDelete").as_bool() {
+        return false;
+    }
+    fire(vm, o, "Destroyed", &mut []);
+    vm.db.objects.get_mut(o).deleted = true;
+    let w = world(vm);
+    w.actors.retain(|&x| x != o);
+    w.timers.remove(&o);
+    vm.latent.remove(&o);
+    true
 }
 
 fn vec_of(v: &Value) -> glam::Vec3 {

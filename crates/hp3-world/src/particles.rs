@@ -10,7 +10,7 @@
 use glam::{Mat3, Vec3};
 use hp3_script::{ObjId, Value, Vm};
 
-use crate::{get, world};
+use crate::{get, set, world};
 
 /// How a particle is blended with what is behind it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -114,6 +114,7 @@ struct Config {
     sub_end: i32,
     random_sub: bool,
     auto_destroy: bool,
+    respawn: bool,
     // Beams.
     beam_distance: Range,
     beam_end_by: u8,
@@ -213,6 +214,7 @@ impl Config {
             sub_end: get(vm, o, "SubdivisionEnd").as_int(),
             random_sub: flag(vm, o, "UseRandomSubdivision"),
             auto_destroy: flag(vm, o, "AutoDestroy"),
+            respawn: flag(vm, o, "RespawnDeadParticles"),
             beam_distance: Range::of(&get(vm, o, "BeamDistanceRange")),
             beam_end_by: get(vm, o, "DetermineEndPointBy").as_byte(),
             beam_offset: RangeVec::of(&get(vm, o, "OffsetRange")),
@@ -244,7 +246,14 @@ struct EmitterState {
     particles: Vec<Particle>,
     accum: f32,
     rng: Rng,
-    started: bool,
+    /// The emitter object this state belongs to (the natives find states by it).
+    object: ObjId,
+    /// `Kill` was called: nothing more is spawned and the particles live out their lives.
+    kill_pending: bool,
+    /// Particles asked for by `SpawnParticle`, spawned next step whatever the rates.
+    deferred: usize,
+    /// How many particle slots the emitter has used so far (up to its maximum): the filling phase.
+    slots_used: usize,
     /// Where the owner was last frame, for relative systems.
     last_origin: Vec3,
 }
@@ -252,11 +261,12 @@ struct EmitterState {
 #[derive(Default)]
 pub struct Particles {
     states: crate::HashMap<(ObjId, usize), EmitterState>,
-    /// Frames since the settings were last re-read, for each emitter object.
+    /// Emitter actors that already have their own emitter objects.
+    owned: std::collections::HashSet<ObjId>,
     pub debug: bool,
 }
 
-const REFRESH_FRAMES: u64 = 30;
+const REFRESH_FRAMES: u64 = 8;
 
 fn rotation_of(vm: &mut Vm<'_>, a: ObjId) -> Mat3 {
     let r: Vec<i32> = get(vm, a, "Rotation").fields().iter().map(Value::as_int).collect();
@@ -322,6 +332,27 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
             continue;
         }
         let Value::Array(emitters) = get(vm, a, "Emitters") else { continue };
+        // An emitter spawned at run time starts with the class's default emitter objects, shared with every other
+        // of its kind; each actor gets copies of its own (scripts change them, e.g. `Kill`).
+        let emitters = if vm.db.objects.get(a).key.is_none() && !world(vm).particles.owned.contains(&a) {
+            world(vm).particles.owned.insert(a);
+            let mut own = Vec::with_capacity(emitters.len());
+            for e in emitters.iter() {
+                let copy = e.as_obj().and_then(|o| {
+                    // Reading a property loads the object if it is still lazy.
+                    let _ = get(vm, o, "MaxParticles");
+                    let entry = vm.db.objects.get(o).clone();
+                    let (class, values) = (entry.class?, vm.db.objects.values(o).cloned()?);
+                    Some(vm.db.objects.add(entry.name, class, values))
+                });
+                own.push(copy.map_or(e.clone(), |c| Value::Object(Some(c))));
+            }
+            set(vm, a, "Emitters", Value::Array(own.clone().into()));
+            Value::Array(own.into())
+        } else {
+            Value::Array(emitters)
+        };
+        let Value::Array(emitters) = emitters else { continue };
         let origin = crate::physics::vec(&get(vm, a, "Location"));
         let rot = rotation_of(vm, a);
         let hidden = get(vm, a, "bHidden").as_bool();
@@ -342,7 +373,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
                         let seed = (a.0.wrapping_mul(2654435761) ^ (i as u32).wrapping_mul(40503)).max(1);
                         w.particles.states.insert(
                             key,
-                            EmitterState { config, refreshed: frame, particles: Vec::new(), accum: 0.0, rng: Rng(seed), started: false, last_origin: origin },
+                            EmitterState { config, refreshed: frame, particles: Vec::new(), accum: 0.0, rng: Rng(seed), slots_used: 0, object: obj, kill_pending: false, deferred: 0, last_origin: origin },
                         );
                     }
                 }
@@ -359,6 +390,10 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
                     c.beam, c.disabled, c.max_particles, c.pps, c.initial_pps, c.auto_initial, c.lifetime.0, c.lifetime.1,
                     c.start_size.0[0].0, c.start_size.0[0].1, c.material, c.blend, c.coordinates, s.particles.len()
                 );
+                eprintln!(
+                    "   size scale {:?} x{} colour scale {:?} opacity {} fade in {:?} out {:?} mult {:?}",
+                    c.size_scale, c.size_repeats, c.color_scale, c.opacity, c.fade_in, c.fade_out, c.color_mult.0.map(|r| (r.0, r.1))
+                );
             }
         }
     }
@@ -368,35 +403,61 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
 
 fn step(s: &mut EmitterState, dt: f32, origin: Vec3, rot: Mat3, hidden: bool) {
     let c = s.config.clone();
-    let moved = origin - s.last_origin;
     s.last_origin = origin;
-    // Particles in independent systems keep their place; relative ones travel with the actor (their positions
-    // are stored relative to it and rotated at draw time).
-    for p in &mut s.particles {
-        p.vel += c.acceleration * dt;
-        p.pos += p.vel * dt;
-        p.age += dt;
-        p.spin += p.spin_rate * dt;
-    }
-    s.particles.retain(|p| p.age < p.life);
-    let _ = moved;
-    if c.disabled || hidden {
-        return;
-    }
-    let cap = if c.max_particles == 0 { 128 } else { c.max_particles };
-    s.started = true;
-    // With automatic initial spawning the working rate starts at InitialParticlesPerSecond (scripts may raise
-    // ParticlesPerSecond later).
-    let rate = if c.pps > 0.0 { c.pps } else if c.auto_initial { c.initial_pps } else { 0.0 };
-    s.accum += rate * dt;
-    while s.accum >= 1.0 && s.particles.len() < cap {
-        s.accum -= 1.0;
-        let mut p = spawn(&c, &mut s.rng, origin, rot, 0.0);
+    let off = c.disabled || hidden;
+    let new_particle = |s: &mut EmitterState, c: &Config, age: f32| {
+        let mut p = spawn(c, &mut s.rng, origin, rot, age);
         if c.beam {
             let d = c.beam_distance.pick(&mut s.rng);
             p.end = Vec3::new(d, 0.0, 0.0) + c.beam_offset.pick(&mut s.rng);
         }
+        p
+    };
+    // Move and age the particles. A particle that dies is replaced in place when the emitter respawns its
+    // dead ones (so a full emitter stays full), and dropped otherwise.
+    let mut i = 0;
+    while i < s.particles.len() {
+        let p = &mut s.particles[i];
+        p.vel += c.acceleration * dt;
+        p.pos += p.vel * dt;
+        p.age += dt;
+        p.spin += p.spin_rate * dt;
+        if p.age >= p.life {
+            if c.respawn && !off && !s.kill_pending {
+                let carried = p.age - p.life;
+                let fresh = new_particle(s, &c, carried);
+                s.particles[i] = fresh;
+            } else {
+                s.particles.swap_remove(i);
+                continue;
+            }
+        }
+        i += 1;
+    }
+    if off || s.kill_pending {
+        s.deferred = 0;
+        return;
+    }
+    let cap = if c.max_particles == 0 { 128 } else { c.max_particles };
+    for _ in 0..s.deferred.min(cap) {
+        let p = new_particle(s, &c, 0.0);
         s.particles.push(p);
+    }
+    s.deferred = 0;
+    // Until the emitter has used all its slots once it fills at one rate (the initial one, or enough to be full
+    // in one lifetime when it spawns automatically); after that it emits at `ParticlesPerSecond`.
+    let filling = s.slots_used < cap;
+    let rate = if filling {
+        if c.auto_initial { cap as f32 / c.lifetime.mid().max(0.05) } else { c.initial_pps }
+    } else {
+        c.pps
+    };
+    s.accum += rate * dt;
+    while s.accum >= 1.0 && s.particles.len() < cap {
+        s.accum -= 1.0;
+        let p = new_particle(s, &c, 0.0);
+        s.particles.push(p);
+        s.slots_used = (s.slots_used + 1).min(cap);
     }
     s.accum = s.accum.min(1.0);
 }
@@ -426,7 +487,8 @@ pub fn collect(vm: &mut Vm<'_>, right: Vec3, up: Vec3) -> Vec<Quad> {
                 })
                 .unwrap_or(color);
             }
-            let mut alpha = color[3] * c.opacity;
+            // Visibility comes from the opacity and the fades; the colour's own alpha channel is not used.
+            let mut alpha = c.opacity;
             if let Some(end) = c.fade_in
                 && end > 0.0
                 && t < end
@@ -492,4 +554,77 @@ pub fn summary(vm: &mut Vm<'_>) -> Vec<(String, Vec3, usize)> {
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
+}
+
+/// Whether an emitter can still produce particles.
+fn finished(s: &EmitterState) -> bool {
+    let c = &s.config;
+    s.kill_pending || (!c.respawn && s.slots_used >= if c.max_particles == 0 { 128 } else { c.max_particles } && c.pps <= 0.0 && s.deferred == 0)
+}
+
+/// Emitter actors that asked to be destroyed when finished (`AutoDestroy`) and have nothing left on screen.
+pub fn finished_actors(vm: &mut Vm<'_>) -> Vec<ObjId> {
+    let mut by_actor: crate::HashMap<ObjId, (bool, bool)> = crate::HashMap::default();
+    for (key, s) in &world(vm).particles.states {
+        let e = by_actor.entry(key.0).or_insert((true, true));
+        e.0 &= s.particles.is_empty();
+        e.1 &= finished(s);
+    }
+    let mut out: Vec<ObjId> = by_actor.into_iter().filter(|(_, (empty, done))| *empty && *done).map(|(a, _)| a).collect();
+    out.sort();
+    out.retain(|&a| get(vm, a, "AutoDestroy").as_bool());
+    out
+}
+
+pub fn register(vm: &mut Vm<'_>) {
+    // Emitter.Kill(): stop all emission, let what is on screen fade, and destroy the actor when it is empty.
+    vm.register("Emitter.Kill", |vm, this, _a| {
+        let Some(actor) = this else { return Ok(Value::Empty) };
+        if let Value::Array(emitters) = get(vm, actor, "Emitters") {
+            for e in emitters.iter().filter_map(Value::as_obj) {
+                for name in ["RespawnDeadParticles", "AutomaticInitialSpawning", "AutoReset", "AutoDestroy"] {
+                    set(vm, e, name, Value::Bool(false));
+                }
+                for name in ["InitialParticlesPerSecond", "ParticlesPerSecond"] {
+                    set(vm, e, name, Value::Float(0.0));
+                }
+            }
+        }
+        set(vm, actor, "AutoDestroy", Value::Bool(true));
+        set(vm, actor, "AutoReset", Value::Bool(false));
+        for (key, s) in world(vm).particles.states.iter_mut() {
+            if key.0 == actor {
+                s.kill_pending = true;
+            }
+        }
+        Ok(Value::Empty)
+    });
+    // ParticleEmitter.SpawnParticle(Amount)
+    vm.register("ParticleEmitter.SpawnParticle", |vm, this, a| {
+        let (Some(e), Some(n)) = (this, a.first().map(Value::as_int)) else { return Ok(Value::Empty) };
+        for s in world(vm).particles.states.values_mut() {
+            if s.object == e && n > 0 {
+                s.deferred += n as usize;
+            }
+        }
+        Ok(Value::Empty)
+    });
+    // ParticleEmitter.Trigger(): toggles a trigger-disabled emitter and restarts one that resets on trigger.
+    vm.register("ParticleEmitter.Trigger", |vm, this, _a| {
+        let Some(e) = this else { return Ok(Value::Empty) };
+        if get(vm, e, "TriggerDisabled").as_bool() {
+            let now = get(vm, e, "Disabled").as_bool();
+            set(vm, e, "Disabled", Value::Bool(!now));
+        }
+        if get(vm, e, "ResetOnTrigger").as_bool() {
+            for s in world(vm).particles.states.values_mut() {
+                if s.object == e {
+                    s.particles.clear();
+                    s.slots_used = 0;
+                    s.accum = 0.0;
+                }
+            }
+        }
+        Ok(Value::Empty)
+    });
 }

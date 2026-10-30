@@ -214,7 +214,22 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             trigger_tag(&mut vm);
         }
         // HP3_HOLD=<key>@<tick>[-<tick>]: holds a key (as the app would) over a span of ticks.
-        if let Ok(spec) = std::env::var("HP3_HOLD")
+        for var in ["HP3_HOLD", "HP3_HOLD2"] {
+            let Ok(spec) = std::env::var(var) else { continue };
+            if let Some((key, span)) = spec.split_once('@') {
+                let (from, to) = span.split_once('-').map_or((span, ""), |(a, b)| (a, b));
+                let from: u32 = from.parse().unwrap_or(0);
+                let to: u32 = to.parse().unwrap_or(u32::MAX);
+                if frame == from {
+                    hp3_world::world(&mut vm).input.key_down(key);
+                }
+                if frame == to {
+                    hp3_world::world(&mut vm).input.key_up(key);
+                }
+            }
+        }
+        if false
+            && let Ok(spec) = std::env::var("HP3_HOLD")
             && let Some((key, span)) = spec.split_once('@')
         {
             let (from, to) = span.split_once('-').map_or((span, ""), |(a, b)| (a, b));
@@ -269,8 +284,9 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             let vel = hp3_world::physics::vec(&hp3_world::get(&mut vm, p, "Velocity"));
             let vyaw = (vel.y.atan2(vel.x) * 65536.0 / std::f32::consts::TAU).round() as i32 & 0xFFFF;
             let anim = hp3_world::get(&mut vm, p, "AnimSequence").as_name();
+            let cam_yaw = hp3_world::get(&mut vm, pc, "Camera").as_obj().map(|c| yaw(hp3_world::get(&mut vm, c, "rCurrRotation"))).unwrap_or(0);
             println!(
-                "pawnlog {frame}: pawn yaw {} vel yaw {vyaw} speed {:.0} view yaw {} anim {}",
+                "pawnlog {frame}: pawn yaw {} vel yaw {vyaw} speed {:.0} view yaw {} camera yaw {cam_yaw} anim {}",
                 yaw(pr),
                 vel.truncate().length(),
                 yaw(cr),
@@ -279,6 +295,11 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
         }
         let tick_start = std::time::Instant::now();
         hp3_world::tick(&mut vm, 1.0 / 60.0);
+        // HP3_CALC_VIEW=1: computes the player's view every tick, as the app does when drawing (the spell cursor
+        // is placed by it).
+        if std::env::var_os("HP3_CALC_VIEW").is_some() {
+            let _ = hp3_world::player_view(&mut vm);
+        }
         follow_travel(&mut vm);
         if let Some(start) = walkabout_from
             && frame >= start
