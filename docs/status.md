@@ -27,8 +27,9 @@ Milestones are from the plan (M0 to M12).
   and state code. `hp3-run levels <HP3 folder>` does this for every map: all 34 load, 33 log in a player
   (Entry has none, as it should), and play raises no script errors. Sound natives are still placeholders.
 - Performance: the interpreter runs at about 0.2 to 0.5 µs per statement; on a laptop Adv1 needs about 3 ms
-  per tick and HP3_InsideHub, the largest map, 12 to 16 ms (it was 160 ms: radius queries now use a spatial
-  grid, and calls cache their function information). Runs are deterministic: hash maps use a fixed hash, so
+  per tick and HP3_InsideHub, the largest map, about 5.5 ms (it was 160 ms: radius queries and touch
+  tracking use spatial grids, calls cache their function information, per-tick loops read Actor slots
+  directly, walkers at rest skip their floor probes). `HP3_TICK_PROFILE=1` times each tick phase. Runs are deterministic: hash maps use a fixed hash, so
   timers, latent actions and events are processed in the same order every time.
 - **M5 Playable render, in progress**: `hp3 <HP3 folder> [map]` opens an SDL3 window and draws the level with
   wgpu while its scripts run at 60 Hz. Keyboard and mouse go through the game's key bindings; the view is the

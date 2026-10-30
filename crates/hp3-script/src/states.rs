@@ -47,7 +47,8 @@ impl Vm<'_> {
 
     /// Calls a script event (a function found by name, state first) if the object has one.
     pub fn event(&mut self, obj: ObjId, name: &str, args: &mut [Value]) -> VmResult<Value> {
-        let Some(n) = self.db.names.find(name) else { return Ok(Value::Empty) };
+        // Interned lookup: no lowercasing allocation for names already seen (events fire every tick).
+        let n = self.db.names.intern(name);
         match self.find_function(Some(obj), None, n) {
             Some(f) if !self.is_trivial(f) => self.invoke(f, Some(obj), args),
             _ => Ok(Value::Empty),

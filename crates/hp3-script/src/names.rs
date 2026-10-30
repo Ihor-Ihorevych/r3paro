@@ -45,6 +45,9 @@ impl Names {
     }
 
     pub fn find(&self, s: &str) -> Option<Name> {
+        if let Some(&n) = self.exact.get(s) {
+            return Some(n);
+        }
         self.index.get(&s.to_ascii_lowercase()).copied()
     }
 

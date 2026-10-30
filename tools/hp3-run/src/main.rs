@@ -298,6 +298,12 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
     for (n, c) in missing.iter().take(40) {
         println!("  {c:7} {n}");
     }
+    if std::env::var_os("HP3_TICK_PROFILE").is_some() {
+        println!("time per tick phase:");
+        for (phase, t) in hp3_world::world(&mut vm).tick_profile.clone() {
+            println!("  {:>10.1} ms {phase}", t.as_secs_f64() * 1000.0);
+        }
+    }
     if vm.profile {
         let mut p: Vec<_> = vm.profile_counts.iter().map(|(f, n)| (*n, *f)).collect();
         p.sort_by(|a, b| b.0.cmp(&a.0));

@@ -45,22 +45,52 @@ fn extent(vm: &mut Vm<'_>, a: ObjId) -> Vec3 {
 
 /// Rebuilds the boxes of actors that block movement (static meshes collide by their triangles instead).
 fn refresh_actor_boxes(vm: &mut Vm<'_>) {
-    let actors = world(vm).actors.clone();
+    let actors = std::mem::take(&mut world(vm).actors);
+    let s = Slots::get(vm);
     let mut boxes = Vec::new();
-    for a in actors {
-        if !get(vm, a, "bCollideActors").as_bool() || !get(vm, a, "bBlockActors").as_bool() {
+    for &a in &actors {
+        if !crate::read(vm, a, s.collide).as_bool() || !crate::read(vm, a, s.block).as_bool() {
             continue;
         }
-        if get(vm, a, "StaticMesh").as_obj().is_some() {
+        if crate::read(vm, a, s.static_mesh).as_obj().is_some() {
             continue;
         }
-        let e = extent(vm, a);
-        if e.x <= 0.0 || e.z <= 0.0 {
+        let (r, h) = (crate::read(vm, a, s.radius).as_float(), crate::read(vm, a, s.height).as_float());
+        if r <= 0.0 || h <= 0.0 {
             continue;
         }
-        boxes.push(ActorBox { actor: a, center: vec(&get(vm, a, "Location")), extent: e });
+        boxes.push(ActorBox { actor: a, center: crate::read_vec(vm, a, s.location), extent: Vec3::new(r, r, h) });
     }
+    world(vm).actors = actors;
     world(vm).collision.actors = boxes;
+}
+
+/// Slots of the Actor properties the per-tick loops read.
+#[derive(Clone, Copy)]
+struct Slots {
+    collide: Option<usize>,
+    block: Option<usize>,
+    static_mesh: Option<usize>,
+    radius: Option<usize>,
+    height: Option<usize>,
+    location: Option<usize>,
+    physics: Option<usize>,
+    is_static: Option<usize>,
+}
+
+impl Slots {
+    fn get(vm: &mut Vm<'_>) -> Slots {
+        Slots {
+            collide: crate::actor_slot(vm, "bCollideActors"),
+            block: crate::actor_slot(vm, "bBlockActors"),
+            static_mesh: crate::actor_slot(vm, "StaticMesh"),
+            radius: crate::actor_slot(vm, "CollisionRadius"),
+            height: crate::actor_slot(vm, "CollisionHeight"),
+            location: crate::actor_slot(vm, "Location"),
+            physics: crate::actor_slot(vm, "Physics"),
+            is_static: crate::actor_slot(vm, "bStatic"),
+        }
+    }
 }
 
 /// Moves `a` by `delta`, stopping at the first hit. Returns the hit.
@@ -116,6 +146,11 @@ fn gravity(vm: &mut Vm<'_>, a: ObjId) -> f32 {
 fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     let accel = vec(&get(vm, a, "Acceleration"));
     let mut vel = vec(&get(vm, a, "Velocity"));
+    // A walker at rest stays put without probing its floor (a floor that moves away is not noticed until
+    // the walker moves again).
+    if accel.length_squared() <= 1e-4 && vel.length_squared() <= 1e-4 {
+        return;
+    }
     vel.z = 0.0;
     let max_speed = get(vm, a, "GroundSpeed").as_float().max(1.0);
     let friction = 8.0;
@@ -261,31 +296,51 @@ fn cylinders_overlap(a: (Vec3, f32, f32), b: (Vec3, f32, f32)) -> bool {
 /// Updates who touches whom for non-static colliding actors, firing `Touch` and `UnTouch` on both sides and
 /// keeping each actor's `Touching` array current.
 pub fn update_touching(vm: &mut Vm<'_>) {
-    let actors = world(vm).actors.clone();
+    let actors = std::mem::take(&mut world(vm).actors);
+    let s = Slots::get(vm);
     let mut colliders = Vec::new();
-    for a in actors {
-        if vm.db.objects.get(a).deleted || !get(vm, a, "bCollideActors").as_bool() {
+    for &a in &actors {
+        if vm.db.objects.get(a).deleted || !crate::read(vm, a, s.collide).as_bool() {
             continue;
         }
-        let e = extent(vm, a);
-        if e.x <= 0.0 && e.z <= 0.0 {
+        let (r, h) = (crate::read(vm, a, s.radius).as_float(), crate::read(vm, a, s.height).as_float());
+        if r <= 0.0 && h <= 0.0 {
             continue;
         }
-        let moving = get(vm, a, "Physics").as_byte() != PHYS_NONE && !get(vm, a, "bStatic").as_bool();
-        colliders.push((a, vec(&get(vm, a, "Location")), e.x, e.z, moving));
+        let moving = crate::read(vm, a, s.physics).as_byte() != PHYS_NONE && !crate::read(vm, a, s.is_static).as_bool();
+        colliders.push((a, crate::read_vec(vm, a, s.location), r, h, moving));
+    }
+    world(vm).actors = actors;
+    // Colliders bucketed by position; each moving one is tested against its neighbourhood only.
+    const CELL: f32 = 512.0;
+    let cell = |p: Vec3| ((p.x / CELL).floor() as i32, (p.y / CELL).floor() as i32);
+    let mut grid: hp3_script::fx::FxHashMap<(i32, i32), Vec<usize>> = Default::default();
+    let mut max_radius: f32 = 0.0;
+    for (i, c) in colliders.iter().enumerate() {
+        grid.entry(cell(c.1)).or_default().push(i);
+        max_radius = max_radius.max(c.2);
     }
     let mut now: hp3_script::fx::FxHashSet<(ObjId, ObjId)> = Default::default();
     for (i, m) in colliders.iter().enumerate() {
         if !m.4 {
             continue;
         }
-        for (j, o) in colliders.iter().enumerate() {
-            if i == j {
-                continue;
-            }
-            if cylinders_overlap((m.1, m.2, m.3), (o.1, o.2, o.3)) {
-                let pair = if m.0 < o.0 { (m.0, o.0) } else { (o.0, m.0) };
-                now.insert(pair);
+        let reach = m.2 + max_radius;
+        let (x0, y0) = cell(m.1 - Vec3::splat(reach));
+        let (x1, y1) = cell(m.1 + Vec3::splat(reach));
+        for cx in x0..=x1 {
+            for cy in y0..=y1 {
+                let Some(list) = grid.get(&(cx, cy)) else { continue };
+                for &j in list {
+                    if i == j {
+                        continue;
+                    }
+                    let o = &colliders[j];
+                    if cylinders_overlap((m.1, m.2, m.3), (o.1, o.2, o.3)) {
+                        let pair = if m.0 < o.0 { (m.0, o.0) } else { (o.0, m.0) };
+                        now.insert(pair);
+                    }
+                }
             }
         }
     }
@@ -326,12 +381,30 @@ fn remove_touching(vm: &mut Vm<'_>, a: ObjId, other: ObjId) {
 /// Runs one physics step for every moving actor.
 pub fn step(vm: &mut Vm<'_>, dt: f32) {
     refresh_actor_boxes(vm);
-    let actors = world(vm).actors.clone();
-    for a in actors {
-        if vm.db.objects.get(a).deleted || get(vm, a, "bStatic").as_bool() {
+    let s = Slots::get(vm);
+    // Only actors with physics move; most of a level has none.
+    let actors = std::mem::take(&mut world(vm).actors);
+    let movers: Vec<ObjId> = actors
+        .iter()
+        .copied()
+        .filter(|&a| crate::read(vm, a, s.physics).as_byte() != PHYS_NONE && !crate::read(vm, a, s.is_static).as_bool())
+        .collect();
+    world(vm).actors = actors;
+    if std::env::var_os("HP3_MOVERS").is_some() && world(vm).frame == 100 {
+        let mut by: std::collections::BTreeMap<(u8, String), usize> = Default::default();
+        for &a in &movers {
+            let class = vm.db.objects.get(a).class.map(|c| vm.db.names.get(vm.db.get(c).name).to_string()).unwrap_or_default();
+            *by.entry((crate::read(vm, a, s.physics).as_byte(), class)).or_default() += 1;
+        }
+        for ((p, c), n) in by {
+            eprintln!("movers: physics {p} {c} x{n}");
+        }
+    }
+    for a in movers {
+        if vm.db.objects.get(a).deleted {
             continue;
         }
-        match get(vm, a, "Physics").as_byte() {
+        match crate::read(vm, a, s.physics).as_byte() {
             PHYS_WALKING => walk(vm, a, dt),
             PHYS_FALLING => fall(vm, a, dt),
             PHYS_FLYING | PHYS_SWIMMING => fly(vm, a, dt),

@@ -56,6 +56,9 @@ pub struct World {
     /// Opacity set by `SetOpacity` (1 when absent).
     pub opacity: HashMap<ObjId, f32>,
     pub canvas: canvas::CanvasState,
+    actor_slots: HashMap<&'static str, Option<usize>>,
+    /// Time per tick phase, when `HP3_TICK_PROFILE` is set.
+    pub tick_profile: std::collections::BTreeMap<&'static str, std::time::Duration>,
 }
 
 /// The world stored in the VM. Panics if no level is loaded.
@@ -77,6 +80,34 @@ pub fn slot(vm: &mut Vm<'_>, obj: ObjId, name: &str) -> Option<usize> {
         w.slots.insert((class, n), s);
     }
     s
+}
+
+/// Slot of a property declared on `Actor` (the same in every actor class), resolved once.
+pub fn actor_slot(vm: &mut Vm<'_>, name: &'static str) -> Option<usize> {
+    if let Some(s) = world(vm).actor_slots.get(name) {
+        return *s;
+    }
+    let s = vm.db.find("Actor").and_then(|c| {
+        let n = vm.db.names.find(name)?;
+        vm.db.get(c).prop(n).map(|p| p.slot)
+    });
+    world(vm).actor_slots.insert(name, s);
+    s
+}
+
+static EMPTY: Value = Value::Empty;
+
+/// The value in an actor's slot, without copying it (`Value::Empty` when missing).
+pub fn read<'v>(vm: &'v Vm<'_>, a: ObjId, slot: Option<usize>) -> &'v Value {
+    slot.and_then(|s| vm.db.objects.values(a).and_then(|v| v.get(s))).unwrap_or(&EMPTY)
+}
+
+/// A vector held in an actor's slot.
+pub fn read_vec(vm: &Vm<'_>, a: ObjId, slot: Option<usize>) -> glam::Vec3 {
+    match read(vm, a, slot) {
+        Value::Struct(f) if f.len() >= 3 => glam::Vec3::new(f[0].as_float(), f[1].as_float(), f[2].as_float()),
+        _ => glam::Vec3::ZERO,
+    }
 }
 
 pub fn get(vm: &mut Vm<'_>, obj: ObjId, name: &str) -> Value {
@@ -194,6 +225,8 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Res
         nav: Default::default(),
         opacity: Default::default(),
         canvas: Default::default(),
+        tick_profile: Default::default(),
+        actor_slots: Default::default(),
         config,
     }));
     let collision = build_collision(vm, map, level_model, &actors);
@@ -297,28 +330,47 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         let t = world(vm).time;
         set(vm, li, "TimeSeconds", Value::Float(t));
     }
+    let profile = std::env::var_os("HP3_TICK_PROFILE").is_some();
+    let mut t = std::time::Instant::now();
+    let mut mark = |vm: &mut Vm<'_>, phase: &'static str| {
+        if profile {
+            let e = t.elapsed();
+            *world(vm).tick_profile.entry(phase).or_default() += e;
+            t = std::time::Instant::now();
+        }
+    };
     // The player's controller reads input and moves first, as the local player does.
     follow_player(vm);
     if let Some(pc) = world(vm).player {
         input::apply(vm, pc);
         fire(vm, pc, "PlayerTick", &mut [Value::Float(dt)]);
     }
+    mark(vm, "player");
     nav::tick(vm, dt);
+    mark(vm, "nav");
     physics::step(vm, dt);
+    mark(vm, "physics");
     physics::update_touching(vm);
+    mark(vm, "touching");
     anim::update_movement(vm);
+    mark(vm, "movement anims");
     anim::tick(vm, dt);
     anim::update_attachments(vm);
+    mark(vm, "animation");
     // Ticked actors carry the frame's parity in `bTicked`; scripts compare it to see a new frame (HP3's
     // camera updates its view once per frame this way).
     let parity = world(vm).frame % 2 == 1;
+    let ticked = actor_slot(vm, "bTicked");
     for &a in &actors {
         if vm.db.objects.get(a).deleted {
             continue;
         }
-        set(vm, a, "bTicked", Value::Bool(parity));
+        if let Some(v) = ticked.and_then(|s| vm.db.objects.values_mut(a).and_then(|v| v.get_mut(s))) {
+            *v = Value::Bool(parity);
+        }
         fire(vm, a, "Tick", &mut [Value::Float(dt)]);
     }
+    mark(vm, "Tick events");
     let mut due = Vec::new();
     for (&a, t) in world(vm).timers.iter_mut() {
         t.remaining -= dt;
@@ -335,6 +387,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
             fire(vm, a, "Timer", &mut []);
         }
     }
+    mark(vm, "timers");
     for &a in &actors {
         if vm.db.objects.get(a).deleted {
             continue;
