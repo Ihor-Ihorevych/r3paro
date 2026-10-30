@@ -23,6 +23,9 @@ fn main() -> ExitCode {
         Some("names") if args.len() == 2 => names(Path::new(&args[1])),
         Some("dump") if args.len() == 4 => dump(Path::new(&args[1]), &args[2], &args[3]),
         Some("tails") if args.len() >= 3 => tails(Path::new(&args[1]), &args[2], args.get(3).map(|s| s.parse().unwrap_or(20)).unwrap_or(20)),
+        Some("textures") if args.len() >= 4 => {
+            textures(Path::new(&args[1]), &args[2], Path::new(&args[3]), args.get(4).map(String::as_str))
+        }
         Some("hex") if args.len() == 6 => hex(Path::new(&args[1]), &args[2], &args[3], &args[4], &args[5]),
         Some("check") if args.len() >= 2 => {
             let verbose = args.iter().any(|a| a == "-v");
@@ -185,6 +188,63 @@ fn tails(root: &Path, class: &str, max: usize) -> R {
         }
     }
     println!("{errors} errors");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Writes the first mip of every texture in a package (optionally only names containing `filter`) as PNG.
+fn textures(root: &Path, package: &str, out: &Path, filter: Option<&str>) -> R {
+    use hp3_assets::texture::{self, Format};
+    use hp3_package::props;
+    let set = PackageSet::open(root)?;
+    let pkg = set.get(package)?;
+    std::fs::create_dir_all(out)?;
+    let (mut written, mut skipped) = (0, 0);
+    for i in 0..pkg.exports.len() {
+        let name = pkg.ref_path(ObjRef::from_export(i));
+        if filter.is_some_and(|f| !name.to_ascii_lowercase().contains(&f.to_ascii_lowercase())) {
+            continue;
+        }
+        let chain = set.export_chain(&pkg, i);
+        let o = object::read_export(&pkg, i, &chain)?;
+        if !matches!(o.native_class, "Texture" | "FireTexture" | "WetTexture" | "IceTexture" | "MovieTexture") {
+            continue;
+        }
+        let format = props::find(&pkg, &o.tags, "Format", 0).and_then(|t| t.as_u8()).unwrap_or(0);
+        let Some(format) = Format::from_u8(format) else {
+            skipped += 1;
+            continue;
+        };
+        let base = pkg.exports[i].serial_offset + pkg.exports[i].serial_size - o.tail.len();
+        let mut r = hp3_package::Reader::with_base(o.tail, base);
+        let tex = texture::read_texture(&mut r)?;
+        let Some(mip) = tex.mips.first() else {
+            skipped += 1;
+            continue;
+        };
+        let palette = props::find(&pkg, &o.tags, "Palette", 0)
+            .and_then(|t| t.as_obj())
+            .and_then(|p| p.export())
+            .and_then(|pi| {
+                let pchain = set.export_chain(&pkg, pi);
+                let po = object::read_export(&pkg, pi, &pchain).ok()?;
+                let mut pr = hp3_package::Reader::new(po.tail);
+                texture::read_palette(&mut pr).ok()
+            });
+        let data = &pkg.data[mip.data_offset..mip.data_offset + mip.data_len];
+        let (w, h) = (mip.width as usize, mip.height as usize);
+        let Some(rgba) = texture::decode_rgba(format, w, h, data, palette.as_ref()) else {
+            eprintln!("skip {name}: {format:?} {w}x{h} ({} bytes)", data.len());
+            skipped += 1;
+            continue;
+        };
+        let file = out.join(format!("{}.png", name.replace(['.', '/', '\\'], "_")));
+        let mut enc = png::Encoder::new(std::io::BufWriter::new(std::fs::File::create(&file)?), w as u32, h as u32);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header()?.write_image_data(&rgba)?;
+        written += 1;
+    }
+    println!("{written} textures written to {}, {skipped} skipped", out.display());
     Ok(ExitCode::SUCCESS)
 }
 

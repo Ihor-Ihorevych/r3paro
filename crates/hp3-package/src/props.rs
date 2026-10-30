@@ -58,6 +58,39 @@ pub struct Tag<'a> {
     pub data: &'a [u8],
 }
 
+impl Tag<'_> {
+    pub fn as_u8(&self) -> Option<u8> {
+        self.data.first().copied()
+    }
+
+    pub fn as_i32(&self) -> Option<i32> {
+        Some(i32::from_le_bytes(self.data.get(..4)?.try_into().ok()?))
+    }
+
+    pub fn as_f32(&self) -> Option<f32> {
+        Some(f32::from_bits(self.as_i32()? as u32))
+    }
+
+    /// Object or class reference.
+    pub fn as_obj(&self) -> Option<crate::ObjRef> {
+        Reader::new(self.data).ci().ok().map(crate::ObjRef)
+    }
+
+    /// Name index.
+    pub fn as_name(&self) -> Option<usize> {
+        Reader::new(self.data).ci().ok().and_then(|v| usize::try_from(v).ok())
+    }
+
+    pub fn as_str(&self) -> Option<String> {
+        Reader::new(self.data).fstring().ok()
+    }
+}
+
+/// Finds the first tag called `name` (array index 0 unless given).
+pub fn find<'t, 'a>(pkg: &Package, tags: &'t [Tag<'a>], name: &str, index: u32) -> Option<&'t Tag<'a>> {
+    tags.iter().find(|t| t.array_index == index && pkg.name(t.name).eq_ignore_ascii_case(name))
+}
+
 /// Reads one tag; `None` at the terminating `None` name.
 pub fn read_tag<'a>(pkg: &Package, r: &mut Reader<'a>) -> Result<Option<Tag<'a>>> {
     let start = r.file_pos();
