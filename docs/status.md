@@ -36,7 +36,11 @@ Milestones are from the plan (M0 to M12).
   directly skips the menu and New Game flow that starts it). F1 toggles a free camera. Characters and other
   live actors are drawn with their meshes and skins, skinned on the CPU each frame from their animation;
   static actors are baked into the level geometry. `hp3-view play <HP3 folder> <map> <out.png>` renders the
-  same headless. Not yet: lighting, terrain rendering, skyboxes, emitters, translucency, HUD.
+  same headless. Static lighting: BSP lightmaps are built at load from the map's lights and their stored shadow
+  bitmaps plus each zone's ambient light (`AmbientVector`); static meshes are lit per vertex (no shadows yet)
+  and live actors as a whole by the lights around them. The light model is an approximation, not yet matched
+  to HP3's renderer; `HP3_UNLIT=1` turns lighting off. Not yet: terrain rendering, skyboxes, emitters,
+  translucency, fog, dynamic lights, HUD.
 - **M6 Movement, started**: swept-box collision against the level BSP, static mesh and terrain triangles and
   blocking actors; walking (friction, step-up of 24, sliding, floor snapping), falling and landing, flying,
   projectiles; touch events from collision cylinders; `Trace`, `FastTrace`, `TraceActors`. Holding W walks

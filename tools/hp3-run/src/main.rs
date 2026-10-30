@@ -160,6 +160,21 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                 let name = ch.sequence.and_then(|s| set.map(|set| set.sequences[s].name.clone()));
                 println!("  pawn anim channel 0: {name:?} frame {:.1} rate {:.1} looping {} playing {}", ch.frame, ch.rate, ch.looping, ch.playing);
             }
+            if std::env::var("HP3_ZONE_DEBUG").is_ok() {
+                let actors = hp3_world::world(&mut vm).actors.clone();
+                let zone = vm.db.find("ZoneInfo");
+                for a in actors {
+                    if !vm.db.objects.get(a).class.zip(zone).is_some_and(|(c, z)| vm.is_child_of(c, z)) {
+                        continue;
+                    }
+                    let name = hp3_script::natives::object_path(&vm, a);
+                    let v: Vec<_> = ["AmbientBrightness", "AmbientHue", "AmbientSaturation", "AmbientVector", "DistanceFogColor", "DistanceFogStart", "DistanceFogEnd"]
+                        .iter()
+                        .map(|n| format!("{n}={:?}", hp3_world::get(&mut vm, a, n)))
+                        .collect();
+                    println!("  zone {name}: {}", v.join(" "));
+                }
+            }
             if std::env::var("HP3_ATTACH_DEBUG").is_ok() {
                 let list: Vec<_> = hp3_world::world(&mut vm).anim.attachments.iter().map(|(k, v)| (*k, v.clone())).collect();
                 for (child, (parent, bone)) in list {

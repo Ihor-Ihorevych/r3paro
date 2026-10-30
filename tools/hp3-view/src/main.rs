@@ -120,7 +120,7 @@ fn pose(root: &Path, package: &str, mesh: &str, out: &Path, seq: Option<&str>, f
     let gpu_scene = renderer.upload_scene(&scene::Scene::default());
     let camera = Camera { position: Vec3::new(180.0, 0.0, 10.0), rotation: [0, 32768, 0], fov_degrees: 70.0 };
     let (w, h) = (800, 800);
-    let refs = [(&gpu, glam::Mat4::IDENTITY)];
+    let refs = [(&gpu, glam::Mat4::IDENTITY, glam::Vec3::splat(0.5))];
     let rgba = renderer.render_frame_to_rgba(w, h, |c, d| dynamic.draw(&renderer, &gpu_scene, &refs, &camera, c, d, 1.0));
     write_png(out, w, h, &rgba)
 }
@@ -142,11 +142,13 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
         hp3_world::tick(&mut vm, 1.0 / 60.0);
     }
     let statics = hp3_engine::static_exports(&mut vm, &pkg);
-    let scene = scene::build_with(&loader, &pkg, &|i| statics.contains(&i));
+    // HP3_UNLIT=1 draws everything at full brightness.
+    let lighting = (std::env::var_os("HP3_UNLIT").is_none()).then(|| hp3_engine::lighting(&mut vm, &pkg));
+    let scene = scene::build_with(&loader, &pkg, &|i| statics.contains(&i), lighting.as_ref());
     let renderer = Renderer::new_headless()?;
     let dynamic = Dynamic::new(&renderer);
     let mut cache = hp3_engine::MeshCache::default();
-    let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut cache);
+    let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut cache, lighting.as_ref());
     eprintln!("{} static batches, {} live actors drawn", scene.batches.len(), instances.len());
     let pc = hp3_world::world(&mut vm).player.ok_or("no player")?;
     let mut pawn = hp3_world::get(&mut vm, pc, "Pawn").as_obj().ok_or("no pawn")?;
@@ -161,6 +163,7 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
             })
             .collect();
         pawn = *matching.get(n).ok_or("no actor of that class")?;
+        eprintln!("framing {spec} at {:?}", hp3_world::get(&mut vm, pawn, "Location"));
     }
     let p = hp3_world::physics::vec(&hp3_world::get(&mut vm, pawn, "Location"));
     let yaw = hp3_world::get(&mut vm, pawn, "Rotation").fields().get(1).map(Value::as_int).unwrap_or(0);
@@ -169,7 +172,7 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
     let camera = Camera { position: p - back * 160.0 + Vec3::Z * 50.0, rotation: [-1500, yaw, 0], fov_degrees: 90.0 };
     let (w, h) = (1280, 720);
     let gpu_scene = renderer.upload_scene(&scene);
-    let refs: Vec<_> = instances.iter().map(|(m, t)| (m.as_ref(), *t)).collect();
+    let refs: Vec<_> = instances.iter().map(|(m, t, l)| (m.as_ref(), *t, *l)).collect();
     let rgba = renderer.render_frame_to_rgba(w, h, |color, depth| dynamic.draw(&renderer, &gpu_scene, &refs, &camera, color, depth, w as f32 / h as f32));
     write_png(out, w, h, &rgba)
 }

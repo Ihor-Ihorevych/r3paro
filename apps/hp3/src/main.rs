@@ -116,7 +116,9 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
     // Static actors are baked into the level's geometry; everything else is drawn per frame.
     let statics = hp3_engine::static_exports(&mut vm, &pkg);
     let t = Instant::now();
-    let scene = scene::build_with(&loader, &pkg, &|i| statics.contains(&i));
+    // HP3_UNLIT=1 draws everything at full brightness.
+    let lighting = (std::env::var_os("HP3_UNLIT").is_none()).then(|| hp3_engine::lighting(&mut vm, &pkg));
+    let scene = scene::build_with(&loader, &pkg, &|i| statics.contains(&i), lighting.as_ref());
     eprintln!("{map}: scene built in {:?} ({:?})", t.elapsed(), scene.stats);
 
     let sdl = sdl3::init()?;
@@ -259,8 +261,8 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
             Err(e) => return Err(e.into()),
         };
         let view = frame.texture.create_view(&Default::default());
-        let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut mesh_cache);
-        let refs: Vec<_> = instances.iter().map(|(m, t)| (m.as_ref(), *t)).collect();
+        let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut mesh_cache, lighting.as_ref());
+        let refs: Vec<_> = instances.iter().map(|(m, t, l)| (m.as_ref(), *t, *l)).collect();
         let cmd = dynamic.draw(&renderer, &gpu_scene, &refs, &camera, &view, &depth, width as f32 / height as f32);
         renderer.queue.submit([cmd]);
         frame.present();

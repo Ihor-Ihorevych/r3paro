@@ -451,6 +451,10 @@ pub fn register(vm: &mut Vm<'_>) {
         let bone = vm.db.names.get(a[1].as_name()).to_ascii_lowercase();
         let found = get(vm, o, "Mesh").as_obj().and_then(|m| skeleton_of(vm, m)).is_some_and(|s| s.skeleton.find(&bone).is_some());
         if !found {
+            if std::env::var("HP3_ANIM_TRACE").is_ok() {
+                let mesh = get(vm, o, "Mesh").as_obj().map(|m| hp3_script::natives::object_path(vm, m));
+                eprintln!("anim: AttachToBone {bone} failed on {o:?} with mesh {mesh:?}");
+            }
             return Ok(Value::Bool(false));
         }
         set(vm, child, "Base", Value::Object(Some(o)));

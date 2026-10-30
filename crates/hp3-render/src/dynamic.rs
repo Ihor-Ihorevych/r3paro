@@ -13,7 +13,8 @@ use crate::scene::{Camera, Vertex};
 
 const SHADER: &str = r#"
 struct Globals { view_proj: mat4x4<f32> };
-struct Model { model: mat4x4<f32> };
+// The model matrix and the light reaching the actor (halved, like vertex colors).
+struct Model { model: mat4x4<f32>, light: vec4<f32> };
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
@@ -21,7 +22,8 @@ struct Model { model: mat4x4<f32> };
 
 struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 
-@vertex fn vs(@location(0) position: vec3<f32>, @location(1) uv: vec2<f32>) -> VsOut {
+@vertex fn vs(@location(0) position: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) light_uv: vec2<f32>,
+              @location(3) color: vec3<f32>) -> VsOut {
     var o: VsOut;
     o.pos = globals.view_proj * m.model * vec4<f32>(position, 1.0);
     o.uv = uv;
@@ -31,7 +33,7 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 @fragment fn fs(i: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, i.uv);
     if (c.a < 0.5) { discard; }
-    return vec4<f32>(c.rgb, 1.0);
+    return vec4<f32>(c.rgb * m.light.rgb * 2.0, 1.0);
 }
 "#;
 
@@ -71,11 +73,11 @@ impl Dynamic {
             label: Some("model"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: true,
-                    min_binding_size: wgpu::BufferSize::new(64),
+                    min_binding_size: wgpu::BufferSize::new(80),
                 },
                 count: None,
             }],
@@ -94,7 +96,7 @@ impl Dynamic {
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2],
+                    attributes: &crate::gpu::VERTEX_ATTRIBUTES,
                 }],
                 compilation_options: Default::default(),
             },
@@ -132,7 +134,7 @@ impl Dynamic {
             layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &buffer, offset: 0, size: wgpu::BufferSize::new(64) }),
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &buffer, offset: 0, size: wgpu::BufferSize::new(80) }),
             }],
         });
         (buffer, bind)
@@ -187,7 +189,7 @@ impl Dynamic {
                 .vertices
                 .iter()
                 .zip(&b.points)
-                .map(|(v, &p)| Vertex { position: points.get(p as usize).map(|p| p.to_array()).unwrap_or(v.position), uv: v.uv })
+                .map(|(v, &p)| Vertex { position: points.get(p as usize).map(|p| p.to_array()).unwrap_or(v.position), ..*v })
                 .collect();
             r.queue.write_buffer(&d.vertices, 0, bytemuck::cast_slice(&verts));
         }
@@ -198,7 +200,7 @@ impl Dynamic {
         &self,
         r: &Renderer,
         scene: &GpuScene,
-        meshes: &[(&GpuMesh, Mat4)],
+        meshes: &[(&GpuMesh, Mat4, glam::Vec3)],
         camera: &Camera,
         color: &wgpu::TextureView,
         depth: &wgpu::TextureView,
@@ -212,10 +214,11 @@ impl Dynamic {
                 *inst = (b, g, cap);
             }
             let mut data = vec![0u8; (meshes.len() as u64 * STRIDE) as usize];
-            for (i, (mesh, world)) in meshes.iter().enumerate() {
+            for (i, (mesh, world, light)) in meshes.iter().enumerate() {
                 let m = (*world * mesh.local).to_cols_array();
                 let off = i * STRIDE as usize;
                 data[off..off + 64].copy_from_slice(bytemuck::cast_slice(&m));
+                data[off + 64..off + 80].copy_from_slice(bytemuck::cast_slice(&light.extend(1.0).to_array()));
             }
             if !data.is_empty() {
                 r.queue.write_buffer(&inst.0, 0, &data);
@@ -224,7 +227,7 @@ impl Dynamic {
         let inst = self.instances.borrow();
         r.draw_with(scene, camera, color, depth, aspect, |pass| {
             pass.set_pipeline(&self.pipeline);
-            for (i, (mesh, _)) in meshes.iter().enumerate() {
+            for (i, (mesh, _, _)) in meshes.iter().enumerate() {
                 pass.set_bind_group(2, &inst.1, &[(i as u64 * STRIDE) as u32]);
                 for d in &mesh.draws {
                     pass.set_bind_group(1, &d.bind, &[]);

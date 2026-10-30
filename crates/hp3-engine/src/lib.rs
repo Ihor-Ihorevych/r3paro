@@ -9,7 +9,7 @@ use hp3_package::{ObjRef, Package};
 use hp3_render::dynamic::{Dynamic, GpuMesh};
 use hp3_render::gpu::Renderer;
 use hp3_render::meshes::{self, MeshGeom};
-use hp3_render::scene::rotation_matrix;
+use hp3_render::scene::{rotation_matrix, LightSource, Lighting};
 use hp3_script::{ObjId, Value, Vm};
 use hp3_world::{get, world};
 
@@ -25,6 +25,73 @@ pub fn static_exports(vm: &mut Vm<'_>, map: &Package) -> HashSet<usize> {
         if pkg.as_ref() == map.name.to_ascii_lowercase() && get(vm, a, "bStatic").as_bool() {
             out.insert(index);
         }
+    }
+    out
+}
+
+/// `LightEffect` of sunlights in HP3 (the `Sunlight` class default).
+const LE_SUNLIGHT: u8 = 19;
+
+/// Unreal light color: `hue` around the color wheel (0..255), `saturation` 255 meaning white.
+fn light_color(hue: u8, saturation: u8) -> Vec3 {
+    let h = hue as f32 / 255.0 * 6.0;
+    let x = 1.0 - ((h % 2.0) - 1.0).abs();
+    let pure = match h as u32 {
+        0 => Vec3::new(1.0, x, 0.0),
+        1 => Vec3::new(x, 1.0, 0.0),
+        2 => Vec3::new(0.0, 1.0, x),
+        3 => Vec3::new(0.0, x, 1.0),
+        4 => Vec3::new(x, 0.0, 1.0),
+        _ => Vec3::new(1.0, 0.0, x),
+    };
+    pure.lerp(Vec3::ONE, saturation as f32 / 255.0)
+}
+
+/// The map's lights and ambient light, read from the running world (class defaults applied).
+pub fn lighting(vm: &mut Vm<'_>, map: &Package) -> Lighting {
+    let mut out = Lighting::default();
+    let map_name = map.name.to_ascii_lowercase();
+    let actors = world(vm).actors.clone();
+    for a in actors {
+        let Some((pkg, index)) = vm.db.objects.get(a).key.clone() else { continue };
+        if pkg.as_ref() != map_name || get(vm, a, "LightType").as_byte() == 0 {
+            continue;
+        }
+        let brightness = get(vm, a, "LightBrightness").as_float() / 255.0;
+        if brightness <= 0.0 {
+            continue;
+        }
+        let color = light_color(get(vm, a, "LightHue").as_byte(), get(vm, a, "LightSaturation").as_byte()) * brightness;
+        let position = vec3(&get(vm, a, "Location"));
+        let radius = 25.0 * (get(vm, a, "LightRadius").as_float() + 1.0);
+        let direction = (get(vm, a, "LightEffect").as_byte() == LE_SUNLIGHT).then(|| {
+            let r: Vec<i32> = get(vm, a, "Rotation").fields().iter().map(Value::as_int).collect();
+            let m = rotation_matrix([r.first().copied().unwrap_or(0), r.get(1).copied().unwrap_or(0), 0]);
+            m.transform_vector3(Vec3::X)
+        });
+        out.lights.insert(index, LightSource { position, color, radius, direction });
+    }
+    // Zones carry their ambient light, already computed, in `AmbientVector`.
+    let (zone, sky) = (vm.db.find("ZoneInfo"), vm.db.find("SkyZoneInfo"));
+    let actors = world(vm).actors.clone();
+    let mut sum = (Vec3::ZERO, 0);
+    for a in actors {
+        let Some(class) = vm.db.objects.get(a).class else { continue };
+        if !zone.is_some_and(|z| vm.is_child_of(class, z)) {
+            continue;
+        }
+        let Some((pkg, index)) = vm.db.objects.get(a).key.clone() else { continue };
+        if pkg.as_ref() != map_name {
+            continue;
+        }
+        let ambient = vec3(&get(vm, a, "AmbientVector"));
+        out.zone_ambient.insert(index, ambient);
+        if ambient != Vec3::ZERO && !sky.is_some_and(|s| vm.is_child_of(class, s)) {
+            sum = (sum.0 + ambient, sum.1 + 1);
+        }
+    }
+    if sum.1 > 0 {
+        out.ambient = sum.0 / sum.1 as f32;
     }
     out
 }
@@ -168,7 +235,8 @@ pub fn actor_instances(
     r: &Renderer,
     dynamic: &Dynamic,
     cache: &mut MeshCache,
-) -> Vec<(Rc<GpuMesh>, Mat4)> {
+    lighting: Option<&Lighting>,
+) -> Vec<(Rc<GpuMesh>, Mat4, Vec3)> {
     let actors = world(vm).actors.clone();
     let mut out = Vec::new();
     for a in actors {
@@ -202,7 +270,10 @@ pub fn actor_instances(
         let s3 = if s3 == Vec3::ZERO { Vec3::ONE } else { s3 };
         let prepivot = vec3(&get(vm, a, "PrePivot"));
         let transform = Mat4::from_translation(loc + prepivot) * rotation_matrix(rot) * Mat4::from_scale(s3 * scale);
-        out.push((gpu, transform));
+        // Actors are lit as a whole by the lights around them (half: the shader doubles it).
+        // Capped, so an actor next to a strong light is bright but not washed out.
+        let light = lighting.map(|l| l.actor_light(loc).min(Vec3::splat(1.25)) * 0.5).unwrap_or(Vec3::splat(0.5));
+        out.push((gpu, transform, light));
     }
     out
 }

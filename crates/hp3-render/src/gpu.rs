@@ -12,22 +12,38 @@ struct Globals { view_proj: mat4x4<f32> };
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
+@group(1) @binding(2) var lightmap: texture_2d<f32>;
+@group(1) @binding(3) var lsamp: sampler;
 
-struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) light_uv: vec2<f32>,
+    @location(2) color: vec3<f32>,
+};
 
-@vertex fn vs(@location(0) position: vec3<f32>, @location(1) uv: vec2<f32>) -> VsOut {
+@vertex fn vs(@location(0) position: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) light_uv: vec2<f32>,
+              @location(3) color: vec3<f32>) -> VsOut {
     var o: VsOut;
     o.pos = globals.view_proj * vec4<f32>(position, 1.0);
     o.uv = uv;
+    o.light_uv = light_uv;
+    o.color = color;
     return o;
 }
 
+// Light is stored halved (vertex color and lightmap): doubled here, so surfaces can be lit beyond their texture.
 @fragment fn fs(i: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, i.uv);
     if (c.a < 0.5) { discard; }
-    return vec4<f32>(c.rgb, 1.0);
+    let light = textureSample(lightmap, lsamp, i.light_uv).rgb * i.color * 4.0;
+    return vec4<f32>(c.rgb * light, 1.0);
 }
 "#;
+
+/// Vertex buffer layout of `Vertex`.
+pub const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 4] =
+    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32x2, 3 => Float32x3];
 
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
@@ -38,6 +54,9 @@ pub struct Renderer {
     globals_layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    clamp_sampler: wgpu::Sampler,
+    /// Lightmap of surfaces lit by their vertex colors: one texel at half, which the shader doubles to one.
+    white_lightmap: wgpu::TextureView,
     pub color_format: wgpu::TextureFormat,
     pub adapter_info: String,
 }
@@ -96,6 +115,22 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -112,7 +147,7 @@ impl Renderer {
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2],
+                    attributes: &VERTEX_ATTRIBUTES,
                 }],
                 compilation_options: Default::default(),
             },
@@ -141,6 +176,12 @@ impl Renderer {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        let clamp_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let white_lightmap = upload_linear(&device, &queue, 1, 1, &[128, 128, 128, 255]);
         Ok(Renderer {
             device,
             queue,
@@ -148,6 +189,8 @@ impl Renderer {
             globals_layout,
             texture_layout,
             sampler,
+            clamp_sampler,
+            white_lightmap,
             color_format,
             adapter_info: format!("{} ({:?})", info.name, info.backend),
         })
@@ -161,14 +204,24 @@ impl Renderer {
         &self.texture_layout
     }
 
-    /// A bind group sampling `view` with the shared repeat sampler.
+    /// A bind group sampling `view` with the shared repeat sampler, lit by its vertex colors only.
     pub fn texture_bind(&self, view: &wgpu::TextureView) -> wgpu::BindGroup {
+        self.texture_bind_lit(view, None)
+    }
+
+    /// A bind group sampling `view`, lit by `lightmap` (times the vertex colors) when given.
+    pub fn texture_bind_lit(&self, view: &wgpu::TextureView, lightmap: Option<&wgpu::TextureView>) -> wgpu::BindGroup {
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &self.texture_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(lightmap.unwrap_or(&self.white_lightmap)),
+                },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.clamp_sampler) },
             ],
         })
     }
@@ -230,20 +283,16 @@ impl Renderer {
         for (k, img) in &scene.images {
             views.insert(k.clone(), self.upload(img.width, img.height, &img.rgba));
         }
+        // Lightmaps hold light levels, not colors: uploaded linear.
+        let lightmaps: Vec<wgpu::TextureView> =
+            scene.lightmaps.iter().map(|img| upload_linear(&self.device, &self.queue, img.width, img.height, &img.rgba)).collect();
         let mut draws = Vec::new();
         for batch in &scene.batches {
             if batch.indices.is_empty() {
                 continue;
             }
             let view = batch.texture.as_ref().and_then(|k| views.get(k)).unwrap_or(&white);
-            let bind = d.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &self.texture_layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                ],
-            });
+            let bind = self.texture_bind_lit(view, batch.lightmap.and_then(|i| lightmaps.get(i)));
             let vertices = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,
                 contents: bytemuck::cast_slice(&batch.vertices),
@@ -366,6 +415,25 @@ impl Renderer {
         }
         out
     }
+}
+
+fn upload_linear(device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32, rgba: &[u8]) -> wgpu::TextureView {
+    let tex = device.create_texture_with_data(
+        queue,
+        &wgpu::TextureDescriptor {
+            label: Some("lightmap"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        },
+        wgpu::util::TextureDataOrder::LayerMajor,
+        rgba,
+    );
+    tex.create_view(&Default::default())
 }
 
 struct Draw {

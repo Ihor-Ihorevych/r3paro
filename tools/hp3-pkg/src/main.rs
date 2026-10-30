@@ -27,6 +27,7 @@ fn main() -> ExitCode {
             textures(Path::new(&args[1]), &args[2], Path::new(&args[3]), args.get(4).map(String::as_str))
         }
         Some("natives") if args.len() == 2 => natives(Path::new(&args[1])),
+        Some("lightmaps") if args.len() == 3 => lightmaps(Path::new(&args[1]), &args[2]),
         Some("disasm") if args.len() == 4 => disasm(Path::new(&args[1]), &args[2], &args[3]),
         Some("hex") if args.len() == 6 => hex(Path::new(&args[1]), &args[2], &args[3], &args[4], &args[5]),
         Some("check") if args.len() >= 2 => {
@@ -194,6 +195,63 @@ fn tails(root: &Path, class: &str, max: usize) -> R {
 }
 
 /// Writes the first mip of every texture in a package (optionally only names containing `filter`) as PNG.
+/// Summary of the lighting data in a map's BSP models.
+fn lightmaps(root: &Path, map: &str) -> R {
+    use hp3_assets::Asset;
+    let set = PackageSet::open(root)?;
+    let pkg = set.get(map)?;
+    for i in 0..pkg.exports.len() {
+        let chain = set.export_chain(&pkg, i);
+        let o = object::read_export(&pkg, i, &chain)?;
+        if o.native_class != "Model" {
+            continue;
+        }
+        let base = pkg.exports[i].serial_offset + pkg.exports[i].serial_size - o.tail.len();
+        let mut r = hp3_package::Reader::with_base(o.tail, base);
+        let Some(Ok(Asset::Model(m))) = hp3_assets::read_native("Model", &pkg, &mut r) else { continue };
+        if m.sections.is_empty() && m.light_maps.is_empty() {
+            continue;
+        }
+        let lit_sections = m.sections.iter().filter(|s| s.light_map_texture >= 0).count();
+        println!(
+            "{}: {} nodes, {} sections ({} with a lightmap page), {} lights, {} lightmaps, {} pages",
+            pkg.ref_path(ObjRef::from_export(i)),
+            m.nodes.len(),
+            m.sections.len(),
+            lit_sections,
+            m.lights.len(),
+            m.light_maps.len(),
+            m.light_map_textures.len()
+        );
+        for (pi, t) in m.light_map_textures.iter().take(4).enumerate() {
+            println!("  page {pi}: {} lightmaps, data {:?}, lead {}, trailer {:?}", t.light_maps.len(), t.data_lens, t.lead, t.trailer);
+        }
+        for lm in m.light_maps.iter().take(2) {
+            let surf = m.surfs.get(lm.surf as usize);
+            println!("  lightmap base {:?} axis_x {:?} axis_y {:?} surf scale {:?} matrix {:?}", lm.base, lm.axis_x, lm.axis_y, surf.map(|s| s.light_map_scale), lm.world_to_light_map);
+            // Vertices of nodes on this surface, with their lightmap UVs.
+            for n in m.nodes.iter().filter(|n| n.surf == lm.surf && n.section >= 0).take(1) {
+                let sec = &m.sections[n.section as usize];
+                for v in sec.vertices.iter().skip(n.first_vertex as usize).take(n.num_vertices as usize) {
+                    println!("    vertex {:?} lm_uv {:?} (page {})", v.position, v.light_map_uv, sec.light_map_texture);
+                }
+            }
+        }
+        for lm in m.light_maps.iter().take(3) {
+            println!(
+                "  lightmap surf {} offset {:?} size {:?} flags {} bitmaps {} (first {:?})",
+                lm.surf,
+                lm.offset,
+                lm.size,
+                lm.flags,
+                lm.bitmaps.len(),
+                lm.bitmaps.first().map(|b| (b.size, b.stride, b.bits.len()))
+            );
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 fn textures(root: &Path, package: &str, out: &Path, filter: Option<&str>) -> R {
     use hp3_assets::texture::{self, Format};
     use hp3_package::props;

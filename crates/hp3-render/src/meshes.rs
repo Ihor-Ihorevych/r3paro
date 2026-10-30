@@ -63,7 +63,7 @@ pub fn build_posed(
                     let out = *remap.entry(vi).or_insert_with(|| {
                         let p = sm.vertices.get(vi as usize).map(|v| v.position).unwrap_or_default();
                         let uv = uvs.get(vi as usize).copied().unwrap_or([0.0, 0.0]);
-                        vertices.push(Vertex { position: [p.x, p.y, p.z], uv });
+                        vertices.push(Vertex::unlit([p.x, p.y, p.z], uv));
                         next
                     });
                     indices.push(out);
@@ -93,7 +93,7 @@ pub fn build_posed(
                             None => m.points.get(vi).map(|p| Vec3::new(p.x, p.y, p.z)).unwrap_or(Vec3::ZERO),
                         };
                         let uv = wedge.map(|w| [w.u, w.v]).unwrap_or([0.0, 0.0]);
-                        verts.push(Vertex { position: p.to_array(), uv });
+                        verts.push(Vertex::unlit(p.to_array(), uv));
                         src.push(vi as u32);
                         next
                     });
