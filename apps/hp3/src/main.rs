@@ -135,7 +135,7 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
     // HP3_UNLIT=1 draws everything at full brightness.
     let inputs = hp3_engine::map_inputs(&mut vm, &loader, &pkg, std::env::var_os("HP3_UNLIT").is_none());
     let scene = scene::build_map(&loader, &pkg, &|i| statics.contains(&i), &inputs);
-    let lighting = inputs.lighting;
+    let mut lighting = inputs.lighting;
     eprintln!("{map}: scene built in {:?} ({:?})", t.elapsed(), scene.stats);
 
     let sdl = sdl3::init()?;
@@ -154,7 +154,7 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
     let format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
     let renderer = Renderer::with_adapter(&adapter, format)?;
     eprintln!("GPU: {}", renderer.adapter_info);
-    let gpu_scene = renderer.upload_scene(&scene);
+    let mut gpu_scene = renderer.upload_scene(&scene);
     let dynamic = hp3_render::dynamic::Dynamic::new(&renderer);
     let mut mesh_cache = hp3_engine::MeshCache::default();
     let overlay = hp3_render::overlay::Overlay::new(&renderer);
@@ -292,6 +292,21 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
         while accumulator >= 1.0 / 60.0 {
             hp3_world::tick(&mut vm, 1.0 / 60.0);
             accumulator -= 1.0 / 60.0;
+        }
+        // A level switch the game asked for: the new level is loaded and its scene built.
+        if let Some(url) = hp3_world::take_travel(&mut vm) {
+            let t = Instant::now();
+            let pkg = hp3_world::travel(&mut vm, &url)?;
+            let statics = hp3_engine::static_exports(&mut vm, &pkg);
+            let inputs = hp3_engine::map_inputs(&mut vm, &loader, &pkg, std::env::var_os("HP3_UNLIT").is_none());
+            let scene = scene::build_map(&loader, &pkg, &|i| statics.contains(&i), &inputs);
+            gpu_scene = renderer.upload_scene(&scene);
+            lighting = inputs.lighting;
+            mesh_cache = hp3_engine::MeshCache::default();
+            let _ = window.set_title(&format!("hp3 - {}", pkg.name));
+            eprintln!("travelled to {} in {:?}", pkg.name, t.elapsed());
+            accumulator = 0.0;
+            last = Instant::now();
         }
 
         if !free_camera && let Some(c) = game_camera(&mut vm) {

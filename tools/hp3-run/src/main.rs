@@ -9,6 +9,16 @@ use std::process::ExitCode;
 use hp3_package::PackageSet;
 use hp3_script::ClassDb;
 
+/// Performs a level switch the game asked for; returns whether one happened.
+fn follow_travel(vm: &mut hp3_script::Vm<'_>) -> bool {
+    let Some(url) = hp3_world::take_travel(vm) else { return false };
+    match hp3_world::travel(vm, &url) {
+        Ok(m) => println!("travelled to {} ({url})", m.name),
+        Err(e) => println!("travel to {url} failed: {e}"),
+    }
+    true
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
@@ -138,6 +148,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
     let t = std::time::Instant::now();
     for _ in 0..frames {
         hp3_world::tick(&mut vm, 1.0 / 60.0);
+        follow_travel(&mut vm);
     }
     let tick_time = t.elapsed();
     let w = hp3_world::world(&mut vm);
@@ -225,14 +236,22 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             // HP3_CLICK=x,y clicks the menu at that point of a 1280x720 screen.
             if let Ok(c) = std::env::var("HP3_CLICK") {
                 let _ = hp3_world::canvas::render(&mut vm, 1280, 720);
-                let v: Vec<f32> = c.split(',').filter_map(|x| x.trim().parse().ok()).collect();
-                hp3_world::gui::mouse_move(&mut vm, v[0], v[1]);
-                hp3_world::gui::mouse_button(&mut vm, true);
-                hp3_world::gui::mouse_button(&mut vm, false);
-                for _ in 0..30 {
-                    hp3_world::tick(&mut vm, 1.0 / 60.0);
+                for click in c.split(';') {
+                    let v: Vec<f32> = click.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                    hp3_world::gui::mouse_move(&mut vm, v[0], v[1]);
+                    hp3_world::gui::mouse_button(&mut vm, true);
+                    hp3_world::gui::mouse_button(&mut vm, false);
+                    for _ in 0..30 {
+                        hp3_world::tick(&mut vm, 1.0 / 60.0);
+                        if follow_travel(&mut vm) {
+                            // The new level runs a while, as after a normal load.
+                            for _ in 0..120 {
+                                hp3_world::tick(&mut vm, 1.0 / 60.0);
+                            }
+                        }
+                    }
+                    let _ = hp3_world::canvas::render(&mut vm, 1280, 720);
                 }
-                let _ = hp3_world::canvas::render(&mut vm, 1280, 720);
                 let gui = hp3_world::world(&mut vm).viewport.gui.unwrap();
                 let ac = hp3_world::get(&mut vm, gui, "ActiveControl");
                 println!("    active control after click: {ac:?}");

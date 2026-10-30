@@ -128,7 +128,7 @@ fn pose(root: &Path, package: &str, mesh: &str, out: &Path, seq: Option<&str>, f
 fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn std::error::Error>> {
     let set = PackageSet::open(root)?;
     let loader = Loader::new(&set);
-    let pkg = set.get(map)?;
+    let mut pkg = set.get(map)?;
     let mut db = ClassDb::new(&set);
     db.load_all_classes();
     let mut vm = Vm::new(db);
@@ -166,6 +166,14 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
             }
             for _ in 0..30 {
                 hp3_world::tick(&mut vm, 1.0 / 60.0);
+                // A level switch the game asks for is followed; the new level then runs a while.
+                if let Some(url) = hp3_world::take_travel(&mut vm) {
+                    pkg = hp3_world::travel(&mut vm, &url)?;
+                    eprintln!("travelled to {}", pkg.name);
+                    for _ in 0..ticks {
+                        hp3_world::tick(&mut vm, 1.0 / 60.0);
+                    }
+                }
             }
         }
     }

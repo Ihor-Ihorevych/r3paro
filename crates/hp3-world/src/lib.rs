@@ -61,6 +61,10 @@ pub struct World {
     pub canvas: canvas::CanvasState,
     pub viewport: interactions::Viewport,
     pub native_fonts: fonts::NativeFonts,
+    /// Options of the URL the level was loaded with (`?Name=Value...`).
+    pub url_options: String,
+    /// A level switch asked for and due (`Level.NextURL`).
+    pub pending_travel: Option<String>,
     actor_slots: HashMap<&'static str, Option<usize>>,
     /// Time per tick phase, when `HP3_TICK_PROFILE` is set.
     pub tick_profile: std::collections::BTreeMap<&'static str, std::time::Duration>,
@@ -158,6 +162,71 @@ pub fn fire(vm: &mut Vm<'_>, obj: ObjId, event: &str, args: &mut [Value]) -> Val
 /// Loads `map` into the VM, spawns the game (`Package.Class`, e.g. `HGame.HGame`), runs the begin-play
 /// sequence of its actors and logs in the local player.
 pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Result<(), VmError> {
+    load_with(vm, map, config, Vec::new())
+}
+
+thread_local! {
+    /// URL options for the next level load (set by `travel`, read once by the load).
+    static NEXT_OPTIONS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+fn world_options_set(options: &str) {
+    NEXT_OPTIONS.with(|o| *o.borrow_mut() = options.to_string());
+}
+
+fn take_world_options() -> String {
+    NEXT_OPTIONS.with(|o| std::mem::take(&mut *o.borrow_mut()))
+}
+
+/// Property flag of values that travel with the player to the next level.
+const CPF_TRAVEL: u32 = 0x0001_0000;
+
+/// A level switch the game asked for (`Level.NextURL`), once its countdown has run out.
+pub fn take_travel(vm: &mut Vm<'_>) -> Option<String> {
+    world(vm).pending_travel.take()
+}
+
+/// The map a travel URL names (`HP3_Adv1Express.unr?options#portal` gives `HP3_Adv1Express`).
+pub fn url_map(url: &str) -> String {
+    let m = url.split(['?', '#']).next().unwrap_or("").trim();
+    m.strip_suffix(".unr").or_else(|| m.strip_suffix(".UNR")).unwrap_or(m).to_string()
+}
+
+/// Switches to the level of `url` in the same VM: objects made outside the level (persistent game state)
+/// survive; the player's pawn takes its `travel` properties along.
+pub fn travel(vm: &mut Vm<'_>, url: &str) -> Result<Rc<Package>, VmError> {
+    let map_name = url_map(url);
+    let map = vm.db.set.get(&map_name).map_err(|e| VmError::Runtime(format!("travel to {map_name}: {e}")))?;
+    // The player's travel properties (plain values; references to the old level's objects do not travel).
+    let mut carried = Vec::new();
+    if let Some(pc) = world(vm).player
+        && let Some(pawn) = get(vm, pc, "Pawn").as_obj()
+        && let Some(class) = vm.db.objects.get(pawn).class
+    {
+        let props: Vec<_> = vm.db.get(class).props.iter().filter(|p| p.flags & CPF_TRAVEL != 0).cloned().collect();
+        for p in props {
+            if let Some(v) = vm.db.objects.values(pawn).and_then(|v| v.get(p.slot)).cloned()
+                && !matches!(v, Value::Object(_))
+            {
+                carried.push((vm.db.names.get(p.name).to_string(), v));
+            }
+        }
+    }
+    // The old level goes: its actors are dropped from the VM's per-object state.
+    let old = vm.ext.take().and_then(|e| e.downcast::<World>().ok()).ok_or_else(|| VmError::Runtime("no world".into()))?;
+    for a in &old.actors {
+        vm.latent.remove(a);
+        vm.state_pc.remove(a);
+        vm.db.objects.get_mut(*a).deleted = true;
+    }
+    let options = url.find('?').map(|i| url[i..].split('#').next().unwrap_or("").to_string()).unwrap_or_default();
+    world_options_set(&options);
+    load_with(vm, &map, old.config, carried)?;
+    Ok(map)
+}
+
+/// Like `load`; `carried` are the player pawn's travel properties from the previous level.
+pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, carried: Vec<(String, Value)>) -> Result<(), VmError> {
     let game_class = config.get("Engine.Engine", "DefaultGame").map(str::to_string);
     let game_class = game_class.as_deref();
     let actor_class = vm.db.find("Actor").ok_or_else(|| VmError::Runtime("no Actor class".into()))?;
@@ -234,6 +303,8 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Res
         canvas: Default::default(),
         viewport: Default::default(),
         native_fonts: Default::default(),
+        pending_travel: None,
+        url_options: String::new(),
         tick_profile: Default::default(),
         actor_slots: Default::default(),
         config,
@@ -246,7 +317,9 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Res
         world(vm).game = game;
         if let (Some(li), Some(g)) = (level_info, game) {
             set(vm, li, "Game", Value::Object(Some(g)));
-            fire(vm, g, "InitGame", &mut [Value::Str(String::new()), Value::Str(String::new())]);
+            let options = take_world_options();
+            fire(vm, g, "InitGame", &mut [Value::Str(options.clone()), Value::Str(String::new())]);
+            world(vm).url_options = options;
         }
     }
     for &a in &actors {
@@ -262,7 +335,8 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Res
         fire(vm, a, "SetInitialState", &mut []);
     }
     if let Some(g) = world(vm).game {
-        let mut args = [Value::Str(String::new()), Value::Str(String::new()), Value::Str(String::new())];
+        let options = world(vm).url_options.clone();
+        let mut args = [Value::Str(String::new()), Value::Str(options), Value::Str(String::new())];
         let pc = fire(vm, g, "Login", &mut args).as_obj();
         if let Some(pc) = pc {
             world(vm).player = Some(pc);
@@ -275,7 +349,12 @@ pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Res
         // A loaded map finishes by accepting the player's travel: pawn first, then its controller.
         if let Some(pc) = world(vm).player {
             if let Some(pawn) = get(vm, pc, "Pawn").as_obj() {
-                arrive_from(vm, pawn);
+                if carried.is_empty() {
+                    arrive_from(vm, pawn);
+                }
+                for (name, value) in &carried {
+                    set(vm, pawn, name, value.clone());
+                }
                 fire(vm, pawn, "TravelPostAccept", &mut []);
             }
             fire(vm, pc, "TravelPostAccept", &mut []);
@@ -348,6 +427,16 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     if let Some(li) = world(vm).level_info {
         let t = world(vm).time;
         set(vm, li, "TimeSeconds", Value::Float(t));
+        // A level switch the game asked for happens when its countdown runs out.
+        let next = get(vm, li, "NextURL").as_str().to_string();
+        if !next.is_empty() {
+            let countdown = get(vm, li, "NextSwitchCountdown").as_float() - dt;
+            set(vm, li, "NextSwitchCountdown", Value::Float(countdown));
+            if countdown <= 0.0 {
+                set(vm, li, "NextURL", Value::Str(String::new()));
+                world(vm).pending_travel = Some(next);
+            }
+        }
     }
     let profile = std::env::var_os("HP3_TICK_PROFILE").is_some();
     let mut t = std::time::Instant::now();

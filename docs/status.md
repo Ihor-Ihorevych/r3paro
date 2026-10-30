@@ -83,8 +83,13 @@ Milestones are from the plan (M0 to M12).
   buttons and GFX buttons through styles and fonts, mouse hover and clicks calling the scripts' delegates,
   keys to the page. Languages HP3's bitmap fonts do not cover (Russian...) use system TrueType fonts
   (`SAPFont.<language>`, rasterized with fontdue; `HP3_FONT` overrides the file). Masked palettised textures
-  treat index 0 as transparent. The front end and the New Game page work; starting the game needs level
-  travel. Not yet: lists, edit boxes, sliders, combo boxes, tabs, timers.
+  treat index 0 as transparent. The front end and the New Game page work. Not yet: lists, edit boxes,
+  sliders, combo boxes, tabs, timers.
+- **Level travel**: a level switch the game asks for (`Level.NextURL` once its countdown runs out) loads the
+  new map in the same VM (objects outside the level persist), with the URL's options for `InitGame` and
+  `Login` and the player pawn's `travel` properties. The desktop app, `hp3-view play` (with `HP3_CLICK`) and
+  `hp3-run` follow it: front end, New Game, slot, and the game travels to HP3_Adv1Express. The train's intro
+  is a cutscene, not run yet.
 - Fixed: auto states are flagged 0x2 (0x1 is "editable"); every actor now starts in its class's auto state.
 - M7 onwards: not started.
 

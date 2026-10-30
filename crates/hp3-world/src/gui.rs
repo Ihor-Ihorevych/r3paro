@@ -490,6 +490,7 @@ pub fn register(vm: &mut Vm<'_>) {
     }
     // Saved games and language: no saves yet; the configured language.
     vm.register("Actor.SaveGameExists", |_vm, _this, _a| Ok(Value::Bool(false)));
+    vm.register("Object.KWDeleteSaveGame", |_vm, _this, _a| Ok(Value::Bool(true)));
     vm.register("Object.GetLanguage", |vm, _this, _a| Ok(Value::Str(world(vm).config.language.clone())));
     vm.register("Object.NeedSAPFont", |vm, _this, _a| Ok(Value::Bool(crate::fonts::need_sap_font(vm))));
 }

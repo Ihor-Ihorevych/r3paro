@@ -506,6 +506,11 @@ impl<'s> Vm<'s> {
                 p.path.push(Step::Slot(*m));
                 p
             }
+            // `class'X'.default.Prop` and `SomeClass.static...`: the class object is the context.
+            Expr::ClassContext(class, inner) => match self.eval(class, frame, ctx)?.as_obj() {
+                Some(c) => self.place(inner, frame, Some(c))?,
+                None => Place { root: Root::Temp(Value::Empty), path: smallvec::SmallVec::new() },
+            },
             Expr::Context(obj, inner) => {
                 let o = self.eval(obj, frame, ctx)?.as_obj().filter(|&o| self.ensure_loaded(o));
                 match o {
