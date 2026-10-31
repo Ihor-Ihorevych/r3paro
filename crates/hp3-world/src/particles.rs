@@ -630,8 +630,16 @@ pub fn register(vm: &mut Vm<'_>) {
         let Some(actor) = this else { return Ok(Value::Empty) };
         let path = hp3_script::natives::object_path(vm, actor);
         vm.log.push(format!("emitter killed: {path}"));
+        // An actor spawned at run time has emitter copies of its own; the class's shared default objects (which
+        // come from a package) are never touched, whatever the actor holds.
+        own_emitters(vm, actor);
+        let spawned = vm.db.objects.get(actor).key.is_none();
         if let Value::Array(emitters) = get(vm, actor, "Emitters") {
             for e in emitters.iter().filter_map(Value::as_obj) {
+                if spawned && vm.db.objects.get(e).key.is_some() {
+                    vm.log.push(format!("emitter kill skipped a shared default: {path}"));
+                    continue;
+                }
                 for name in ["RespawnDeadParticles", "AutomaticInitialSpawning", "AutoReset", "AutoDestroy"] {
                     set(vm, e, name, Value::Bool(false));
                 }
