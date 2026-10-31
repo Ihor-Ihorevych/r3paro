@@ -1092,3 +1092,125 @@ mod mount_tests {
         assert!(pawn_at(70.0, &c, 96.5).is_none());
     }
 }
+
+/// Whether a box at `at` overlaps the level (its geometry and movers; actors do not count).
+fn overlaps_world(col: &crate::collision::Collision, at: Vec3, extent: Vec3) -> bool {
+    col.trace_static(at + Vec3::Z * 0.1, at, extent).is_some_and(|h| h.time <= 0.0)
+}
+
+/// A place close to `want` where a box of `extent` fits in the level: `want` itself, or a nudge out of the floor,
+/// the ceiling or a wall it sinks into; None when no such place is found. A box with no size always fits.
+///
+/// Behaviour: reference `ULevel::FindSpot`/`CheckSlice` (a thin slice at the box's middle decides whether the
+/// trouble is above or below, then the box is moved clear of it), re-expressed.
+pub fn find_spot(col: &crate::collision::Collision, extent: Vec3, want: Vec3) -> Option<Vec3> {
+    if !overlaps_world(col, want, extent) {
+        return Some(want);
+    }
+    if extent == Vec3::ZERO {
+        return None;
+    }
+    let slice = Vec3::new(extent.x, extent.y, 1.0);
+    let down = Vec3::new(0.0, 0.0, extent.z);
+    // A thin slice at the middle that does not touch anything means the floor or the ceiling is in the way.
+    if !overlaps_world(col, want, slice) {
+        let floor = col.trace_static(want, want - down * 2.0, slice);
+        // Away from a wall by the box's radius, along the floor's slope.
+        let clear_of_wall = |at: Vec3, normal: Vec3| {
+            let at = at + Vec3::new(normal.x, normal.y, 0.0) * extent.x;
+            (!overlaps_world(col, at, extent)).then_some(at)
+        };
+        return match floor {
+            // Nothing below: the ceiling was the problem, so move down by the half height and settle on it.
+            None => {
+                let at = want - down;
+                if !overlaps_world(col, at, extent) {
+                    Some(col.trace_static(at, at + down, extent).map_or(at, |h| h.location))
+                } else {
+                    None
+                }
+            }
+            // The floor is far: same, by how far it is.
+            Some(h) if h.time > 0.5 => {
+                let at = want - down * (2.0 * h.time - 1.0) + Vec3::Z;
+                if !overlaps_world(col, at, extent) {
+                    Some(col.trace_static(at, at + down, extent).map_or(at, |h| h.location))
+                } else {
+                    clear_of_wall(at, h.normal)
+                }
+            }
+            // The floor is close: lift out of it.
+            Some(h) => {
+                let at = want + down * (2.0 * (0.5 - h.time)) + Vec3::Z;
+                if !overlaps_world(col, at, extent) { Some(at) } else { clear_of_wall(at, h.normal) }
+            }
+        };
+    }
+    // Half-size slices at the corners: those that fit say which way is free.
+    let half = Vec3::new(0.5 * extent.x, 0.5 * extent.y, 1.0);
+    let mut moved = want;
+    let mut fits = 0;
+    for i in [-1.0f32, 1.0] {
+        for j in [-1.0f32, 1.0] {
+            let offset = Vec3::new(0.55 * extent.x * i, 0.55 * extent.y * j, 0.0);
+            if fits < 2 && !overlaps_world(col, want + offset, half) {
+                fits += 1;
+                moved += offset;
+            }
+        }
+    }
+    if fits == 0 {
+        return None;
+    }
+    if fits == 1 {
+        moved = moved * 2.0 - want;
+    }
+    if col.trace_static(want, moved, Vec3::ZERO).is_some() || overlaps_world(col, moved, extent) {
+        return None;
+    }
+    // Back toward where it was wanted, as far as it stays clear.
+    let back = want + (want - moved) * 0.2;
+    Some(col.trace_static(moved, back, extent).map_or(moved, |h| h.location))
+}
+
+/// Puts an actor somewhere else without sweeping (`SetLocation`, `FarMoveActor`): an actor that collides with the
+/// world is first fitted to a nearby spot (and refused when there is none); then it lets go of its base, carries
+/// what is attached to it and settles. With `test` only the answer is given. Returns whether it was placed.
+pub fn far_move(vm: &mut Vm<'_>, a: ObjId, to: Vec3, test: bool, attached_move: bool) -> bool {
+    if get(vm, a, "bStatic").as_bool() {
+        return false;
+    }
+    let from = vec(&get(vm, a, "Location"));
+    if test && from == to {
+        return true;
+    }
+    let mut at = to;
+    if get(vm, a, "bCollideWorld").as_bool() {
+        let ext = extent(vm, a);
+        match find_spot(&world(vm).collision, ext, to) {
+            Some(spot) => at = spot,
+            None => return false,
+        }
+    }
+    if test {
+        return true;
+    }
+    set(vm, a, "bJustTeleported", Value::Bool(true));
+    if !attached_move {
+        crate::natives::set_base(vm, a, None, true);
+    }
+    // What rides on it (not on a bone) goes along, unchecked.
+    let everyone: Vec<ObjId> = world(vm).actors.clone();
+    let carried: Vec<ObjId> = everyone
+        .into_iter()
+        .filter(|&o| o != a && get(vm, o, "Base").as_obj() == Some(a) && get(vm, o, "AttachmentBone").as_name() == hp3_script::Name::NONE)
+        .collect();
+    for o in carried {
+        let there = vec(&get(vm, o, "Location")) + (at - from);
+        set(vm, o, "Location", value(there));
+        crate::touch::settle(vm, o);
+    }
+    set(vm, a, "Location", value(at));
+    crate::touch::settle(vm, a);
+    true
+}

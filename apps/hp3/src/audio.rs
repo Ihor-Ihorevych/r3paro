@@ -53,6 +53,9 @@ pub struct AudioSystem {
     /// Ambient sounds playing: the actor's owner id and the sound's tag.
     ambient: HashMap<u64, u64>,
     frame: u32,
+    /// The game's `AmbientVolume` and `SoundVolume` settings, which scale every ambient sound.
+    ambient_setting: f32,
+    sound_setting: f32,
 }
 
 /// Slots of `PlaySound` (`ESoundSlot`) that matter here.
@@ -80,13 +83,19 @@ impl AudioSystem {
         if let Ok(mut m) = mixer.lock() {
             m.music_volume = setting("MusicVolume", 0.5);
             m.effect_volume = setting("SoundVolume", 1.0);
-            m.voice_volume = setting("SoundVolume", 1.0);
-            m.ambient_volume = setting("AmbientVolume", 1.0);
+            m.voice_volume = setting("VoiceVolume", 1.0);
+            // Ambient sounds carry the `AmbientVolume` and `SoundVolume` settings in their own volume.
+            m.ambient_volume = 1.0;
+            m.rolloff = setting("Rolloff", 1.0).max(0.0);
         }
         let stream = audio.open_playback_stream(&spec, Callback { mixer: mixer.clone(), buffer: Vec::new(), meter: std::env::var_os("HP3_AUDIO_DEBUG").map(|_| (0.0, 0)) }).ok()?;
         stream.resume().ok()?;
         let music_dir = ["Music", "music"].iter().map(|d| root.join(d)).find(|p| p.is_dir()).unwrap_or_else(|| root.join("Music"));
-        Some(AudioSystem { mixer, _stream: stream, cache: HashMap::new(), music_dir, ambient: HashMap::new(), frame: 0 })
+        Some(AudioSystem { mixer, _stream: stream, cache: HashMap::new(), music_dir, ambient: HashMap::new(),
+            frame: 0,
+            ambient_setting: setting("AmbientVolume", 1.0),
+            sound_setting: setting("SoundVolume", 1.0),
+        })
     }
 
     fn sound(&mut self, vm: &mut Vm<'_>, key: &SoundKey) -> Option<Arc<Sound>> {
@@ -126,7 +135,7 @@ impl AudioSystem {
                     let placement = if flat {
                         Placement::Flat
                     } else {
-                        Placement::World { position: location.to_array(), reach: mixer::reach_for(radius) }
+                        Placement::World { position: location.to_array(), radius: mixer::radius_for(radius) }
                     };
                     let req = PlayRequest {
                         sound: s,
@@ -181,8 +190,7 @@ impl AudioSystem {
     fn sync_ambient(&mut self, vm: &mut Vm<'_>, listener: glam::Vec3) {
         let mut wanted: HashMap<u64, u64> = HashMap::new();
         for a in hp3_world::audio::ambient_sounds(vm) {
-            let reach = mixer::reach_for(a.radius);
-            if a.location.distance(listener) >= reach {
+            if a.location.distance(listener) >= mixer::audible_distance(a.radius) {
                 continue;
             }
             let owner = a.actor.0 as u64 + 1;
@@ -198,14 +206,14 @@ impl AudioSystem {
                 }
                 m.play(PlayRequest {
                     sound: s,
-                    volume: a.volume,
+                    volume: a.volume * if a.full_volume { 1.0 } else { self.ambient_setting } * self.sound_setting,
                     pitch: a.pitch,
                     looping: true,
-                    placement: Placement::World { position: a.location.to_array(), reach },
+                    placement: Placement::World { position: a.location.to_array(), radius: mixer::radius_for(a.radius) },
                     category: Category::Ambient,
                     owner,
                     slot: SLOT_AMBIENT,
-                    no_override: true,
+                    no_override: false,
                     tag,
                 });
             }

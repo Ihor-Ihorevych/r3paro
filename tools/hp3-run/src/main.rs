@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use hp3_package::PackageSet;
 use hp3_script::ClassDb;
 
-/// HP3_TRIGGER=<tag> triggers the actors with that tag (as an event of that name would), instigated by the
+/// HP3_TRIGGER=<tag> (or @<actor name>) triggers the actors with that tag (as an event of that name would), instigated by the
 /// player's pawn.
 fn trigger_tag(vm: &mut hp3_script::Vm<'_>) {
     let Ok(tag) = std::env::var("HP3_TRIGGER") else { return };
@@ -21,7 +21,9 @@ fn trigger_tag(vm: &mut hp3_script::Vm<'_>) {
         let pawn = hp3_world::world(vm).player.and_then(|pc| hp3_world::get(vm, pc, "Pawn").as_obj());
         let actors = hp3_world::world(vm).actors.clone();
         for a in actors {
-            if hp3_world::get(vm, a, "Tag").as_name() == n {
+            // "@Name" picks the actor by its own name rather than by tag.
+            let by_name = tag.strip_prefix('@').is_some_and(|w| hp3_script::natives::object_path(vm, a).ends_with(&format!(".{w}")));
+            if by_name || (!tag.starts_with('@') && hp3_world::get(vm, a, "Tag").as_name() == n) {
                 println!("triggering {}", hp3_script::natives::object_path(vm, a));
                 hp3_world::fire(vm, a, "Trigger", &mut [hp3_script::Value::Object(pawn), hp3_script::Value::Object(pawn)]);
             }
@@ -217,6 +219,35 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
         }
         if frame == trigger_at {
             trigger_tag(&mut vm);
+        }
+        // HP3_WATCH=<name>,<name>@<every>: prints those actors' place, turn and state every so many ticks.
+        if let Ok(spec) = std::env::var("HP3_WATCH")
+            && let Some((names, every)) = spec.split_once('@')
+            && every.parse::<u32>().is_ok_and(|e| e > 0 && frame % e == 0)
+        {
+            let actors = hp3_world::world(&mut vm).actors.clone();
+            for a in actors {
+                let path = hp3_script::natives::object_path(&mut vm, a);
+                if names.split(',').any(|n| path.ends_with(&format!(".{n}"))) {
+                    let state = vm.state_of(a).map(|s| vm.db.names.get(vm.db.get(s).name).to_string()).unwrap_or_default();
+                    let at = hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "Location"));
+                    let rot: Vec<i32> = hp3_world::get(&mut vm, a, "Rotation").fields().iter().map(hp3_script::Value::as_int).collect();
+                    println!("watch {frame} {path} at {at} rot {rot:?} state {state} phys {:?}", hp3_world::get(&mut vm, a, "Physics"));
+                }
+            }
+        }
+        // HP3_TELEPORT=<x>,<y>,<z>@<tick>: moves the player's pawn there (as SetLocation does), to walk into a trigger.
+        if let Ok(spec) = std::env::var("HP3_TELEPORT")
+            && let Some((at, tick)) = spec.split_once('@')
+            && tick.parse::<u32>() == Ok(frame)
+        {
+            let c: Vec<f32> = at.split(',').filter_map(|v| v.parse().ok()).collect();
+            if let (&[x, y, z], Some(pc)) = (c.as_slice(), hp3_world::world(&mut vm).player)
+                && let Some(pawn) = hp3_world::get(&mut vm, pc, "Pawn").as_obj()
+            {
+                let at = hp3_world::physics::value(glam::Vec3::new(x, y, z));
+                hp3_world::fire(&mut vm, pawn, "SetLocation", &mut [at]);
+            }
         }
         // HP3_HOLD=<key>@<tick>[-<tick>]: holds a key (as the app would) over a span of ticks.
         for var in ["HP3_HOLD", "HP3_HOLD2"] {

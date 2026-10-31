@@ -73,19 +73,41 @@ fn bool_or(a: &[Value], i: usize, default: bool) -> bool {
     }
 }
 
-fn play(vm: &mut Vm<'_>, this: Option<ObjId>, a: &[Value]) {
+/// The slot a sound takes when the caller names none (`SLOT_Misc`).
+const SLOT_MISC: u8 = 1;
+
+/// A sound asked for by `PlaySound` or `PlayOwnedSound`: `(Sound, Slot, Volume, bNoOverride, Radius, Pitch,
+/// Attenuate, No3D)`. What the caller leaves out comes from the emitter: its `TransientSoundVolume` and
+/// `TransientSoundRadius`; the sound is quieter by the instigator's `SoundDampening` when the emitter is the
+/// instigator or its owner. `PlaySound` attenuates by default, `PlayOwnedSound` does not.
+fn play(vm: &mut Vm<'_>, this: Option<ObjId>, a: &[Value], attenuate_by_default: bool) {
     let Some(sound) = a.first().and_then(|v| key_of(vm, v)) else { return };
-    let location = this.map(|o| crate::physics::vec(&get(vm, o, "Location"))).unwrap_or(Vec3::ZERO);
+    let Some(emitter) = this else { return };
+    let location = crate::physics::vec(&get(vm, emitter, "Location"));
+    let mut volume = float_or(a, 2, get(vm, emitter, "TransientSoundVolume").as_float());
+    let mut radius = float_or(a, 4, get(vm, emitter, "TransientSoundRadius").as_float());
+    if radius <= 0.0 {
+        // A radius of 0 asks for the sound's own; HP3's sounds do not carry one we can read, so the actor's default.
+        radius = get(vm, emitter, "TransientSoundRadius").as_float();
+    }
+    if let Some(instigator) = get(vm, emitter, "Instigator").as_obj()
+        && (instigator == emitter || get(vm, emitter, "Owner").as_obj() == Some(instigator))
+    {
+        let damp = get(vm, instigator, "SoundDampening").as_float();
+        if damp > 0.0 {
+            volume *= damp;
+        }
+    }
     let event = Event::Play {
         sound,
-        emitter: this,
+        emitter: Some(emitter),
         location,
-        slot: a.get(1).filter(|v| !matches!(v, Value::Empty)).map(Value::as_byte).unwrap_or(0),
-        volume: float_or(a, 2, 1.0),
+        slot: a.get(1).filter(|v| !matches!(v, Value::Empty)).map(Value::as_byte).unwrap_or(SLOT_MISC),
+        volume,
         no_override: bool_or(a, 3, false),
-        radius: float_or(a, 4, 0.0),
+        radius,
         pitch: float_or(a, 5, 1.0),
-        attenuate: bool_or(a, 6, true),
+        attenuate: bool_or(a, 6, attenuate_by_default),
         no_3d: bool_or(a, 7, false),
     };
     world(vm).audio.events.push(event);
@@ -94,11 +116,11 @@ fn play(vm: &mut Vm<'_>, this: Option<ObjId>, a: &[Value]) {
 pub fn register(vm: &mut Vm<'_>) {
     // PlaySound / PlayOwnedSound(Sound, slot, Volume, bNoOverride, Radius, Pitch, Attenuate, No3D)
     vm.register("Actor.PlaySound", |vm, this, a| {
-        play(vm, this, a);
+        play(vm, this, a, true);
         Ok(Value::Empty)
     });
     vm.register("Actor.PlayOwnedSound", |vm, this, a| {
-        play(vm, this, a);
+        play(vm, this, a, false);
         Ok(Value::Empty)
     });
     vm.register("Actor.StopSound", |vm, this, a| {
@@ -169,7 +191,11 @@ pub struct Ambient {
     pub actor: ObjId,
     pub sound: SoundKey,
     pub location: Vec3,
+    /// The actor's own loudness (`SoundVolume` as a fraction of the 0..2 range, scaled by its light's brightness
+    /// when it has one), before the game's `AmbientVolume` and `SoundVolume` settings.
     pub volume: f32,
+    /// `bFullVolume`: the `AmbientVolume` setting does not apply.
+    pub full_volume: bool,
     pub pitch: f32,
     /// In the actor's `SoundRadius` units.
     pub radius: f32,
@@ -185,14 +211,18 @@ pub fn ambient_sounds(vm: &mut Vm<'_>) -> Vec<Ambient> {
         }
         let v = get(vm, a, "AmbientSound");
         let Some(sound) = key_of(vm, &v) else { continue };
-        let volume = get(vm, a, "SoundVolume").as_float() / 128.0;
-        let pitch = get(vm, a, "SoundPitch").as_float() / 64.0;
+        let mut volume = get(vm, a, "SoundVolume").as_float() / 255.0 / 2.0;
+        if get(vm, a, "LightType").as_byte() != 0 {
+            volume *= get(vm, a, "LightBrightness").as_float() / 255.0;
+        }
+        let pitch = (get(vm, a, "SoundPitch").as_float() / 64.0).clamp(0.5, 2.0);
         out.push(Ambient {
             actor: a,
             sound,
             location: crate::physics::vec(&get(vm, a, "Location")),
             volume,
-            pitch: if pitch > 0.0 { pitch } else { 1.0 },
+            full_volume: get(vm, a, "bFullVolume").as_bool(),
+            pitch: if get(vm, a, "SoundPitch").as_float() > 0.0 { pitch } else { 1.0 },
             radius: get(vm, a, "SoundRadius").as_float(),
         });
     }

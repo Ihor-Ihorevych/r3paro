@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 pub const OUTPUT_RATE: u32 = 48_000;
 
-/// Distance (world units) a sound reaches per unit of its radius, as in Unreal.
-const RADIUS_SCALE: f32 = 25.0;
-/// A sound played without a radius reaches this many radius units.
-const DEFAULT_RADIUS: f32 = 64.0;
+/// A sound is silent beyond this many radii (the original stops ambient sounds there).
+const AUDIBLE_RADII: f32 = 100.0;
+/// A sound asked for without a radius has this one (the actor default `TransientSoundRadius`).
+const DEFAULT_RADIUS: f32 = 300.0;
 
 /// Decoded audio ready to mix.
 #[derive(Clone, Debug)]
@@ -43,8 +43,9 @@ pub enum Category {
 pub enum Placement {
     /// Heard equally on both sides (interface sounds and those marked 2D).
     Flat,
-    /// At a world position, falling off to nothing at `reach` units.
-    World { position: [f32; 3], reach: f32 },
+    /// At a world position: full volume inside `radius`, then falling off as `radius / distance` (OpenAL's
+    /// inverse-distance model with the original's reference distance), silent past 100 radii.
+    World { position: [f32; 3], radius: f32 },
 }
 
 pub struct PlayRequest {
@@ -54,7 +55,8 @@ pub struct PlayRequest {
     pub looping: bool,
     pub placement: Placement,
     pub category: Category,
-    /// Voices with the same non-zero owner and slot replace each other unless `no_override`.
+    /// A voice replaces the one with the same owner and slot (slot 0 is never replaced), unless that one was
+    /// started with `no_override`, which it plays out and the newcomer is dropped.
     pub owner: u64,
     pub slot: u8,
     pub no_override: bool,
@@ -73,6 +75,7 @@ struct Voice {
     category: Category,
     owner: u64,
     slot: u8,
+    no_override: bool,
     tag: u64,
 }
 
@@ -104,6 +107,8 @@ pub struct Mixer {
     pub voice_volume: f32,
     pub ambient_volume: f32,
     pub music_volume: f32,
+    /// The ini's `Rolloff`: how fast distance takes a sound's volume away.
+    pub rolloff: f32,
 }
 
 impl Default for Mixer {
@@ -116,14 +121,22 @@ impl Default for Mixer {
             voice_volume: 1.0,
             ambient_volume: 1.0,
             music_volume: 0.7,
+            rolloff: 1.0,
         }
     }
 }
 
 impl Mixer {
     pub fn play(&mut self, r: PlayRequest) {
-        if !r.no_override && r.owner != 0 && r.slot != 0 {
-            self.voices.retain(|v| !(v.owner == r.owner && v.slot == r.slot));
+        if r.slot != 0 {
+            match self.voices.iter().position(|v| v.owner == r.owner && v.slot == r.slot) {
+                // The sound there may not be interrupted: the new one is not played.
+                Some(i) if self.voices[i].no_override => return,
+                Some(i) => {
+                    self.voices.remove(i);
+                }
+                None => {}
+            }
         }
         // Many voices at once are not worth mixing: drop the oldest.
         if self.voices.len() >= 48 {
@@ -139,6 +152,7 @@ impl Mixer {
             category: r.category,
             owner: r.owner,
             slot: r.slot,
+            no_override: r.no_override,
             tag: r.tag,
         });
     }
@@ -195,7 +209,7 @@ impl Mixer {
         out.fill(0.0);
         let frames = out.len() / 2;
         let listener = self.listener;
-        let (effect_volume, voice_volume, ambient_volume) = (self.effect_volume, self.voice_volume, self.ambient_volume);
+        let (effect_volume, voice_volume, ambient_volume, rolloff) = (self.effect_volume, self.voice_volume, self.ambient_volume, self.rolloff);
         for v in &mut self.voices {
             let category_volume = match v.category {
                 Category::Voice => voice_volume,
@@ -203,16 +217,23 @@ impl Mixer {
                 Category::Effect => effect_volume,
             };
             let (gain, pan) = match v.placement {
-                Placement::Flat => (v.volume * category_volume, 0.0),
-                Placement::World { position, reach } => {
+                Placement::Flat => (v.volume.clamp(0.0, 1.0) * category_volume, 0.0),
+                Placement::World { position, radius } => {
                     let d = [position[0] - listener.position[0], position[1] - listener.position[1], position[2] - listener.position[2]];
                     let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-                    let fall = (1.0 - dist / reach.max(1.0)).clamp(0.0, 1.0);
+                    let radius = radius.max(1.0);
+                    let fall = if dist > radius * AUDIBLE_RADII {
+                        0.0
+                    } else if dist <= radius {
+                        1.0
+                    } else {
+                        radius / (radius + rolloff * (dist - radius))
+                    };
                     let flat = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1e-3);
                     // Close sounds are heard centred; farther ones lean toward their side.
                     let side = ((d[0] * listener.right[0] + d[1] * listener.right[1]) / flat).clamp(-1.0, 1.0);
                     let lean = (dist / 200.0).clamp(0.0, 1.0);
-                    (v.volume * category_volume * fall, side * lean)
+                    (v.volume.clamp(0.0, 1.0) * category_volume * fall, side * lean)
                 }
             };
             let (gl, gr) = (gain * (1.0 - pan.max(0.0)), gain * (1.0 + pan.min(0.0)));
@@ -289,9 +310,14 @@ pub fn right_from_yaw(yaw: i32) -> [f32; 2] {
     [a.sin(), -a.cos()]
 }
 
-/// The fraction of reach a sound has: used for the radius of a request.
-pub fn reach_for(radius: f32) -> f32 {
-    (if radius > 0.0 { radius } else { DEFAULT_RADIUS }) * RADIUS_SCALE
+/// The radius a sound plays with: the one given, or the default when none was.
+pub fn radius_for(radius: f32) -> f32 {
+    if radius > 0.0 { radius } else { DEFAULT_RADIUS }
+}
+
+/// How far from the listener a sound of this radius is still worth playing.
+pub fn audible_distance(radius: f32) -> f32 {
+    radius_for(radius) * AUDIBLE_RADII
 }
 
 #[cfg(test)]
@@ -333,7 +359,7 @@ mod tests {
                 volume: 1.0,
                 pitch: 1.0,
                 looping: false,
-                placement: Placement::World { position: [x, 0.0, 0.0], reach: 1000.0 },
+                placement: Placement::World { position: [x, 0.0, 0.0], radius: 100.0 },
                 category: Category::Effect,
                 owner: 0,
                 slot: 0,
@@ -344,14 +370,15 @@ mod tests {
             m.mix(&mut out);
             out[0].abs() + out[1].abs()
         };
-        assert!(level(100.0) > level(600.0));
-        assert_eq!(level(1500.0), 0.0);
+        // Full inside the radius, `radius / distance` beyond it (one sixth at 600 for a radius of 100).
+        assert!(level(50.0) > level(600.0));
+        assert!((level(600.0) / level(100.0) - 100.0 / 600.0).abs() < 0.02);
+        assert_eq!(level(20_000.0), 0.0);
     }
 
     #[test]
-    fn same_slot_replaces_unless_no_override() {
-        let mut m = Mixer::default();
-        let req = |no_override| PlayRequest {
+    fn same_slot_replaces_unless_it_may_not_be_interrupted() {
+        let req = |slot, no_override| PlayRequest {
             sound: tone(1000),
             volume: 1.0,
             pitch: 1.0,
@@ -359,15 +386,24 @@ mod tests {
             placement: Placement::Flat,
             category: Category::Voice,
             owner: 7,
-            slot: 5,
+            slot,
             no_override,
             tag: 1,
         };
-        m.play(req(false));
-        m.play(req(false));
+        // The same slot: the newcomer replaces the voice there.
+        let mut m = Mixer::default();
+        m.play(req(5, false));
+        m.play(req(5, false));
+        m.play(req(5, true));
         assert_eq!(m.voice_count(), 1);
-        m.play(req(true));
-        assert_eq!(m.voice_count(), 2);
+        // That one may not be interrupted: the next is dropped.
+        m.play(req(5, false));
+        assert_eq!(m.voice_count(), 1);
+        // Another slot, and slot 0 (which is never replaced), play alongside.
+        m.play(req(3, false));
+        m.play(req(0, false));
+        m.play(req(0, false));
+        assert_eq!(m.voice_count(), 4);
     }
 
     #[test]

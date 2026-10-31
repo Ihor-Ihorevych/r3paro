@@ -355,19 +355,25 @@ pub fn register(vm: &mut Vm<'_>) {
         Ok(Value::Empty)
     });
     vm.register("Actor.SetLocation", |vm, this, a| {
-        if let Some(o) = this {
-            set(vm, o, "Location", a[0].clone());
-            crate::touch::settle(vm, o);
-        }
-        Ok(Value::Bool(true))
+        let Some(o) = this else { return Ok(Value::Bool(false)) };
+        let to = crate::physics::vec(&a[0]);
+        Ok(Value::Bool(crate::physics::far_move(vm, o, to, false, false)))
     });
     // A teleport: where the actor ends up is what touches, with nothing swept on the way.
     vm.register("Actor.FarMoveActor", |vm, this, a| {
-        if let Some(o) = this {
+        let Some(o) = this else { return Ok(Value::Bool(false)) };
+        let to = crate::physics::vec(&a[0]);
+        let flag = |i: usize| a.get(i).is_some_and(Value::as_bool);
+        // (Dest, optional test, optional no-check, optional attached move)
+        if flag(2) {
+            if flag(1) {
+                return Ok(Value::Bool(true));
+            }
             set(vm, o, "Location", a[0].clone());
             crate::touch::settle(vm, o);
+            return Ok(Value::Bool(true));
         }
-        Ok(Value::Bool(true))
+        Ok(Value::Bool(crate::physics::far_move(vm, o, to, flag(1), flag(3))))
     });
     vm.register("Actor.SetRotation", |vm, this, a| {
         if let Some(o) = this {
