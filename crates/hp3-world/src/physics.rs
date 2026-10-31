@@ -519,9 +519,15 @@ fn step_up(vm: &mut Vm<'_>, a: ObjId, delta: Vec3, hit: Hit, depth: u32) {
         steppable = up_clear && over_clear;
     }
     let mut now = Some(hit);
+    let start = vec(&get(vm, a, "Location"));
+    let mut lifted = 0.0;
+    let mut across = Vec3::ZERO;
     if steppable {
         move_actor(vm, a, Vec3::Z * lift);
+        lifted = vec(&get(vm, a, "Location")).z - start.z;
+        let before = vec(&get(vm, a, "Location"));
         now = move_actor(vm, a, delta);
+        across = vec(&get(vm, a, "Location")) - before;
     } else if get(vm, a, "Physics").as_byte() != PHYS_WALKING {
         // Not walking: slide up the slope.
         now = move_actor(vm, a, delta + Vec3::Z * (delta.length() * hit.normal.z));
@@ -553,6 +559,22 @@ fn step_up(vm: &mut Vm<'_>, a: ObjId, delta: Vec3, hit: Hit, depth: u32) {
     }
     if step_down {
         move_actor(vm, a, -Vec3::Z * lift);
+    }
+    if depth == 0 && is_player_pawn(vm, a) {
+        let end = vec(&get(vm, a, "Location"));
+        if (end - start).truncate().length() < 1.0 {
+            vm.log.push(format!(
+                "stepup failed at {start}: face ({:.2},{:.2},{:.2}) time {:.3} steppable {steppable} wanted {delta} lifted {lifted:.1} across {across} then {}",
+                hit.normal.x,
+                hit.normal.y,
+                hit.normal.z,
+                hit.time,
+                match now {
+                    Some(h) => format!("hit ({:.2},{:.2},{:.2}) at {:.3}", h.normal.x, h.normal.y, h.normal.z, h.time),
+                    None => "free".to_string(),
+                }
+            ));
+        }
     }
 }
 
