@@ -32,7 +32,7 @@ This is permitted by `CLEANROOM.md` (item 5) and confirmed by the maintainer. It
   `PlayJump`, `PlayFalling` and `PlayLandingAnimation`. The invented root lock and the `SetPhysics` hack are gone.
 - Next: animation notifies and the HP3 channel natives, AnimEnd on every loop of a channel; walking rules (accel cap, friction, sub-steps, ledges, floor `Base`); falling and landing
   events; collision rules (`bBlockActors` both ways, cylinders, `Bump`, `Attach`/`Detach`/`BaseChange`); movers
-  (OldPos interpolation, push/carry, `KeyFrameReached`); `Mount` ledge climbing; MoveTo arrival and slow-down.
+  (OldPos interpolation, push/carry, `KeyFrameReached`); MoveTo arrival and slow-down.
 
 ## Spells: everything enchantable reacts like the original
 
@@ -58,6 +58,14 @@ Open, in the order they matter:
   need Ron or Hermione nearby to react; companions in the hubs still follow imperfectly.
 - Peeves reacts only inside his scripted encounter (he starts hidden and disabled), so his spell handling is not
   covered by the harness yet.
+
+## Ledge climbing
+
+A pawn that walks or falls into a nearly upright wall facing it looks for a ledge (`physics::try_mount`): a box the
+size of the pawn is dropped just past the wall from `MaxMountHeight` (or the static mesh's height) above it, and
+when the top is high enough and reachable the script gets `Mount(delta, wall)`. Geometry covered by unit tests; the
+game's own script then decides (it needs a `MountVolume` at the pawn). Not yet seen end to end: a headless climb
+(`HP3_MOUNT_TEST=<volume>@<tick>` looks for places to try one, but found no clean spot in FA1Ron).
 
 ## Later
 

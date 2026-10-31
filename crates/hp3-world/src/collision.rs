@@ -42,6 +42,7 @@ pub struct ActorBox {
     /// Blocks other actors (`bBlockActors`) and player-controlled ones (`bBlockPlayers`).
     pub blocks_actors: bool,
     pub blocks_players: bool,
+    pub is_pawn: bool,
 }
 
 #[derive(Default)]
@@ -374,6 +375,15 @@ impl Collision {
             }
         }
         best
+    }
+
+    /// The first blocking pawn a box meets moving from `start` to `end` (the level and everything else is ignored).
+    pub fn trace_pawns(&self, start: Vec3, end: Vec3, extent: Vec3, ignore: Option<ObjId>) -> Option<Hit> {
+        self.actors
+            .iter()
+            .filter(|b| b.is_pawn && Some(b.actor) != ignore)
+            .filter_map(|b| box_trace(b, start, end, extent))
+            .min_by(|a, b| a.time.total_cmp(&b.time))
     }
 
     /// The mover of `actor`, when that actor is one.

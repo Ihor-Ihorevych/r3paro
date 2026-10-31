@@ -4,6 +4,7 @@
 //!   class name, prints that class's properties and default values.
 
 mod casttest;
+mod mounttest;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -209,6 +210,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
     }
     let mut walk = Walk::default();
     let mut cast = casttest::CastTest::from_env();
+    let mut mount = mounttest::MountTest::from_env();
     for frame in 0..frames {
         if trace_from == Some(frame) {
             vm.trace_calls = held_trace.clone();
@@ -303,6 +305,9 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
         }
         if let Some(t) = cast.as_mut() {
             casttest::step(&mut vm, t, frame);
+        }
+        if let Some(t) = mount.as_mut() {
+            mounttest::step(&mut vm, t, frame);
         }
         let tick_start = std::time::Instant::now();
         hp3_world::tick(&mut vm, 1.0 / 60.0);

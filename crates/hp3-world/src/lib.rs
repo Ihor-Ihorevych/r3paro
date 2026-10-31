@@ -821,6 +821,41 @@ pub(crate) fn mover_transform(vm: &mut Vm<'_>, a: ObjId) -> glam::Mat4 {
     glam::Mat4::from_translation(loc) * rot
 }
 
+/// Half the height of a static mesh actor's bounding box in the world (what it draws, placed, rotated and
+/// scaled); None when the actor is not a static mesh actor.
+pub(crate) fn static_mesh_half_height(vm: &mut Vm<'_>, a: ObjId) -> Option<f32> {
+    use glam::{Mat3, Vec3};
+    if !vm.db.find("StaticMeshActor").is_some_and(|c| vm.db.objects.get(a).class.is_some_and(|k| vm.is_child_of(k, c))) {
+        return None;
+    }
+    let mesh = get(vm, a, "StaticMesh").as_obj()?;
+    let (pkg, index) = vm.db.objects.get(mesh).key.clone()?;
+    let p = vm.db.set.get(&pkg).ok()?;
+    let chain = vm.db.set.export_chain(&p, index);
+    let Some(Asset::StaticMesh(sm)) = native_asset(&p, index, &chain) else { return None };
+    let r: Vec<i32> = get(vm, a, "Rotation").fields().iter().map(Value::as_int).collect();
+    let axes = hp3_script::natives::rot_axes([r.first().copied().unwrap_or(0), r.get(1).copied().unwrap_or(0), r.get(2).copied().unwrap_or(0)]);
+    let basis = Mat3::from_cols(Vec3::from(axes[0]), Vec3::from(axes[1]), Vec3::from(axes[2]));
+    let scale = match get(vm, a, "DrawScale").as_float() {
+        0.0 => 1.0,
+        s => s,
+    };
+    let s3 = match get(vm, a, "DrawScale3D") {
+        Value::Struct(f) if f.len() == 3 => vec_of(&Value::Struct(f)),
+        _ => Vec3::ONE,
+    };
+    let b = sm.mesh_bounds;
+    let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+    for corner in 0..8u32 {
+        let pick = |bit: u32, min: f32, max: f32| if corner & bit == 0 { min } else { max };
+        let local = Vec3::new(pick(1, b.min.x, b.max.x), pick(2, b.min.y, b.max.y), pick(4, b.min.z, b.max.z));
+        let z = (basis * (local * s3 * scale)).z;
+        lo = lo.min(z);
+        hi = hi.max(z);
+    }
+    Some((hi - lo) * 0.5)
+}
+
 /// A static mesh's `UseSimpleBoxCollision` and `UseSimpleLineCollision`: its collision model answers box traces
 /// and line traces. A mesh that does not set them has the box one on and the line one off.
 fn mesh_simple_flags(pkg: &Package, index: usize, chain: &[String]) -> (bool, bool) {
@@ -936,7 +971,7 @@ fn build_collision(vm: &mut Vm<'_>, map: &Rc<Package>, model: Option<ObjRef>, ac
             }
             // A simple collision model stands in for the triangles in the traces its flags allow.
             let (boxes, lines) = mesh_simple_flags(&mp, mkey_idx, &chain);
-            if (boxes || lines)
+            if (boxes || lines) && std::env::var_os("HP3_NO_MESH_MODELS").is_none()
                 && let Some((cp, ci)) = vm.db.set.resolve(&mp, sm.collision_model)
             {
                 let cchain = vm.db.set.export_chain(&cp, ci);

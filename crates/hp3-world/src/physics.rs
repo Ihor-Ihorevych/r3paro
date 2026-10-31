@@ -62,7 +62,7 @@ fn refresh_actor_boxes(vm: &mut Vm<'_>) {
         if r <= 0.0 || h <= 0.0 {
             continue;
         }
-        boxes.push(ActorBox { actor: a, center: crate::read_vec(vm, a, s.location), extent: Vec3::new(r, r, h), blocks_actors, blocks_players });
+        boxes.push(ActorBox { actor: a, center: crate::read_vec(vm, a, s.location), extent: Vec3::new(r, r, h), blocks_actors, blocks_players, is_pawn: is_pawn(vm, a) });
     }
     world(vm).actors = actors;
     world(vm).collision.actors = boxes;
@@ -318,8 +318,10 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         if delta.length_squared() > 1e-8 {
             if let Some(hit) = move_actor(vm, a, delta)
                 && hit.normal.z < WALKABLE_Z
+                && climb_or_slide(vm, a, delta, hit)
             {
-                climb_or_slide(vm, a, delta, hit);
+                // The script took the pawn up a ledge: the rest of the step is its business.
+                return;
             }
         }
         match floor_below(vm, a, MAX_STEP_HEIGHT + 2.0) {
@@ -370,9 +372,12 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     let _ = old_base;
 }
 
-/// A walker met a barrier: climb it when the step up is possible, otherwise slide along it (and let the script
-/// know with `HitWall`).
-fn climb_or_slide(vm: &mut Vm<'_>, a: ObjId, delta: Vec3, hit: Hit) {
+/// A walker met a barrier: a ledge it can mount is handed to the script (true); else it climbs the barrier when the
+/// step up is possible, or slides along it (and lets the script know with `HitWall`).
+fn climb_or_slide(vm: &mut Vm<'_>, a: ObjId, delta: Vec3, hit: Hit) -> bool {
+    if try_mount(vm, a, Vec3::Z, &hit) {
+        return true;
+    }
     let human = world(vm).player.is_some_and(|pc| get(vm, pc, "Pawn").as_obj() == Some(a));
     let remaining = delta * (1.0 - hit.time);
     let before = vec(&get(vm, a, "Location"));
@@ -392,6 +397,93 @@ fn climb_or_slide(vm: &mut Vm<'_>, a: ObjId, delta: Vec3, hit: Hit) {
     } else {
         move_actor(vm, a, -Vec3::Z * (climbed + 2.0));
     }
+    false
+}
+
+/// Whether a pawn that ran (or fell) into a wall can climb onto a ledge there, and if so hands the move to its
+/// script (`Mount(delta, actor)`, which plays the climb).
+///
+/// The wall must stand nearly upright and face the pawn, and the pawn must have a `MaxMountHeight`. A box the size
+/// of the pawn is dropped just past the wall from that height above it (or, with `bUseStaticMeshSizeForMount`, from
+/// the height of the static mesh it ran into). The top it finds has to be at least a step up (any height while
+/// falling), and the pawn must be able to go straight up from where it is and then across to the top. The level's
+/// geometry and movers are tried first, then other pawns.
+fn try_mount(vm: &mut Vm<'_>, a: ObjId, up: Vec3, hit: &Hit) -> bool {
+    let Some(destination) = mount_destination(vm, a, up, hit) else { return false };
+    let loc = vec(&get(vm, a, "Location"));
+    let wall = hit.actor.or(world(vm).level_info);
+    fire(vm, a, "Mount", &mut [value(destination - loc), Value::Object(wall)]).as_bool()
+}
+
+/// Where a pawn that met a wall at `hit` would climb to, if the wall is a ledge it can mount (see `try_mount`).
+pub fn mount_destination(vm: &mut Vm<'_>, a: ObjId, up: Vec3, hit: &Hit) -> Option<Vec3> {
+    let max_height = get(vm, a, "MaxMountHeight").as_float();
+    if max_height <= 0.0 || hit.normal.z <= -0.1 || hit.normal.z >= 0.17 {
+        return None;
+    }
+    if rotator_direction(&get(vm, a, "Rotation")).dot(hit.normal) >= 0.0 {
+        return None;
+    }
+    let (radius, half_height) = (get(vm, a, "CollisionRadius").as_float(), get(vm, a, "CollisionHeight").as_float());
+    let ext = Vec3::new(radius, radius, half_height);
+    let mut reach = max_height;
+    if get(vm, a, "bUseStaticMeshSizeForMount").as_bool()
+        && let Some(wall) = hit.actor
+        && let Some(half) = crate::static_mesh_half_height(vm, wall)
+    {
+        reach = half + half_height;
+    }
+    let loc = vec(&get(vm, a, "Location"));
+    let min_rise = if get(vm, a, "Physics").as_byte() == PHYS_FALLING {
+        0.0
+    } else {
+        match get(vm, a, "MaxStepHeight").as_float() {
+            h if h > 0.0 => h,
+            _ => MAX_STEP_HEIGHT,
+        }
+    };
+    let ledge = Ledge { loc, up, normal: hit.normal, radius, reach, min_rise, ext, ignore: a };
+    find_ledge(&world(vm).collision, &ledge)
+}
+
+/// What `find_ledge` needs to know about the pawn and the wall it met.
+struct Ledge {
+    loc: Vec3,
+    up: Vec3,
+    normal: Vec3,
+    radius: f32,
+    /// How far above the pawn to look for the top of the wall.
+    reach: f32,
+    /// The least a ledge must be above the pawn's centre.
+    min_rise: f32,
+    ext: Vec3,
+    ignore: ObjId,
+}
+
+/// The place on top of a wall a pawn can climb to: a box the size of the pawn is dropped just past the wall, from
+/// `reach` above the pawn, and must find a top at least `min_rise` up; the pawn must then be able to go straight
+/// up from where it is, and across to that spot, without hitting anything. The level's geometry and movers are
+/// tried first, then other pawns.
+fn find_ledge(col: &crate::collision::Collision, l: &Ledge) -> Option<Vec3> {
+    let into = Vec3::new(-l.normal.x, -l.normal.y, 0.0).normalize_or_zero();
+    let top = l.loc + l.up * l.reach;
+    let start = top + into * (2.0 * l.radius + l.reach * l.normal.z);
+    let end = l.loc + into * (2.0 * l.radius);
+    for pass in 0..2 {
+        let trace = |from: Vec3, to: Vec3| {
+            if pass == 0 { col.trace_static(from, to, l.ext) } else { col.trace_pawns(from, to, l.ext, Some(l.ignore)) }
+        };
+        let Some(down) = trace(start, end) else { continue };
+        if down.location.z - l.loc.z < l.min_rise {
+            continue;
+        }
+        let destination = Vec3::new(down.location.x, down.location.y, down.location.z + 2.0);
+        let lift = Vec3::new(top.x, top.y, destination.z);
+        if trace(l.loc, lift).is_none() && trace(lift, destination).is_none() {
+            return Some(destination);
+        }
+    }
+    None
 }
 
 fn fall(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
@@ -414,7 +506,7 @@ fn fall(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
             }
             v.z = 0.0;
             set(vm, a, "Velocity", value(v));
-        } else {
+        } else if !try_mount(vm, a, Vec3::Z, &hit) {
             fire(vm, a, "HitWall", &mut [value(hit.normal), Value::Object(hit.actor)]);
         }
     }
@@ -733,5 +825,62 @@ pub fn step(vm: &mut Vm<'_>, dt: f32) {
             _ => continue,
         }
         turn_to_desired(vm, a, dt);
+    }
+}
+
+#[cfg(test)]
+mod mount_tests {
+    use super::*;
+    use crate::collision::Collision;
+
+    /// A floor at z=0 and a wall at x=100 facing -x, 90 high, with a flat top reaching to x=300 (a ledge).
+    fn ledge_world(wall_height: f32) -> Collision {
+        let mut c = Collision::new(None);
+        let quad = |c: &mut Collision, a: Vec3, b: Vec3, d: Vec3, e: Vec3| {
+            c.add_triangle([a, b, d], None);
+            c.add_triangle([a, d, e], None);
+        };
+        // The floor, the face of the wall, the top.
+        quad(&mut c, Vec3::new(-500.0, -500.0, 0.0), Vec3::new(100.0, -500.0, 0.0), Vec3::new(100.0, 500.0, 0.0), Vec3::new(-500.0, 500.0, 0.0));
+        quad(&mut c, Vec3::new(100.0, -500.0, 0.0), Vec3::new(100.0, -500.0, wall_height), Vec3::new(100.0, 500.0, wall_height), Vec3::new(100.0, 500.0, 0.0));
+        quad(&mut c, Vec3::new(100.0, -500.0, wall_height), Vec3::new(300.0, -500.0, wall_height), Vec3::new(300.0, 500.0, wall_height), Vec3::new(100.0, 500.0, wall_height));
+        c
+    }
+
+    fn pawn_at(x: f32, c: &Collision, reach: f32) -> Option<Vec3> {
+        let ext = Vec3::new(15.0, 15.0, 38.0);
+        let l = Ledge {
+            loc: Vec3::new(x, 0.0, 38.5),
+            up: Vec3::Z,
+            normal: Vec3::new(-1.0, 0.0, 0.0),
+            radius: 15.0,
+            reach,
+            min_rise: MAX_STEP_HEIGHT,
+            ext,
+            ignore: ObjId(0),
+        };
+        find_ledge(c, &l)
+    }
+
+    #[test]
+    fn climbs_a_ledge_within_reach() {
+        let c = ledge_world(70.0);
+        let to = pawn_at(70.0, &c, 96.5).expect("a 70 high ledge can be mounted");
+        // The destination is on top of the wall (the pawn's centre half its height above 70, plus the 2 margin).
+        assert!((to.z - (70.0 + 38.0 + 2.0)).abs() < 1.5, "top at {}", to.z);
+        assert!((to.x - 100.0).abs() < 1.5, "two radii past the pawn, at the wall's face: {}", to.x);
+    }
+
+    #[test]
+    fn a_wall_too_high_is_left_alone() {
+        let c = ledge_world(300.0);
+        assert!(pawn_at(70.0, &c, 96.5).is_none());
+    }
+
+    #[test]
+    fn a_low_step_is_not_a_mount() {
+        // 10 units is below the least rise (a step, walked up without the script).
+        let c = ledge_world(10.0);
+        assert!(pawn_at(70.0, &c, 96.5).is_none());
     }
 }
