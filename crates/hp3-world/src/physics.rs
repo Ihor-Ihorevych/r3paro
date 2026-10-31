@@ -205,6 +205,31 @@ pub(crate) fn move_and_slide(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<H
     first
 }
 
+/// For the game log: what a pawn that pushes but does not move has around it (what its box meets ahead, above and
+/// below, and the surface under its middle).
+pub fn debug_blocked(vm: &mut Vm<'_>, a: ObjId) -> String {
+    let loc = vec(&get(vm, a, "Location"));
+    let accel = vec(&get(vm, a, "Acceleration"));
+    let ahead = Vec3::new(accel.x, accel.y, 0.0).normalize_or_zero() * 24.0;
+    let ext = extent(vm, a);
+    let player = is_player_pawn(vm, a);
+    let describe = |vm: &mut Vm<'_>, from: Vec3, to: Vec3, e: Vec3| -> String {
+        match world(vm).collision.trace_as(player, from, to, e, Some(a)) {
+            Some(h) => {
+                let who = h.actor.map(|o| hp3_script::natives::object_path(vm, o));
+                format!("hit t={:.3} normal ({:.2},{:.2},{:.2}) {who:?}", h.time, h.normal.x, h.normal.y, h.normal.z)
+            }
+            None => "free".to_string(),
+        }
+    };
+    let forward = describe(vm, loc, loc + ahead, ext);
+    let up = describe(vm, loc, loc + Vec3::Z * (MAX_STEP_HEIGHT + 2.0), ext);
+    let over = describe(vm, loc + Vec3::Z * (MAX_STEP_HEIGHT + 2.0), loc + Vec3::Z * (MAX_STEP_HEIGHT + 2.0) + ahead, ext);
+    let down = describe(vm, loc, loc - Vec3::Z * (MAX_STEP_HEIGHT + 2.0), ext);
+    let middle = describe(vm, loc, loc - Vec3::Z * (MAX_STEP_HEIGHT + 2.0), Vec3::new(2.0, 2.0, ext.z));
+    format!("box {ext} | ahead: {forward} | up: {up} | over: {over} | down: {down} | under middle: {middle}")
+}
+
 fn floor_below(vm: &mut Vm<'_>, a: ObjId, depth: f32) -> Option<Hit> {
     let loc = vec(&get(vm, a, "Location"));
     let ext = extent(vm, a);

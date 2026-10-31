@@ -100,6 +100,18 @@ impl GameLog {
                 .collect();
             self.line(&format!("HANG rot {rot:?} phys {phys} rollToDesired {roll_to} anims [{}] bones{pose}", anims.join(" | ")));
         }
+        // A pawn that pushes and does not move: what is around it, once a second.
+        if let Some(p) = pawn
+            && second != self.last_second
+        {
+            let accel = hp3_world::physics::vec(&hp3_world::get(vm, p, "Acceleration"));
+            let vel = hp3_world::physics::vec(&hp3_world::get(vm, p, "Velocity"));
+            let phys = hp3_world::get(vm, p, "Physics").as_byte();
+            if accel.length() > 100.0 && vel.truncate().length() < 20.0 && (phys == 1 || phys == 2) {
+                let d = hp3_world::physics::debug_blocked(vm, p);
+                self.line(&format!("BLOCKED phys {phys} {d}"));
+            }
+        }
         // A change of the controlled pawn is written at once, the rest once a second.
         let now = pawn.map(|p| hp3_script::natives::object_path(vm, p)).unwrap_or_default();
         if now != self.last_pawn {
