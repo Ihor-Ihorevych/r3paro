@@ -21,6 +21,12 @@ pub struct MountTest {
 impl MountTest {
     pub fn from_env() -> Option<MountTest> {
         let spec = std::env::var("HP3_MOUNT_TEST").ok()?;
+        if let Some(rest) = spec.strip_prefix('=') {
+            let (at, tick) = rest.split_once('@')?;
+            let c: Vec<f32> = at.split(',').filter_map(|v| v.parse().ok()).collect();
+            let t = MountTest { index: usize::MAX, actor: Some(format!("={},{},{}", c.first()?, c.get(1)?, c.get(2)?)), at: tick.parse().ok()?, started: None, spots: Vec::new() };
+            return Some(t);
+        }
         if let Some(rest) = spec.strip_prefix('@') {
             let (name, at) = rest.split_once('@')?;
             return Some(MountTest { index: 0, actor: Some(name.to_string()), at: at.parse().ok()?, started: None, spots: Vec::new() });
@@ -50,8 +56,9 @@ fn find_spots(vm: &mut Vm<'_>, pawn: ObjId, volume: ObjId, centre: Vec3) -> Vec<
     let ext = Vec3::new(r, r, get(vm, pawn, "CollisionHeight").as_float());
     let mut spots = Vec::new();
     let was = vec(&get(vm, pawn, "Location"));
-    for dx in (-48..=48).step_by(12) {
-        for dy in (-48..=48).step_by(12) {
+    let range: i32 = std::env::var("HP3_MOUNT_RANGE").ok().and_then(|v| v.parse().ok()).unwrap_or(48);
+    for dx in (-range..=range).step_by((range / 4).max(12) as usize) {
+        for dy in (-range..=range).step_by((range / 4).max(12) as usize) {
             let mut last_floor = f32::MIN;
             for dz in (-80..=80).step_by(8) {
                 let from = centre + Vec3::new(dx as f32, dy as f32, dz as f32);
@@ -83,7 +90,7 @@ fn find_spots(vm: &mut Vm<'_>, pawn: ObjId, volume: ObjId, centre: Vec3) -> Vec<
                         Value::Array(v) => v.iter().any(|t| t.as_obj() == Some(volume)),
                         _ => false,
                     };
-                    if inside && hp3_world::physics::mount_destination(vm, pawn, Vec3::Z, &h).is_some() {
+                    if (inside || volume.0 == u32::MAX) && hp3_world::physics::mount_destination(vm, pawn, Vec3::Z, &h).is_some() {
                         spots.push((stand, yaw));
                     }
                 }
@@ -129,7 +136,19 @@ pub fn step(vm: &mut Vm<'_>, t: &mut MountTest, frame: u32) {
             t.at += 1;
             return;
         }
-        if let Some(name) = t.actor.clone() {
+        if let Some(c) = t.actor.clone().and_then(|a| a.strip_prefix('=').map(str::to_string)) {
+            let v: Vec<f32> = c.split(',').filter_map(|x| x.parse().ok()).collect();
+            let centre = Vec3::new(v[0], v[1], v[2]);
+            t.spots = find_spots(vm, pawn, ObjId(u32::MAX), centre);
+            if let Some(n) = std::env::var("HP3_MOUNT_ONLY").ok().and_then(|v| v.parse::<usize>().ok()) {
+                t.spots = t.spots.get(n).copied().into_iter().collect();
+            }
+            println!("mount: scanning around {centre}: {} climbable places", t.spots.len());
+            for (i, (at, yaw)) in t.spots.iter().enumerate().take(40) {
+                println!("mount: place {i}: {at} yaw {yaw}");
+            }
+            t.started = Some(frame);
+        } else if let Some(name) = t.actor.clone() {
             let actors = hp3_world::world(vm).actors.clone();
             let found = actors.into_iter().find(|&a| hp3_script::natives::object_path(vm, a).ends_with(&format!(".{name}")));
             let Some(target) = found else {
@@ -138,6 +157,9 @@ pub fn step(vm: &mut Vm<'_>, t: &mut MountTest, frame: u32) {
             };
             let centre = vec(&get(vm, target, "Location"));
             t.spots = ring_spots(vm, pawn, centre);
+            if let Some(n) = std::env::var("HP3_MOUNT_ONLY").ok().and_then(|v| v.parse::<usize>().ok()) {
+                t.spots = t.spots.get(n).copied().into_iter().collect();
+            }
             // How tall it is: the top found by tracing down through its middle, and the floor beside it.
             let col = &hp3_world::world(vm).collision;
             let top = col.trace_static(centre + Vec3::Z * 600.0, centre - Vec3::Z * 600.0, Vec3::ZERO);
@@ -171,6 +193,20 @@ pub fn step(vm: &mut Vm<'_>, t: &mut MountTest, frame: u32) {
         println!("mount: no climb in {} tries", t.spots.len());
         std::process::exit(0)
     };
+    if k == 0 && std::env::var_os("HP3_MOUNT_PROFILE").is_some() {
+        // The height of the ground ahead of the spot, with no size and with the pawn's cylinder.
+        let ang = yaw as f32 * std::f32::consts::TAU / 65536.0;
+        let dir = Vec3::new(ang.cos(), ang.sin(), 0.0);
+        let r = get(vm, pawn, "CollisionRadius").as_float();
+        let ext = Vec3::new(r, r, get(vm, pawn, "CollisionHeight").as_float());
+        for d in (0..=120).step_by(10) {
+            let at = stand + dir * d as f32 + Vec3::Z * 120.0;
+            let col = &hp3_world::world(vm).collision;
+            let line = col.trace_static(at, at - Vec3::Z * 200.0, Vec3::ZERO).map(|h| (h.location.z, h.normal.z));
+            let cyl = col.trace_static(at, at - Vec3::Z * 200.0, ext).map(|h| (h.location.z - ext.z, h.normal.z));
+            println!("mount: ahead {d:3}: line top {line:?}  cylinder floor {cyl:?}");
+        }
+    }
     if k == 0 {
         set(vm, pawn, "Velocity", v3(Vec3::ZERO));
         fire(vm, pawn, "SetLocation", &mut [v3(stand)]);
@@ -178,7 +214,8 @@ pub fn step(vm: &mut Vm<'_>, t: &mut MountTest, frame: u32) {
             println!("mount: try {trial}: pawn to {stand} facing yaw {yaw}");
         }
     }
-    if k < 40 {
+    let hold_to = if std::env::var_os("HP3_MOUNT_WALK").is_some() { trial_len() } else { 40 };
+    if k < hold_to {
         // Keep the heading while placing and walking; the camera decides where Forward goes.
         let rot = Value::Struct(vec![Value::Int(0), Value::Int(yaw), Value::Int(0)].into());
         if let Some(cam) = get(vm, pc, "Camera").as_obj() {
@@ -193,10 +230,10 @@ pub fn step(vm: &mut Vm<'_>, t: &mut MountTest, frame: u32) {
     if k == 5 {
         input.key_down("W");
     }
-    if k == 40 {
+    if k == hold_to {
         input.key_up("W");
     }
-    if k % 10 == 9 && k >= 40 || k % 10 == 9 && trial_len() == 60 {
+    if std::env::var_os("HP3_MOUNT_FINE").is_some() && k >= 80 && k <= 110 || k % 10 == 9 && k >= 40 || k % 10 == 9 && trial_len() == 60 {
         let here = vec(&get(vm, pawn, "Location"));
         let r = get(vm, pawn, "CollisionRadius").as_float();
         let ext = Vec3::new(r, r, get(vm, pawn, "CollisionHeight").as_float());

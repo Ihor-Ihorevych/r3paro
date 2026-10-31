@@ -447,8 +447,13 @@ pub fn register(vm: &mut Vm<'_>) {
     // Sound and music: silent until the audio crate exists.
     // Animation natives live in anim.rs.
     vm.register("Actor.FinishInterpolation", |vm, this, _a| {
+        // Waits until the mover has finished its move (`bInterpolating` goes off); returns at once when none runs.
         if let Some(o) = this {
-            vm.latent.insert(o, Latent::Sleep(0.0));
+            if get(vm, o, "bInterpolating").as_bool() {
+                vm.latent.insert(o, Latent::Other("interpolation"));
+            } else {
+                vm.latent.insert(o, Latent::Sleep(0.0));
+            }
         }
         Ok(Value::Empty)
     });

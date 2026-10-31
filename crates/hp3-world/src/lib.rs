@@ -918,7 +918,11 @@ fn build_collision(vm: &mut Vm<'_>, map: &Rc<Package>, model: Option<ObjRef>, ac
     for &a in actors {
         // Movers collide as moving shapes, not as part of the fixed level.
         if mover_class.is_some_and(|m| vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, m))) {
-            if let Some(shape) = mover_shape(vm, a).filter(|_| std::env::var_os("HP3_NO_MOVER_COLLISION").is_none()) {
+            let shape = mover_shape(vm, a).filter(|_| std::env::var_os("HP3_NO_MOVER_COLLISION").is_none());
+            if std::env::var_os("HP3_COLLISION_STATS").is_some() {
+                eprintln!("mover {} collision shape: {}", hp3_script::natives::object_path(vm, a), if shape.is_some() { "built" } else { "NONE" });
+            }
+            if let Some(shape) = shape {
                 col.movers.push(shape);
             }
             continue;

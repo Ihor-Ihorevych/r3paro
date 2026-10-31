@@ -415,10 +415,17 @@ fn try_mount(vm: &mut Vm<'_>, a: ObjId, up: Vec3, hit: &Hit) -> bool {
 /// Where a pawn that met a wall at `hit` would climb to, if the wall is a ledge it can mount (see `try_mount`).
 pub fn mount_destination(vm: &mut Vm<'_>, a: ObjId, up: Vec3, hit: &Hit) -> Option<Vec3> {
     let max_height = get(vm, a, "MaxMountHeight").as_float();
+    let debug = std::env::var_os("HP3_MOUNT_DEBUG").is_some() && is_player_pawn(vm, a);
     if max_height <= 0.0 || hit.normal.z <= -0.1 || hit.normal.z >= 0.17 {
+        if debug {
+            eprintln!("mount: not a wall (normal {}, max height {max_height})", hit.normal);
+        }
         return None;
     }
     if rotator_direction(&get(vm, a, "Rotation")).dot(hit.normal) >= 0.0 {
+        if debug {
+            eprintln!("mount: wall {} does not face the pawn", hit.normal);
+        }
         return None;
     }
     let (radius, half_height) = (get(vm, a, "CollisionRadius").as_float(), get(vm, a, "CollisionHeight").as_float());
@@ -464,23 +471,41 @@ struct Ledge {
 fn find_ledge(col: &crate::collision::Collision, l: &Ledge) -> Option<Vec3> {
     let into = Vec3::new(-l.normal.x, -l.normal.y, 0.0).normalize_or_zero();
     let top = l.loc + l.up * l.reach;
-    let start = top + into * (2.0 * l.radius + l.reach * l.normal.z);
-    let end = l.loc + into * (2.0 * l.radius);
-    for pass in 0..2 {
-        let trace = |from: Vec3, to: Vec3| {
-            if pass == 0 { col.trace_static(from, to, l.ext) } else { col.trace_pawns(from, to, l.ext, Some(l.ignore)) }
-        };
-        let Some(down) = trace(start, end) else { continue };
-        if down.location.z - l.loc.z < l.min_rise {
-            continue;
+    // What the original does is one drop two radii in from the wall: its answer is used as it comes. A stone
+    // block's collision hull can slope there, so when that first answer is not a flat top, drops further in are
+    // tried and a flat top found there is preferred; the first answer stays as the fallback.
+    let mut first: Option<Vec3> = None;
+    let mut flat: Option<Vec3> = None;
+    for deeper in [0.0, 1.0, 2.0, 3.0, 4.0] {
+        let shift = into * (deeper * l.radius);
+        let start = top + into * (2.0 * l.radius + l.reach * l.normal.z) + shift;
+        let end = l.loc + into * (2.0 * l.radius) + shift;
+        for pass in 0..2 {
+            let trace = |from: Vec3, to: Vec3| {
+                if pass == 0 { col.trace_static(from, to, l.ext) } else { col.trace_pawns(from, to, l.ext, Some(l.ignore)) }
+            };
+            let Some(down) = trace(start, end) else { continue };
+            if down.location.z - l.loc.z < l.min_rise {
+                continue;
+            }
+            let destination = Vec3::new(down.location.x, down.location.y, down.location.z + 2.0);
+            let lift = Vec3::new(top.x, top.y, destination.z);
+            if trace(l.loc, lift).is_some() || trace(lift, destination).is_some() {
+                continue;
+            }
+            if first.is_none() {
+                first = Some(destination);
+            }
+            if down.normal.z >= WALKABLE_Z && flat.is_none_or(|b| destination.z > b.z + 1.0) {
+                flat = Some(destination);
+            }
+            break;
         }
-        let destination = Vec3::new(down.location.x, down.location.y, down.location.z + 2.0);
-        let lift = Vec3::new(top.x, top.y, destination.z);
-        if trace(l.loc, lift).is_none() && trace(lift, destination).is_none() {
-            return Some(destination);
+        if deeper == 0.0 && first.is_some() && flat.is_some() {
+            break;
         }
     }
-    None
+    flat.or(first)
 }
 
 fn fall(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
@@ -822,6 +847,7 @@ fn moving_brush(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         set(vm, a, "PhysAlpha", Value::Float(alpha));
         if alpha >= 1.0 {
             set(vm, a, "bInterpolating", Value::Bool(false));
+            vm.finish_latent(a);
             let mut v = vec(&get(vm, a, "Velocity"));
             v.z = v.z.max(rate * (goal.z - old_pos.z));
             set(vm, a, "Velocity", value(v));

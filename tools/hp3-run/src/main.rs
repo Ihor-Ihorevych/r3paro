@@ -365,7 +365,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             mounttest::step(&mut vm, t, frame);
         }
         let tick_start = std::time::Instant::now();
-        hp3_world::tick(&mut vm, 1.0 / 60.0);
+        hp3_world::tick(&mut vm, std::env::var("HP3_TICK_DT").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0 / 60.0));
         // HP3_CALC_VIEW=1: computes the player's view every tick, as the app does when drawing (the spell cursor
         // is placed by it).
         if std::env::var_os("HP3_CALC_VIEW").is_some() {
