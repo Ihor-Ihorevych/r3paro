@@ -240,7 +240,17 @@ struct Particle {
     end: Vec3,
 }
 
+/// A line the script gives an emitter to spawn along (`LineExpression`): points of the line from its start to its
+/// end, each with the origin and the three axes the script gives for it, and how far along the line particles
+/// may be born so far.
+#[derive(Clone)]
+struct Line {
+    points: Vec<(Vec3, [Vec3; 3])>,
+    alpha_max: f32,
+}
+
 struct EmitterState {
+    line: Option<Line>,
     config: Config,
     refreshed: u64,
     particles: Vec<Particle>,
@@ -264,6 +274,8 @@ pub struct Particles {
     /// Emitter actors that already have their own emitter objects.
     owned: std::collections::HashSet<ObjId>,
     pub debug: bool,
+    /// How long each emitter actor with a line has been running (the line fills over time).
+    line_age: crate::HashMap<ObjId, f32>,
 }
 
 const REFRESH_FRAMES: u64 = 8;
@@ -288,8 +300,19 @@ fn interpolate<T: Copy>(table: &[(f32, T)], t: f32, mix: impl Fn(T, T, f32) -> T
     table.last().map(|e| e.1)
 }
 
-fn spawn(config: &Config, rng: &mut Rng, origin: Vec3, rot: Mat3, fill_age: f32) -> Particle {
+fn spawn(config: &Config, rng: &mut Rng, origin: Vec3, rot: Mat3, fill_age: f32, line: Option<&Line>) -> Particle {
     let local = match config.shape {
+        _ if line.is_some_and(|l| !l.points.is_empty()) => {
+            // Born along the script's line: a point of it, and the usual offset taken along its axes.
+            let l = line.unwrap();
+            let at = rng.next() * l.alpha_max.clamp(0.0, 1.0) * (l.points.len() - 1) as f32;
+            let (i, f) = (at.floor() as usize, at.fract());
+            let (a, b) = (&l.points[i], &l.points[(i + 1).min(l.points.len() - 1)]);
+            let origin = a.0 + (b.0 - a.0) * f;
+            let axes = [0, 1, 2].map(|k| a.1[k] + (b.1[k] - a.1[k]) * f);
+            let r = config.start_offset + config.start_range.pick(rng);
+            origin + axes[0] * r.x + axes[1] * r.y + axes[2] * r.z
+        }
         1 => {
             // Inside a sphere.
             let d = Vec3::new(rng.next() * 2.0 - 1.0, rng.next() * 2.0 - 1.0, rng.next() * 2.0 - 1.0).normalize_or_zero();
@@ -396,6 +419,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         let origin = crate::physics::vec(&get(vm, a, "Location"));
         let rot = rotation_of(vm, a);
         let hidden = get(vm, a, "bHidden").as_bool();
+        let line = if hidden { None } else { line_of(vm, a, dt) };
         for (i, e) in emitters.iter().enumerate() {
             let Some(obj) = e.as_obj() else { continue };
             let key = (a, i);
@@ -413,7 +437,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
                         let seed = (a.0.wrapping_mul(2654435761) ^ (i as u32).wrapping_mul(40503)).max(1);
                         w.particles.states.insert(
                             key,
-                            EmitterState { config, refreshed: frame, particles: Vec::new(), accum: 0.0, rng: Rng(seed), slots_used: 0, object: obj, kill_pending: false, deferred: 0, last_origin: origin },
+                            EmitterState { line: None, config, refreshed: frame, particles: Vec::new(), accum: 0.0, rng: Rng(seed), slots_used: 0, object: obj, kill_pending: false, deferred: 0, last_origin: origin },
                         );
                     }
                 }
@@ -421,6 +445,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
             let name = vm.db.objects.get(a).name;
             let name = vm.db.names.get(name).to_string();
             let Some(s) = world(vm).particles.states.get_mut(&key) else { continue };
+            s.line = line.clone();
             step(s, dt, origin, rot, hidden);
             if needs && std::env::var_os("HP3_PARTICLE_DEBUG").is_some() {
                 let c = &s.config;
@@ -441,6 +466,35 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     world(vm).particles.states.retain(|k, _| seen.contains(k));
 }
 
+/// The line an emitter actor has been given: its `LineExpression` delegate (the Carpe Retractum spell binds its
+/// own line function) asked for 25 points from the start of the line to its end. The line fills from the start
+/// over `fTimeToFill` seconds when `bAddOverTime`.
+fn line_of(vm: &mut Vm<'_>, a: ObjId, dt: f32) -> Option<Line> {
+    let Value::Delegate(Some(owner), name) = get(vm, a, "__LineExpression__Delegate") else { return None };
+    if name == hp3_script::Name::NONE || vm.db.objects.get(owner).deleted {
+        return None;
+    }
+    let name = vm.db.names.get(name).to_string();
+    let age = {
+        let t = world(vm).particles.line_age.entry(a).or_insert(0.0);
+        *t += dt;
+        *t
+    };
+    let fill = get(vm, a, "fTimeToFill").as_float();
+    let alpha_max = if get(vm, a, "bAddOverTime").as_bool() && fill > 0.0 { (age / fill).clamp(0.02, 1.0) } else { 1.0 };
+    let mut points = Vec::with_capacity(25);
+    for i in 0..25 {
+        let alpha = i as f32 / 24.0;
+        let coords = crate::fire(vm, owner, &name, &mut [Value::Float(alpha)]);
+        let f = coords.fields();
+        if f.len() < 4 {
+            return None;
+        }
+        points.push((crate::physics::vec(&f[0]), [crate::physics::vec(&f[1]), crate::physics::vec(&f[2]), crate::physics::vec(&f[3])]));
+    }
+    Some(Line { points, alpha_max })
+}
+
 fn step(s: &mut EmitterState, dt: f32, origin: Vec3, rot: Mat3, hidden: bool) {
     // A hidden emitter stands still: its particles keep their age and come back as they were when it is shown
     // again (the aim symbols are hidden and shown by the spell cursor).
@@ -451,7 +505,7 @@ fn step(s: &mut EmitterState, dt: f32, origin: Vec3, rot: Mat3, hidden: bool) {
     s.last_origin = origin;
     let off = c.disabled;
     let new_particle = |s: &mut EmitterState, c: &Config, age: f32| {
-        let mut p = spawn(c, &mut s.rng, origin, rot, age);
+        let mut p = spawn(c, &mut s.rng, origin, rot, age, s.line.as_ref());
         if c.beam {
             let d = c.beam_distance.pick(&mut s.rng);
             p.end = Vec3::new(d, 0.0, 0.0) + c.beam_offset.pick(&mut s.rng);
