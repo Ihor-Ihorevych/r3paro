@@ -58,6 +58,56 @@ pub fn set_base(vm: &mut Vm<'_>, o: ObjId, new_base: Option<ObjId>, notify: bool
     }
 }
 
+/// Which colliding actors a line check looks at.
+struct LineFilter {
+    /// Only actors of this class (or a subclass).
+    class: Option<hp3_script::StructId>,
+    /// Only actors that can be aimed at or that block (`bProjTarget` / `bBlockActors`).
+    projectile_targets: bool,
+    /// Movers are met as well (a trace of the world already includes them).
+    movers: bool,
+}
+
+/// Every collidable actor a box swept from `start` to `end` meets, with where. Actors must collide, and block the
+/// kind of trace made (`bBlockZeroExtentTraces` for a line, `bBlockNonZeroExtentTraces` with an extent); volumes
+/// and static meshes that are part of the level are left to the level's own check, and what `source` owns (or its
+/// pawn) is skipped. Actors are cylinders; movers are their geometry.
+fn line_hits(vm: &mut Vm<'_>, source: ObjId, start: glam::Vec3, end: glam::Vec3, extent: glam::Vec3, filter: &LineFilter) -> Vec<crate::collision::Hit> {
+    let volume = vm.db.find("Volume");
+    let own_pawn = get(vm, source, "Pawn").as_obj();
+    let flag = if extent == glam::Vec3::ZERO { "bBlockZeroExtentTraces" } else { "bBlockNonZeroExtentTraces" };
+    let mut hits = Vec::new();
+    for b in crate::touch::along(vm, start, end, extent.max_element()) {
+        if b == source || Some(b) == own_pawn || vm.db.objects.get(b).deleted {
+            continue;
+        }
+        let Some(have) = vm.db.objects.get(b).class else { continue };
+        if filter.class.is_some_and(|want| !vm.is_child_of(have, want)) || volume.is_some_and(|v| vm.is_child_of(have, v)) {
+            continue;
+        }
+        if !get(vm, b, "bCollideActors").as_bool() || !get(vm, b, flag).as_bool() || get(vm, b, "Owner").as_obj() == Some(source) {
+            continue;
+        }
+        if filter.projectile_targets && !get(vm, b, "bProjTarget").as_bool() && !get(vm, b, "bBlockActors").as_bool() {
+            continue;
+        }
+        let hit = if let Some(m) = world(vm).collision.mover(b) {
+            if filter.movers { m.hit(start, end, extent) } else { None }
+        } else if get(vm, b, "StaticMesh").as_obj().is_some() && get(vm, b, "bWorldGeometry").as_bool() {
+            None
+        } else {
+            let (r, h) = (get(vm, b, "CollisionRadius").as_float(), get(vm, b, "CollisionHeight").as_float());
+            let center = crate::physics::vec(&get(vm, b, "Location"));
+            crate::collision::cylinder_trace(center, r, h, start, end, extent)
+        };
+        if let Some(mut h) = hit {
+            h.actor = Some(b);
+            hits.push(h);
+        }
+    }
+    hits
+}
+
 /// Creates an actor of `class`: defaults, owner, tag, location, rotation, then the begin-play events.
 pub fn spawn(vm: &mut Vm<'_>, spawner: Option<ObjId>, a: &[Value]) -> Result<Value, VmError> {
     let Some(class_obj) = obj_arg(a, 0) else { return Ok(Value::Object(None)) };
@@ -554,20 +604,27 @@ pub fn register(vm: &mut Vm<'_>) {
     });
     // Trace(out HitLocation, out HitNormal, TraceEnd, optional TraceStart, optional bTraceActors,
     //       optional Extent, optional out Material): the actor hit, Level for world geometry, or None.
+    // Trace(out HitLoc, out HitNorm, End, optional Start, optional bTraceActors, optional Extent): the first thing
+    // met. Without `bTraceActors` (which defaults to the tracer's own `bCollideActors`) only the world counts: the
+    // level and the movers; with it, also actors that can be aimed at or that block. A controller traces as its pawn.
     vm.register("Actor.Trace", |vm, this, a| {
         let Some(o) = this else { return Ok(Value::Object(None)) };
         let end = crate::physics::vec(&a[2]);
         let start = if given(a, 3) { crate::physics::vec(&a[3]) } else { crate::physics::vec(&get(vm, o, "Location")) };
-        let trace_actors = a.get(4).is_some_and(Value::as_bool);
+        let trace_actors = if given(a, 4) { a[4].as_bool() } else { get(vm, o, "bCollideActors").as_bool() };
         let extent = if given(a, 5) { crate::physics::vec(&a[5]) } else { glam::Vec3::ZERO };
-        let w = world(vm);
-        let saved = if trace_actors { None } else { Some(std::mem::take(&mut w.collision.actors)) };
-        let hit = w.collision.trace(start, end, extent, Some(o));
-        if let Some(saved) = saved {
-            w.collision.actors = saved;
+        let source = get(vm, o, "Pawn").as_obj().unwrap_or(o);
+        let mut best = world(vm).collision.trace_static(start, end, extent).filter(|h| h.actor != Some(source));
+        if trace_actors {
+            let filter = LineFilter { class: None, projectile_targets: true, movers: false };
+            for h in line_hits(vm, source, start, end, extent, &filter) {
+                if best.is_none_or(|b| h.time < b.time) {
+                    best = Some(h);
+                }
+            }
         }
-        let level = w.level_info;
-        match hit {
+        let level = world(vm).level_info;
+        match best {
             Some(h) => {
                 a[0] = crate::physics::value(h.location);
                 a[1] = crate::physics::value(h.normal);
@@ -584,11 +641,7 @@ pub fn register(vm: &mut Vm<'_>) {
         let Some(o) = this else { return Ok(Value::Bool(true)) };
         let end = crate::physics::vec(&a[0]);
         let start = if given(a, 1) { crate::physics::vec(&a[1]) } else { crate::physics::vec(&get(vm, o, "Location")) };
-        let w = world(vm);
-        let saved = std::mem::take(&mut w.collision.actors);
-        let clear = w.collision.trace(start, end, glam::Vec3::ZERO, Some(o)).is_none();
-        w.collision.actors = saved;
-        Ok(Value::Bool(clear))
+        Ok(Value::Bool(world(vm).collision.trace_static(start, end, glam::Vec3::ZERO).is_none_or(|h| h.actor == Some(o))))
     });
     // TraceActors(BaseClass, out Actor, out HitLoc, out HitNorm, End, optional Start, optional Extent): every
     // colliding actor the swept segment crosses, nearest first, and the first thing of the level's geometry
@@ -602,35 +655,8 @@ pub fn register(vm: &mut Vm<'_>) {
         let start = if given(a, 5) { crate::physics::vec(&a[5]) } else { crate::physics::vec(&get(vm, o, "Location")) };
         let extent = if given(a, 6) { crate::physics::vec(&a[6]) } else { glam::Vec3::ZERO };
         let class = obj_arg(a, 0).and_then(|c| vm.class_of(c));
-        let volume = vm.db.find("Volume");
-        let own_pawn = get(vm, o, "Pawn").as_obj();
-        let flag = if extent == glam::Vec3::ZERO { "bBlockZeroExtentTraces" } else { "bBlockNonZeroExtentTraces" };
-        let mut hits = Vec::new();
-        for b in crate::touch::along(vm, start, end, extent.max_element()) {
-            if b == o || Some(b) == own_pawn || vm.db.objects.get(b).deleted {
-                continue;
-            }
-            let Some(have) = vm.db.objects.get(b).class else { continue };
-            if class.is_some_and(|want| !vm.is_child_of(have, want)) || volume.is_some_and(|v| vm.is_child_of(have, v)) {
-                continue;
-            }
-            if !get(vm, b, "bCollideActors").as_bool() || !get(vm, b, flag).as_bool() || get(vm, b, "Owner").as_obj() == Some(o) {
-                continue;
-            }
-            let hit = if let Some(m) = world(vm).collision.mover(b) {
-                m.hit(start, end, extent)
-            } else if get(vm, b, "StaticMesh").as_obj().is_some() && get(vm, b, "bWorldGeometry").as_bool() {
-                None // part of the level's geometry, met below
-            } else {
-                let (r, h) = (get(vm, b, "CollisionRadius").as_float(), get(vm, b, "CollisionHeight").as_float());
-                let center = crate::physics::vec(&get(vm, b, "Location"));
-                crate::collision::cylinder_trace(center, r, h, start, end, extent)
-            };
-            if let Some(mut h) = hit {
-                h.actor = Some(b);
-                hits.push(h);
-            }
-        }
+        let filter = LineFilter { class, projectile_targets: false, movers: true };
+        let mut hits = line_hits(vm, o, start, end, extent, &filter);
         let level = world(vm).level_info;
         let ghost = Mover { player: false, blocks_actors: false, collide_world: true };
         if let Some(mut h) = world(vm).collision.trace_for(ghost, start, end, extent, None) {
