@@ -59,6 +59,17 @@ pub struct Collision {
     passes_world: bool,
     /// Movers: their triangles in their own space, placed by a transform that follows them.
     pub movers: Vec<MoverShape>,
+    /// Static meshes that have a simple collision model, already placed in the world, and the cells they cover.
+    mesh_models: Vec<MeshModel>,
+    modeled: HashMap<ObjId, (bool, bool)>,
+    model_grid: HashMap<(i32, i32), Vec<u32>>,
+}
+
+/// A static mesh's collision model placed in the world. It stands in for the mesh's triangles for the kinds of
+/// trace its flags allow: boxes (`UseSimpleBoxCollision`) and lines (`UseSimpleLineCollision`).
+struct MeshModel {
+    actor: ObjId,
+    model: std::rc::Rc<Model>,
 }
 
 /// How the thing being moved collides with others.
@@ -212,6 +223,28 @@ impl Collision {
         self.tris.len()
     }
 
+    /// Registers a static mesh actor's collision model (planes already in world space). `boxes` and `lines` are
+    /// the mesh's `UseSimpleBoxCollision` and `UseSimpleLineCollision`; `lo`/`hi` bound it in the world.
+    pub fn add_mesh_model(&mut self, actor: ObjId, model: Model, boxes: bool, lines: bool, lo: Vec3, hi: Vec3) {
+        if model.nodes.is_empty() || !(boxes || lines) {
+            return;
+        }
+        let index = self.mesh_models.len() as u32;
+        self.mesh_models.push(MeshModel { actor, model: std::rc::Rc::new(model) });
+        self.modeled.insert(actor, (boxes, lines));
+        for x in cell(lo.x)..=cell(hi.x) {
+            for y in cell(lo.y)..=cell(hi.y) {
+                self.model_grid.entry((x, y)).or_default().push(index);
+            }
+        }
+    }
+
+    /// Whether a trace with this extent uses `actor`'s collision model instead of its triangles: boxes when the
+    /// extent is not zero, lines when it is.
+    fn uses_model(&self, actor: ObjId, extent: Vec3) -> bool {
+        self.modeled.get(&actor).is_some_and(|&(boxes, lines)| if extent == Vec3::ZERO { lines } else { boxes })
+    }
+
     /// Adds a world-space triangle; degenerate ones are skipped.
     pub fn add_triangle(&mut self, v: [Vec3; 3], actor: Option<ObjId>) {
         let normal = (v[1] - v[0]).cross(v[2] - v[0]);
@@ -294,8 +327,32 @@ impl Collision {
                     if t.actor.is_some() && t.actor == ignore {
                         continue;
                     }
+                    if t.actor.is_some_and(|a| self.uses_model(a, extent)) {
+                        continue;
+                    }
                     if let Some(h) = tri_trace(t, start, end, extent) {
                         keep(h);
+                    }
+                }
+            }
+        }
+        // Static meshes traced through their collision models.
+        let mut seen_models = hp3_script::fx::FxHashSet::default();
+        for x in cell(min.x)..=cell(max.x) {
+            for y in cell(min.y)..=cell(max.y) {
+                let Some(list) = self.model_grid.get(&(x, y)) else { continue };
+                for &i in list {
+                    if self.passes_world || !seen_models.insert(i) {
+                        continue;
+                    }
+                    let m = &self.mesh_models[i as usize];
+                    if Some(m.actor) == ignore || !self.uses_model(m.actor, extent) {
+                        continue;
+                    }
+                    let mut out = None;
+                    bsp_trace(&m.model, 0, 0.0, 1.0, start, end, start, end, extent, Vec3::Z, &mut out);
+                    if let Some(h) = out {
+                        keep(Hit { actor: Some(m.actor), ..h });
                     }
                 }
             }

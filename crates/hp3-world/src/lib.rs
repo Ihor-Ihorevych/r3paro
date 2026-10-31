@@ -821,6 +821,47 @@ pub(crate) fn mover_transform(vm: &mut Vm<'_>, a: ObjId) -> glam::Mat4 {
     glam::Mat4::from_translation(loc) * rot
 }
 
+/// A static mesh's `UseSimpleBoxCollision` and `UseSimpleLineCollision`: its collision model answers box traces
+/// and line traces. A mesh that does not set them has the box one on and the line one off.
+fn mesh_simple_flags(pkg: &Package, index: usize, chain: &[String]) -> (bool, bool) {
+    let (mut boxes, mut lines) = (true, false);
+    if let Ok(o) = object::read_export(pkg, index, chain) {
+        for t in o.tags.iter().filter(|t| t.ty == hp3_package::props::TagType::Bool) {
+            let name = pkg.name(t.name);
+            if name.eq_ignore_ascii_case("UseSimpleBoxCollision") {
+                boxes = t.bool_value;
+            } else if name.eq_ignore_ascii_case("UseSimpleLineCollision") {
+                lines = t.bool_value;
+            }
+        }
+    }
+    (boxes, lines)
+}
+
+/// A collision model moved into the world: every node plane is carried through the placement (`linear` is the
+/// rotation and scale, `loc` the location). None when the scale collapses it.
+fn place_model(mut model: hp3_assets::model::Model, loc: glam::Vec3, linear: glam::Mat3) -> Option<hp3_assets::model::Model> {
+    use glam::Vec3;
+    if linear.determinant().abs() < 1e-9 {
+        return None;
+    }
+    let carry = linear.inverse().transpose();
+    for node in &mut model.nodes {
+        let old = Vec3::new(node.plane.normal.x, node.plane.normal.y, node.plane.normal.z);
+        let moved = carry * old;
+        let len = moved.length();
+        if len < 1e-9 {
+            continue;
+        }
+        let n = moved / len;
+        node.plane.normal.x = n.x;
+        node.plane.normal.y = n.y;
+        node.plane.normal.z = n.z;
+        node.plane.w = (node.plane.w + moved.dot(loc)) / len;
+    }
+    Some(model)
+}
+
 fn build_collision(vm: &mut Vm<'_>, map: &Rc<Package>, model: Option<ObjRef>, actors: &[ObjId]) -> collision::Collision {
     use glam::{Mat3, Vec3};
     let model = model.and_then(|m| vm.db.set.resolve(map, m)).and_then(|(p, i)| {
@@ -892,6 +933,23 @@ fn build_collision(vm: &mut Vm<'_>, map: &Rc<Package>, model: Option<ObjRef>, ac
                     sm.collision_triangles.len(),
                     !sm.collision_model.is_none()
                 );
+            }
+            // A simple collision model stands in for the triangles in the traces its flags allow.
+            let (boxes, lines) = mesh_simple_flags(&mp, mkey_idx, &chain);
+            if (boxes || lines)
+                && let Some((cp, ci)) = vm.db.set.resolve(&mp, sm.collision_model)
+            {
+                let cchain = vm.db.set.export_chain(&cp, ci);
+                if let Some(Asset::Model(cm)) = native_asset(&cp, ci, &cchain) {
+                    let linear = basis * Mat3::from_diagonal(s3 * scale);
+                    if let Some(placed) = place_model(*cm, loc, linear) {
+                        let (lo, hi) = pos.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
+                        col.add_mesh_model(a, placed, boxes, lines, lo - Vec3::splat(8.0), hi + Vec3::splat(8.0));
+                        if std::env::var_os("HP3_COLLISION_STATS").is_some() {
+                            eprintln!("meshmodel {} boxes={boxes} lines={lines}", vm.db.names.get(vm.db.objects.get(a).name));
+                        }
+                    }
+                }
             }
             if !sm.collision_triangles.is_empty() {
                 for t in &sm.collision_triangles {

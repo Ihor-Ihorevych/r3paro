@@ -51,9 +51,9 @@ knock-back on a Dementor, overcharge fails the cast); the dragon's fire (pick up
 Verdimillous and Incendio have no target anywhere in the game data (stubs / sound-table entries only).
 
 Open, in the order they matter:
-- Static mesh collision follows the reference: a simple box or collision model when the mesh has one, otherwise the
-  triangles of collision-enabled materials. Every collidable mesh in this install already has triangles, so only the
-  optional simple-box path differs.
+- Static meshes with a collision model answer box traces with it (`UseSimpleBoxCollision`, on unless the mesh turns
+  it off) and line traces when `UseSimpleLineCollision` is set; otherwise the collision triangles are used. Still
+  missing: `bUseCylinderCollision` actors (a cylinder instead of the mesh).
 - Creatures whose spell target is a companion-cast proxy (`CompanionSpellTrigger`: skeletons, knight collapses)
   need Ron or Hermione nearby to react; companions in the hubs still follow imperfectly.
 - Peeves reacts only inside his scripted encounter (he starts hidden and disabled), so his spell handling is not
