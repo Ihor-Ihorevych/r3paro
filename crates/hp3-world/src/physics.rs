@@ -147,6 +147,14 @@ pub fn move_actor(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<Hit> {
             hit = world(vm).collision.trace_for(how, loc, loc + delta, ext, Some(a));
             continue;
         }
+        // Only a box that is really inside something is pushed out; one that merely touches the surface is blocked
+        // and stays (a pawn pushed back from a wall every tick never builds up speed to climb it). A slightly
+        // smaller box tells the two apart.
+        let smaller = Vec3::new((ext.x - 0.2).max(0.5), (ext.y - 0.2).max(0.5), (ext.z - 0.2).max(0.5));
+        let inside = world(vm).collision.trace_for(how, loc + Vec3::Z * 0.01, loc, smaller, Some(a)).is_some_and(|c| c.time <= 0.0);
+        if !inside {
+            break;
+        }
         // A pawn sunk further into a surface needs a bigger push: try 0.4, then 1, 2, 4 and 8 units.
         let mut freed = None;
         for push in [0.4f32, 1.0, 2.0, 4.0, 8.0] {
