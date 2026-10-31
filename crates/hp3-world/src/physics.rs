@@ -399,9 +399,20 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
                 && hit.time < 1.0
             {
                 let remaining = delta * (1.0 - hit.time);
-                let along = remaining - hit.normal * remaining.dot(hit.normal);
-                if along.length_squared() > 1e-8 {
-                    move_actor(vm, a, along);
+                // Blocked on the spot by a surface that faces up: the next tread of a stair, a hair above the
+                // feet. It is stepped onto like any other step (up, over, down); only when that gets nowhere does
+                // the move go along the surface instead.
+                let mut stepped = false;
+                if hit.time * delta.length() <= 1.0 {
+                    let before = vec(&get(vm, a, "Location"));
+                    step_up(vm, a, remaining, hit, 0);
+                    stepped = (vec(&get(vm, a, "Location")) - before).truncate().length_squared() > 0.0025;
+                }
+                if !stepped {
+                    let along = remaining - hit.normal * remaining.dot(hit.normal);
+                    if along.length_squared() > 1e-8 {
+                        move_actor(vm, a, along);
+                    }
                 }
             }
         }
