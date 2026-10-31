@@ -56,6 +56,11 @@ pub struct AudioSystem {
     /// The game's `AmbientVolume` and `SoundVolume` settings, which scale every ambient sound.
     ambient_setting: f32,
     sound_setting: f32,
+    /// `logs/audio.log`: every sound asked for and stopped, ambient sounds and music, and a count of the voices.
+    log: Option<std::io::BufWriter<std::fs::File>>,
+    started: std::time::Instant,
+    /// Plays in the last second, by sound and asker, to point at a sound asked for over and over.
+    repeats: HashMap<String, u32>,
 }
 
 /// Slots of `PlaySound` (`ESoundSlot`) that matter here.
@@ -95,6 +100,12 @@ impl AudioSystem {
             frame: 0,
             ambient_setting: setting("AmbientVolume", 1.0),
             sound_setting: setting("SoundVolume", 1.0),
+            log: std::fs::create_dir_all(root.join("logs"))
+                .ok()
+                .and_then(|_| std::fs::File::create(root.join("logs").join("audio.log")).ok())
+                .map(std::io::BufWriter::new),
+            started: std::time::Instant::now(),
+            repeats: HashMap::new(),
         })
     }
 
@@ -124,13 +135,31 @@ impl AudioSystem {
         }
     }
 
+    fn note(&mut self, line: String) {
+        use std::io::Write;
+        let t = self.started.elapsed().as_secs_f32();
+        if let Some(log) = &mut self.log {
+            let _ = writeln!(log, "[{t:8.2}] {line}");
+        }
+    }
+
     /// Applies what the world asked to hear since the last call, and places the listener.
     pub fn update(&mut self, vm: &mut Vm<'_>, position: glam::Vec3, yaw: i32) {
         let events = hp3_world::audio::drain(vm);
         for e in events {
             match e {
-                Event::Play { sound, emitter, location, slot, volume, pitch, radius, no_override, attenuate, no_3d } => {
-                    let Some(s) = self.sound(vm, &sound) else { continue };
+                Event::Play { sound, emitter, location, slot, volume, pitch, radius, no_override, attenuate, no_3d, who } => {
+                    let name = hp3_world::audio::sound_name(vm, &sound);
+                    let loaded = self.sound(vm, &sound);
+                    let length = match &loaded {
+                        Some(s) => format!(" ({:.2}s)", s.frames() as f32 / s.rate as f32),
+                        None => " (not decoded)".to_string(),
+                    };
+                    self.note(format!(
+                        "PLAY {name} by {who} slot {slot} volume {volume:.2} radius {radius:.0} pitch {pitch:.2} at {location} no_override {no_override} attenuate {attenuate} no3d {no_3d}{length}"
+                    ));
+                    *self.repeats.entry(format!("{name} by {who}")).or_default() += 1;
+                    let Some(s) = loaded else { continue };
                     let flat = no_3d || !attenuate || slot == SLOT_INTERFACE;
                     let placement = if flat {
                         Placement::Flat
@@ -154,11 +183,14 @@ impl AudioSystem {
                     }
                 }
                 Event::Stop { sound, emitter } => {
+                    let name = hp3_world::audio::sound_name(vm, &sound);
+                    self.note(format!("STOP {name} emitter {emitter:?}"));
                     if let Ok(mut m) = self.mixer.lock() {
                         m.stop(tag_of(&sound), emitter.map_or(0, |o| o.0 as u64 + 1));
                     }
                 }
                 Event::Music { song, handle, fade_in, looping, stab } => {
+                    self.note(format!("MUSIC {song} handle {handle} fade {fade_in} loop {looping} stab {stab}"));
                     if let Some(track) = self.music(&song)
                         && let Ok(mut m) = self.mixer.lock()
                     {
@@ -166,11 +198,13 @@ impl AudioSystem {
                     }
                 }
                 Event::StopMusic { handle, fade_out } => {
+                    self.note(format!("STOPMUSIC handle {handle} fade {fade_out}"));
                     if let Ok(mut m) = self.mixer.lock() {
                         m.stop_music(handle, fade_out);
                     }
                 }
                 Event::StopAllMusic { fade_out } => {
+                    self.note(format!("STOPALLMUSIC fade {fade_out}"));
                     if let Ok(mut m) = self.mixer.lock() {
                         m.stop_music(0, fade_out);
                     }
@@ -183,6 +217,18 @@ impl AudioSystem {
         self.frame += 1;
         if self.frame % 15 == 1 {
             self.sync_ambient(vm, position);
+        }
+        // Once a second: how many voices play, and any sound asked for more than a few times in that second.
+        if self.frame % 60 == 0 {
+            let voices = self.mixer.lock().map(|m| m.voice_count()).unwrap_or(0);
+            let busy: Vec<String> = self.repeats.iter().filter(|(_, n)| **n >= 4).map(|(k, n)| format!("{k} x{n}")).collect();
+            let repeated = if busy.is_empty() { String::new() } else { format!(" REPEATED: {}", busy.join("; ")) };
+            self.note(format!("VOICES {voices}{repeated}"));
+            self.repeats.clear();
+            if let Some(log) = &mut self.log {
+                use std::io::Write;
+                let _ = log.flush();
+            }
         }
     }
 
@@ -200,6 +246,15 @@ impl AudioSystem {
                 continue;
             }
             let Some(s) = self.sound(vm, &a.sound) else { continue };
+            let line = format!(
+                "AMBIENT start {} on {} radius {} volume {:.2} at {}",
+                hp3_world::audio::sound_name(vm, &a.sound),
+                hp3_script::natives::object_path(vm, a.actor),
+                a.radius,
+                a.volume,
+                a.location
+            );
+            self.note(line);
             if let Ok(mut m) = self.mixer.lock() {
                 if let Some(old) = self.ambient.get(&owner) {
                     m.stop(*old, owner);

@@ -18,6 +18,7 @@ pub mod interactions;
 pub mod natives;
 pub mod particles;
 pub mod physics;
+pub mod save;
 pub mod touch;
 
 use hp3_script::fx::FxHashMap as HashMap;
@@ -250,6 +251,10 @@ pub fn travel(vm: &mut Vm<'_>, url: &str) -> Result<Rc<Package>, VmError> {
     world_options_set(&options);
     NEXT_WORLD_INFO.with(|w| w.set(old.world_info));
     load_with(vm, &map, old.config, carried)?;
+    // Loading a saved game: the map is loaded as for any travel and the saved level put over it.
+    if let Some(slot) = save::option_slot(url) {
+        save::finish_load(vm, slot);
+    }
     Ok(map)
 }
 
@@ -646,6 +651,8 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     mark(vm, "movement anims");
     anim::update_attachments(vm);
     mark(vm, "animation");
+    // A save the game queued is written once the frame's tick is done, as the original does.
+    save::run_queued(vm);
 }
 
 /// Whether an actor is a controller; answers are remembered per class.

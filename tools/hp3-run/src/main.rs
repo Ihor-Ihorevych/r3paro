@@ -233,14 +233,32 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                     let at = hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "Location"));
                     let rot: Vec<i32> = hp3_world::get(&mut vm, a, "Rotation").fields().iter().map(hp3_script::Value::as_int).collect();
                     println!(
-                        "watch {frame} {path} at {at} rot {rot:?} state {state} phys {:?} hidden {:?} draw {:?} mesh {:?}",
+                        "watch {frame} {path} at {at} rot {rot:?} state {state} phys {:?} hidden {:?} draw {:?} mesh {:?} vel {:?} accel {:?}",
                         hp3_world::get(&mut vm, a, "Physics"),
                         hp3_world::get(&mut vm, a, "bHidden"),
                         hp3_world::get(&mut vm, a, "DrawType"),
-                        hp3_world::get(&mut vm, a, "Mesh").as_obj().is_some()
+                        hp3_world::get(&mut vm, a, "Mesh").as_obj().is_some(),
+                        hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "Velocity")),
+                        hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "Acceleration"))
                     );
                 }
             }
+        }
+        // HP3_SAVE=<slot>@<tick> queues a save as the game's own script does; HP3_LOAD=<slot>@<tick> opens a slot.
+        if let Ok(spec) = std::env::var("HP3_SAVE")
+            && let Some((slot, tick)) = spec.split_once('@')
+            && tick.parse::<u32>() == Ok(frame)
+            && let Some(pc) = hp3_world::world(&mut vm).player
+        {
+            hp3_world::set(&mut vm, pc, "iSaveSlotID", hp3_script::Value::Int(slot.parse().unwrap_or(0)));
+            hp3_world::set(&mut vm, pc, "bQueuedToSaveGame", hp3_script::Value::Bool(true));
+        }
+        if let Ok(spec) = std::env::var("HP3_LOAD")
+            && let Some((slot, tick)) = spec.split_once('@')
+            && tick.parse::<u32>() == Ok(frame)
+        {
+            println!("console: OPEN ?LOAD={slot}");
+            hp3_world::save::console(&mut vm, &format!("OPEN ?LOAD={slot}"));
         }
         // HP3_TELEPORT=<x>,<y>,<z>@<tick>: moves the player's pawn there (as SetLocation does), to walk into a trigger.
         if let Ok(spec) = std::env::var("HP3_TELEPORT")
@@ -405,6 +423,18 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
     if std::env::var_os("HP3_AUDIO_DEBUG").is_some() {
         let events = hp3_world::audio::drain(&mut vm);
         println!("audio: {} events", events.len());
+        // Which sound is asked for how often, and by whom.
+        let mut counts: std::collections::BTreeMap<String, u32> = Default::default();
+        for e in &events {
+            if let hp3_world::audio::Event::Play { sound, who, .. } = e {
+                *counts.entry(format!("{} by {who}", hp3_world::audio::sound_name(&vm, sound))).or_default() += 1;
+            }
+        }
+        let mut counts: Vec<_> = counts.into_iter().collect();
+        counts.sort_by_key(|c| std::cmp::Reverse(c.1));
+        for (k, n) in counts.iter().take(15) {
+            println!("  {n:5} x {k}");
+        }
         for e in events.iter().take(40) {
             match e {
                 hp3_world::audio::Event::Play { sound, volume, pitch, radius, slot, .. } => {

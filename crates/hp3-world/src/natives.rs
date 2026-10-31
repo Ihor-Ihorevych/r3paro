@@ -546,8 +546,13 @@ pub fn register(vm: &mut Vm<'_>) {
         }
         Ok(Value::Empty)
     });
-    vm.register("Actor.ConsoleCommand", |_vm, _this, _a| Ok(Value::Str(String::new())));
-    vm.register("PlayerController.ConsoleCommand", |_vm, _this, _a| Ok(Value::Str(String::new())));
+    // ConsoleCommand(Command): the commands saved games use are carried out; the answer is empty.
+    for name in ["Actor.ConsoleCommand", "PlayerController.ConsoleCommand"] {
+        vm.register(name, |vm, _this, a| {
+            let command = a.first().map(|v| v.as_str().to_string()).unwrap_or_default();
+            Ok(Value::Str(crate::save::console(vm, &command)))
+        });
+    }
     vm.register("LevelInfo.IsSoftwareRendering", |_vm, _this, _a| Ok(Value::Bool(false)));
     // Rendering-side effects with nothing to do headless.
     vm.register("Actor.StopFeedbackEffect", |_vm, _this, _a| Ok(Value::Empty));

@@ -229,6 +229,29 @@ fn rotator_value(r: [i32; 3]) -> Value {
 }
 
 /// Moves actors attached to bones onto their bones, offset by their relative location and rotation.
+/// What an actor's main animation channel plays, for a save: sequence name, frame, rate and whether it loops.
+pub fn main_animation(vm: &mut Vm<'_>, actor: ObjId) -> Option<(String, f32, f32, bool)> {
+    let ch = world(vm).anim.actors.get(&actor)?.channels.first()?.clone();
+    if !ch.playing && !ch.looping {
+        return None;
+    }
+    let set = set_of(vm, actor)?;
+    Some((set.sequences.get(ch.sequence?)?.name.clone(), ch.frame, ch.rate, ch.looping))
+}
+
+/// Starts the main animation a save recorded where it was: the same sequence at the same frame and rate.
+pub fn resume_main_animation(vm: &mut Vm<'_>, actor: ObjId, saved: &(String, f32, f32, bool)) {
+    let name = vm.db.names.intern(&saved.0);
+    let Some(set) = set_of(vm, actor) else { return };
+    let Some(index) = set.find(&saved.0) else { return };
+    let base = set.sequences[index].rate.max(0.001);
+    if !play(vm, actor, name, saved.2 / base, 0.0, 0, saved.3) {
+        return;
+    }
+    let ch = channel_mut(vm, actor, 0);
+    ch.frame = saved.1;
+}
+
 pub fn update_attachments(vm: &mut Vm<'_>) {
     let list: Vec<(ObjId, (ObjId, String))> = world(vm).anim.attachments.iter().map(|(k, v)| (*k, v.clone())).collect();
     for (child, (parent, bone)) in list {
@@ -381,7 +404,7 @@ pub fn tick_actor(vm: &mut Vm<'_>, actor: ObjId, dt: f32) {
             let name = vm.db.names.get(event).to_string();
             world(vm).anim.actors.entry(a).or_default().last_notify_channel = channel;
             if std::env::var("HP3_ANIM_TRACE").is_ok() {
-                eprintln!("anim: notify {name} on {a:?}");
+                eprintln!("anim: notify {name} on {a:?} channel {channel}");
             }
             fire(vm, a, &name, &mut []);
         }
@@ -477,6 +500,9 @@ fn drive_movement(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
             ch.alpha = 0.0;
             ch.target_alpha = 0.0;
             ch.scripted_blend = true;
+            // They all play the same stride, so only the first movement channel raises its sequence's notifies
+            // (a footstep once, not once per channel).
+            ch.ignore_notify = ci != MOVE_FIRST_CH;
         }
         let yaw = get(vm, a, "Rotation").fields().get(1).map_or(0, Value::as_int) as f32;
         let physics = get_physics(vm, a);

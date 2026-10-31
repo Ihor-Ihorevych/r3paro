@@ -24,6 +24,8 @@ pub enum Event {
         no_override: bool,
         attenuate: bool,
         no_3d: bool,
+        /// Who asked, for the sound log: the actor, its class and its state.
+        who: String,
     },
     Stop { sound: SoundKey, emitter: Option<ObjId> },
     Music { song: String, handle: i32, fade_in: f32, looping: bool, stab: bool },
@@ -38,6 +40,14 @@ pub struct Audio {
     pub current_music: String,
     next_handle: i32,
     durations: HashMap<SoundKey, f32>,
+}
+
+/// A sound's name for logs: its package path.
+pub fn sound_name(vm: &Vm<'_>, key: &SoundKey) -> String {
+    match vm.db.set.get(&key.0) {
+        Ok(p) => p.ref_path(hp3_package::ObjRef::from_export(key.1)),
+        Err(_) => format!("{}#{}", key.0, key.1),
+    }
 }
 
 /// Takes the events queued since the last call.
@@ -98,7 +108,14 @@ fn play(vm: &mut Vm<'_>, this: Option<ObjId>, a: &[Value], attenuate_by_default:
             volume *= damp;
         }
     }
+    let who = {
+        let path = hp3_script::natives::object_path(vm, emitter);
+        let class = vm.db.objects.get(emitter).class.map(|c| vm.db.names.get(vm.db.get(c).name).to_string()).unwrap_or_default();
+        let state = vm.state_of(emitter).map(|s| vm.db.names.get(vm.db.get(s).name).to_string()).unwrap_or_default();
+        format!("{path} ({class}, state {state})")
+    };
     let event = Event::Play {
+        who,
         sound,
         emitter: Some(emitter),
         location,
