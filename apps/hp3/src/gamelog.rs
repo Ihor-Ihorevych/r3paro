@@ -17,6 +17,7 @@ pub struct GameLog {
     last_pawn: String,
     cursor: Option<hp3_script::ObjId>,
     last_cursor: String,
+    last_emitter_log: u128,
 }
 
 impl GameLog {
@@ -25,7 +26,7 @@ impl GameLog {
             .ok()
             .and_then(|_| std::fs::File::create(root.join("logs").join("game.log")).ok())
             .map(std::io::BufWriter::new);
-        GameLog { file, started: Instant::now(), last_second: 0, written: 0, last_pawn: String::new(), cursor: None, last_cursor: String::new() }
+        GameLog { file, started: Instant::now(), last_second: 0, written: 0, last_pawn: String::new(), cursor: None, last_cursor: String::new(), last_emitter_log: 0 }
     }
 
     fn line(&mut self, text: &str) {
@@ -105,6 +106,15 @@ impl GameLog {
         let particles = hp3_world::get(vm, c, "CursorParticles").as_obj().map(|o| hp3_script::natives::object_path(vm, o)).unwrap_or_default();
         let target = hp3_world::get(vm, c, "aCurrentTarget").as_obj().map(|o| hp3_script::natives::object_path(vm, o)).unwrap_or_default();
         let now = format!("{state} bFire {fire} particles {particles} target {target}");
+        // While the cursor has its aim particles, once a second: where they are and how they are doing.
+        if let Some(e) = hp3_world::get(vm, c, "CursorParticles").as_obj().filter(|&e| !vm.db.objects.get(e).deleted)
+            && self.started.elapsed().as_millis() / 500 != self.last_emitter_log
+        {
+            self.last_emitter_log = self.started.elapsed().as_millis() / 500;
+            let d = hp3_world::particles::debug_emitter(vm, e);
+            let cam = hp3_world::get(vm, c, "Location");
+            self.line(&format!("CURSOREMITTER {d} | cursor at {:?}", vec(&cam)));
+        }
         if now != self.last_cursor {
             self.line(&format!("CURSOR {now}"));
             self.last_cursor = now;

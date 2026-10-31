@@ -346,6 +346,40 @@ pub fn own_emitters(vm: &mut Vm<'_>, a: ObjId) {
     vm.log.push(format!("emitter spawned: {path} with {count} emitters"));
 }
 
+/// A line about an emitter actor for the game log: where it is and how each of its emitters is doing.
+pub fn debug_emitter(vm: &mut Vm<'_>, a: ObjId) -> String {
+    let at = crate::physics::vec(&get(vm, a, "Location"));
+    let hidden = get(vm, a, "bHidden").as_bool();
+    let scale = get(vm, a, "DrawScale").as_float();
+    let physics = get(vm, a, "Physics").as_byte();
+    let owner = get(vm, a, "Owner").as_obj().map(|o| hp3_script::natives::object_path(vm, o));
+    let mut out = format!("at {at} hidden {hidden} drawscale {scale} physics {physics} owner {owner:?}");
+    let mut keys: Vec<_> = world(vm).particles.states.keys().filter(|k| k.0 == a).copied().collect();
+    keys.sort();
+    for k in keys {
+        if let Some(s) = world(vm).particles.states.get(&k) {
+            let c = &s.config;
+            out += &format!(
+                " | [{}] live {} max {} pps {} initial {} auto {} disabled {} respawn {} kill {} slots {} material {} size {:?} life {:?}",
+                k.1,
+                s.particles.len(),
+                c.max_particles,
+                c.pps,
+                c.initial_pps,
+                c.auto_initial,
+                c.disabled,
+                c.respawn,
+                s.kill_pending,
+                s.slots_used,
+                c.material.is_some(),
+                (c.start_size.0[0].mid(), c.start_size.0[1].mid()),
+                c.lifetime.mid()
+            );
+        }
+    }
+    out
+}
+
 /// Steps every emitter actor's emitters by `dt`.
 pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     let Some(emitter_class) = vm.db.find("Emitter") else { return };
