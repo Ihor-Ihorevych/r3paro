@@ -10,6 +10,8 @@ use hp3_world::{fire, get, set};
 
 pub struct MountTest {
     index: usize,
+    /// `@Name@tick`: walk into the actor of that name from all sides instead of looking around a mount volume.
+    actor: Option<String>,
     at: u32,
     started: Option<u32>,
     /// Where to try: a standing place and the yaw that faces the wall.
@@ -19,8 +21,12 @@ pub struct MountTest {
 impl MountTest {
     pub fn from_env() -> Option<MountTest> {
         let spec = std::env::var("HP3_MOUNT_TEST").ok()?;
+        if let Some(rest) = spec.strip_prefix('@') {
+            let (name, at) = rest.split_once('@')?;
+            return Some(MountTest { index: 0, actor: Some(name.to_string()), at: at.parse().ok()?, started: None, spots: Vec::new() });
+        }
         let (n, at) = spec.split_once('@')?;
-        Some(MountTest { index: n.parse().ok()?, at: at.parse().ok()?, started: None, spots: Vec::new() })
+        Some(MountTest { index: n.parse().ok()?, actor: None, at: at.parse().ok()?, started: None, spots: Vec::new() })
     }
 }
 
@@ -86,6 +92,29 @@ fn find_spots(vm: &mut Vm<'_>, pawn: ObjId, volume: ObjId, centre: Vec3) -> Vec<
     spots
 }
 
+/// Standing places on the floor around `centre`, eight directions at two distances, each facing it.
+fn ring_spots(vm: &mut Vm<'_>, pawn: ObjId, centre: Vec3) -> Vec<(Vec3, i32)> {
+    let r = get(vm, pawn, "CollisionRadius").as_float();
+    let ext = Vec3::new(r, r, get(vm, pawn, "CollisionHeight").as_float());
+    let mut spots = Vec::new();
+    for dist in [60.0f32, 90.0] {
+        for k in 0..8 {
+            let ang = k as f32 * std::f32::consts::TAU / 8.0;
+            let dir = Vec3::new(ang.cos(), ang.sin(), 0.0);
+            let above = centre - dir * dist + Vec3::Z * 150.0;
+            let col = &hp3_world::world(vm).collision;
+            let Some(floor) = col.trace_static(above, above - Vec3::Z * 400.0, ext) else { continue };
+            if floor.normal.z < 0.7 {
+                continue;
+            }
+            let stand = floor.location + Vec3::Z * 2.0;
+            let yaw = (dir.y.atan2(dir.x) * 65536.0 / std::f32::consts::TAU).round() as i32;
+            spots.push((stand, yaw));
+        }
+    }
+    spots
+}
+
 pub fn step(vm: &mut Vm<'_>, t: &mut MountTest, frame: u32) {
     if frame < t.at {
         return;
@@ -98,20 +127,41 @@ pub fn step(vm: &mut Vm<'_>, t: &mut MountTest, frame: u32) {
             t.at += 1;
             return;
         }
-        let volumes: Vec<ObjId> = hp3_world::world(vm)
-            .actors
-            .clone()
-            .into_iter()
-            .filter(|&a| vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, class)))
-            .collect();
-        let Some(&volume) = volumes.get(t.index) else {
-            println!("mount: no volume #{} ({} in the level)", t.index, volumes.len());
-            std::process::exit(3)
-        };
-        let centre = vec(&get(vm, volume, "Location"));
-        t.spots = find_spots(vm, pawn, volume, centre);
-        println!("mount: starting at tick {frame}: volume at {centre}, {} places to try", t.spots.len());
-        t.started = Some(frame);
+        if let Some(name) = t.actor.clone() {
+            let actors = hp3_world::world(vm).actors.clone();
+            let found = actors.into_iter().find(|&a| hp3_script::natives::object_path(vm, a).ends_with(&format!(".{name}")));
+            let Some(target) = found else {
+                println!("mount: no actor named {name}");
+                std::process::exit(3)
+            };
+            let centre = vec(&get(vm, target, "Location"));
+            t.spots = ring_spots(vm, pawn, centre);
+            // How tall it is: the top found by tracing down through its middle, and the floor beside it.
+            let col = &hp3_world::world(vm).collision;
+            let top = col.trace_static(centre + Vec3::Z * 600.0, centre - Vec3::Z * 600.0, Vec3::ZERO);
+            println!("mount: down through the middle: {:?}", top.map(|h| (h.location.z, h.actor.map(|a| a.0))));
+            if let Some(&(stand, _)) = t.spots.first() {
+                println!("mount: first standing place z {}", stand.z);
+            }
+            println!("mount: starting at tick {frame}: {name} at {centre}, {} places to try", t.spots.len());
+            t.started = Some(frame);
+        }
+        if t.started.is_none() {
+            let volumes: Vec<ObjId> = hp3_world::world(vm)
+                .actors
+                .clone()
+                .into_iter()
+                .filter(|&a| vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, class)))
+                .collect();
+            let Some(&volume) = volumes.get(t.index) else {
+                println!("mount: no volume #{} ({} in the level)", t.index, volumes.len());
+                std::process::exit(3)
+            };
+            let centre = vec(&get(vm, volume, "Location"));
+            t.spots = find_spots(vm, pawn, volume, centre);
+            println!("mount: starting at tick {frame}: volume at {centre}, {} places to try", t.spots.len());
+            t.started = Some(frame);
+        }
     }
     let r = frame - t.started.unwrap_or(frame);
     let (trial, k) = ((r / TRIAL) as usize, r % TRIAL);
@@ -153,6 +203,14 @@ pub fn step(vm: &mut Vm<'_>, t: &mut MountTest, frame: u32) {
             "mount: try {trial} k={k}: CLIMB state {state}, from {stand} yaw {yaw}, now at {}",
             vec(&get(vm, pawn, "Location"))
         );
+        if k == 30 {
+            for e in hp3_world::world(vm).errors.iter().rev().take(6) {
+                println!("mount: script error: {e}");
+            }
+            for line in vm.log.iter().rev().take(6) {
+                println!("mount: warning: {line}");
+            }
+        }
         if k == TRIAL - 1 {
             std::process::exit(0);
         }

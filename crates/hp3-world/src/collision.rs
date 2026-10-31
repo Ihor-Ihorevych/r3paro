@@ -15,7 +15,7 @@ const PF_NOT_SOLID: u32 = 0x0000_0008;
 const PF_PORTAL: u32 = 0x0400_0000;
 const EPSILON: f32 = 0.03125;
 /// Grid cell size for triangles, in world units.
-const CELL: f32 = 512.0;
+const CELL: f32 = 64.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Hit {
@@ -215,6 +215,36 @@ fn cell(v: f32) -> i32 {
     (v / CELL).floor() as i32
 }
 
+/// The grid cells a box of `extent` swept from `start` to `end` can touch: for each column of cells, only the
+/// rows the segment crosses within that column (widened by the box), so a long diagonal does not visit the whole
+/// square its ends span.
+fn cells_swept(start: Vec3, end: Vec3, extent: Vec3) -> Vec<(i32, i32)> {
+    let (lo, hi) = (start.min(end) - extent, start.max(end) + extent);
+    let mut out = Vec::new();
+    let d = end - start;
+    for x in cell(lo.x)..=cell(hi.x) {
+        // The part of the segment inside this column, widened by the box in x.
+        let (x0, x1) = (x as f32 * CELL - extent.x, (x + 1) as f32 * CELL + extent.x);
+        let (mut t0, mut t1) = (0.0f32, 1.0f32);
+        if d.x.abs() > 1e-6 {
+            let (a, b) = ((x0 - start.x) / d.x, (x1 - start.x) / d.x);
+            t0 = t0.max(a.min(b));
+            t1 = t1.min(a.max(b));
+        } else if start.x < x0 || start.x > x1 {
+            continue;
+        }
+        if t0 > t1 {
+            continue;
+        }
+        let (ya, yb) = (start.y + d.y * t0, start.y + d.y * t1);
+        let (y_lo, y_hi) = (ya.min(yb) - extent.y, ya.max(yb) + extent.y);
+        for y in cell(y_lo)..=cell(y_hi) {
+            out.push((x, y));
+        }
+    }
+    out
+}
+
 impl Collision {
     pub fn new(model: Option<std::rc::Rc<Model>>) -> Collision {
         Collision { model, ..Default::default() }
@@ -311,50 +341,45 @@ impl Collision {
             }
         }
         // Triangles in the cells the swept box covers.
-        let min = start.min(end) - extent;
-        let max = start.max(end) + extent;
         let mut seen = hp3_script::fx::FxHashSet::default();
-        for x in cell(min.x)..=cell(max.x) {
-            for y in cell(min.y)..=cell(max.y) {
-                let Some(list) = self.grid.get(&(x, y)) else { continue };
-                for &i in list {
-                    if self.passes_world {
-                        break;
-                    }
-                    if !seen.insert(i) {
-                        continue;
-                    }
-                    let t = &self.tris[i as usize];
-                    if t.actor.is_some() && t.actor == ignore {
-                        continue;
-                    }
-                    if t.actor.is_some_and(|a| self.uses_model(a, extent)) {
-                        continue;
-                    }
-                    if let Some(h) = tri_trace(t, start, end, extent) {
-                        keep(h);
-                    }
+        let swept = cells_swept(start, end, extent);
+        for key in &swept {
+            let Some(list) = self.grid.get(key) else { continue };
+            for &i in list {
+                if self.passes_world {
+                    break;
+                }
+                if !seen.insert(i) {
+                    continue;
+                }
+                let t = &self.tris[i as usize];
+                if t.actor.is_some() && t.actor == ignore {
+                    continue;
+                }
+                if t.actor.is_some_and(|a| self.uses_model(a, extent)) {
+                    continue;
+                }
+                if let Some(h) = tri_trace(t, start, end, extent) {
+                    keep(h);
                 }
             }
         }
         // Static meshes traced through their collision models.
         let mut seen_models = hp3_script::fx::FxHashSet::default();
-        for x in cell(min.x)..=cell(max.x) {
-            for y in cell(min.y)..=cell(max.y) {
-                let Some(list) = self.model_grid.get(&(x, y)) else { continue };
-                for &i in list {
-                    if self.passes_world || !seen_models.insert(i) {
-                        continue;
-                    }
-                    let m = &self.mesh_models[i as usize];
-                    if Some(m.actor) == ignore || !self.uses_model(m.actor, extent) {
-                        continue;
-                    }
-                    let mut out = None;
-                    bsp_trace(&m.model, 0, 0.0, 1.0, start, end, start, end, extent, Vec3::Z, &mut out);
-                    if let Some(h) = out {
-                        keep(Hit { actor: Some(m.actor), ..h });
-                    }
+        for key in &swept {
+            let Some(list) = self.model_grid.get(key) else { continue };
+            for &i in list {
+                if self.passes_world || !seen_models.insert(i) {
+                    continue;
+                }
+                let m = &self.mesh_models[i as usize];
+                if Some(m.actor) == ignore || !self.uses_model(m.actor, extent) {
+                    continue;
+                }
+                let mut out = None;
+                bsp_trace(&m.model, 0, 0.0, 1.0, start, end, start, end, extent, Vec3::Z, &mut out);
+                if let Some(h) = out {
+                    keep(Hit { actor: Some(m.actor), ..h });
                 }
             }
         }

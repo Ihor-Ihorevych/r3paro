@@ -29,6 +29,20 @@ impl Vm<'_> {
         None
     }
 
+    /// Where `label` is in the code of `state` or of the state it inherits (the one of the same name in a parent
+    /// class, or the one it extends): the state that holds the code and the statement.
+    pub fn find_label(&mut self, state: StructId, label: Name) -> Option<(StructId, usize)> {
+        let mut s = Some(state);
+        for _ in 0..32 {
+            let Some(cur) = s else { break };
+            if let Some(&pc) = self.code(cur).labels.get(&label) {
+                return Some((cur, pc));
+            }
+            s = self.db.get(cur).super_;
+        }
+        None
+    }
+
     /// The state marked `auto` in a class or its ancestors.
     pub fn auto_state(&self, class: StructId) -> Option<StructId> {
         // STATE_Editable is 0x1; auto states carry 0x2.
@@ -96,8 +110,9 @@ impl Vm<'_> {
         if let Some(st) = new_state {
             let code = self.code(st);
             let label = if label == Name::NONE { self.db.names.intern("Begin") } else { label };
-            if let Some(&pc) = code.labels.get(&label) {
-                self.state_pc.insert(obj, pc);
+            let _ = &code;
+            if let Some(at) = self.find_label(st, label) {
+                self.state_pc.insert(obj, at);
             }
             if old != new_state {
                 self.event(obj, "BeginState", &mut [])?;
@@ -119,16 +134,18 @@ impl Vm<'_> {
             Some(Latent::Other(_)) => return Ok(()),
             None => {}
         }
-        let Some(st) = self.state_of(obj) else { return Ok(()) };
-        let Some(pc) = self.state_pc.remove(&obj) else { return Ok(()) };
-        let code = self.code(st);
-        let locals = self.db.get(st).defaults.clone();
-        let mut frame = Frame::new(st, Some(obj), locals);
+        if self.state_of(obj).is_none() {
+            return Ok(());
+        }
+        let Some((owner, pc)) = self.state_pc.remove(&obj) else { return Ok(()) };
+        let code = self.code(owner);
+        let locals = self.db.get(owner).defaults.clone();
+        let mut frame = Frame::new(owner, Some(obj), locals);
         self.state_changed.remove(&obj);
         match self.run_state_code(&code, &mut frame, pc)? {
             RunEnd::Suspended(next) => {
                 // A GotoState from inside the code already set where to continue.
-                self.state_pc.entry(obj).or_insert(next);
+                self.state_pc.entry(obj).or_insert((owner, next));
             }
             RunEnd::Finished => {}
         }

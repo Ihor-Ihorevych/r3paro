@@ -134,7 +134,9 @@ pub struct Vm<'s> {
     /// Objects whose state code is waiting, and on what.
     pub latent: HashMap<ObjId, Latent>,
     /// Where each object's state code resumes.
-    pub state_pc: HashMap<ObjId, usize>,
+    /// Where an object's state code continues: the state that owns that code (a state inherits the code of the
+    /// state of the same name in its parent class) and the statement.
+    pub state_pc: HashMap<ObjId, (StructId, usize)>,
     /// Objects that changed state while their state code ran.
     pub(crate) state_changed: crate::fx::FxHashSet<ObjId>,
     /// Statement being executed, for iterators to find their loop body.
