@@ -408,9 +408,14 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
 }
 
 fn step(s: &mut EmitterState, dt: f32, origin: Vec3, rot: Mat3, hidden: bool) {
+    // A hidden emitter stands still: its particles keep their age and come back as they were when it is shown
+    // again (the aim symbols are hidden and shown by the spell cursor).
+    if hidden {
+        return;
+    }
     let c = s.config.clone();
     s.last_origin = origin;
-    let off = c.disabled || hidden;
+    let off = c.disabled;
     let new_particle = |s: &mut EmitterState, c: &Config, age: f32| {
         let mut p = spawn(c, &mut s.rng, origin, rot, age);
         if c.beam {
@@ -474,6 +479,9 @@ pub fn collect(vm: &mut Vm<'_>, right: Vec3, up: Vec3) -> Vec<Quad> {
     let mut out = Vec::new();
     for key in keys {
         let a = key.0;
+        if get(vm, a, "bHidden").as_bool() {
+            continue;
+        }
         let origin = crate::physics::vec(&get(vm, a, "Location"));
         let rot = rotation_of(vm, a);
         let Some(s) = world(vm).particles.states.get(&key) else { continue };

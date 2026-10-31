@@ -1074,8 +1074,11 @@ fn pawn_rotation(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         if !get(vm, c, "bRotateToDesired").as_bool() {
             return;
         }
-        let d = ints(get(vm, c, "DesiredRotation"));
-        set(vm, a, "DesiredRotation", Value::Struct(vec![Value::Int(d[0]), Value::Int(d[1]), Value::Int(0)].into()));
+        let mut d = ints(get(vm, c, "DesiredRotation"));
+        // The pawn keeps its own desired roll (a pawn that rolls to its desired rotation, such as one hanging from a
+        // Carpe Retractum, is leaned by the script).
+        d[2] = ints(get(vm, a, "DesiredRotation"))[2];
+        set(vm, a, "DesiredRotation", Value::Struct(vec![Value::Int(d[0]), Value::Int(d[1]), Value::Int(d[2])].into()));
         (d, (2.0 * get(vm, c, "EnemyTurnSpeed").as_float() * dt).round() as i32)
     } else {
         let d = ints(get(vm, a, "DesiredRotation"));
@@ -1087,11 +1090,14 @@ fn pawn_rotation(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         (d, ((2 * left).clamp(rate, 2 * rate) as f32 * dt).round() as i32)
     };
     let on_floor = matches!(get(vm, a, "Physics").as_byte(), PHYS_WALKING);
-    let want_pitch = if on_floor || get(vm, a, "Physics").as_byte() == PHYS_FALLING { 0 } else { desired[0] };
+    // On the floor or falling the pawn stands upright, unless it rolls to its desired rotation.
+    let roll_to_desired = get(vm, a, "bRollToDesired").as_bool();
+    let want_pitch = if !roll_to_desired && (on_floor || get(vm, a, "Physics").as_byte() == PHYS_FALLING) { 0 } else { desired[0] };
     let yaw = fixed_turn(rot[1], desired[1], delta);
     let pitch = fixed_turn(rot[0], want_pitch, delta);
-    if yaw != rot[1] & 0xFFFF || pitch != rot[0] & 0xFFFF || rot[2] != 0 {
-        set(vm, a, "Rotation", Value::Struct(vec![Value::Int(pitch), Value::Int(yaw), Value::Int(0)].into()));
+    let roll = if roll_to_desired { fixed_turn(rot[2], desired[2], delta) } else { 0 };
+    if yaw != rot[1] & 0xFFFF || pitch != rot[0] & 0xFFFF || roll != rot[2] & 0xFFFF {
+        set(vm, a, "Rotation", Value::Struct(vec![Value::Int(pitch), Value::Int(yaw), Value::Int(roll)].into()));
     }
     if human {
         // The controller's heading follows the pawn's while it is turning the pawn.
