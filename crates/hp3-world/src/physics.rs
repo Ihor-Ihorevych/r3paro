@@ -161,6 +161,9 @@ pub fn move_actor(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<Hit> {
         // smaller box tells the two apart.
         let smaller = Vec3::new((ext.x - 0.2).max(0.5), (ext.y - 0.2).max(0.5), (ext.z - 0.2).max(0.5));
         let inside = world(vm).collision.trace_for(how, loc + Vec3::Z * 0.01, loc, smaller, Some(a)).is_some_and(|c| c.time <= 0.0);
+        if player && delta.z < -20.0 {
+            vm.log.push(format!("stuckfall: delta {delta} hit normal {} inside {inside} at {loc}", h.normal));
+        }
         if !inside {
             break;
         }
