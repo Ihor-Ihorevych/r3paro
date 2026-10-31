@@ -85,6 +85,8 @@ pub struct World {
     pub controller_classes: HashMap<hp3_script::StructId, bool>,
     /// A level switch asked for and due (`Level.NextURL`).
     pub pending_travel: Option<String>,
+    /// What travelled in with the player (the level keeps it for a restart).
+    pub travel_info: TravelInfo,
     actor_slots: HashMap<&'static str, Option<usize>>,
     /// Time per tick phase, when `HP3_TICK_PROFILE` is set.
     pub tick_profile: std::collections::BTreeMap<&'static str, std::time::Duration>,
@@ -182,7 +184,105 @@ pub fn fire(vm: &mut Vm<'_>, obj: ObjId, event: &str, args: &mut [Value]) -> Val
 /// Loads `map` into the VM, spawns the game (`Package.Class`, e.g. `HGame.HGame`), runs the begin-play
 /// sequence of its actors and logs in the local player.
 pub fn load(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config) -> Result<(), VmError> {
-    load_with(vm, map, config, Vec::new())
+    load_with(vm, map, config, None)
+}
+
+/// An actor on its way to the next level: its class, its name and its `travel` property values.
+#[derive(Clone)]
+pub struct TravelActor {
+    class: hp3_script::class_db::StructId,
+    name: String,
+    props: Vec<(String, TravelValue)>,
+}
+
+/// A travelling value: plain, or an actor named (in the same travel set) when the value refers to one.
+#[derive(Clone)]
+enum TravelValue {
+    Plain(Value),
+    Actor(String),
+}
+
+/// What travels between levels, by player name.
+pub type TravelInfo = Vec<(String, Vec<TravelActor>)>;
+
+/// Describes `actor` for travel: nothing unless it is marked `bTravel`, else every `travel` property.
+fn export_travel(vm: &mut Vm<'_>, actor: ObjId) -> Option<TravelActor> {
+    if !get(vm, actor, "bTravel").as_bool() {
+        return None;
+    }
+    let class = vm.db.objects.get(actor).class?;
+    let actor_class = world(vm).actor_class;
+    let props: Vec<_> = vm.db.get(class).props.iter().filter(|p| p.flags & CPF_TRAVEL != 0).cloned().collect();
+    let mut out = Vec::new();
+    for p in props {
+        let Some(v) = vm.db.objects.values(actor).and_then(|v| v.get(p.slot)).cloned() else { continue };
+        let name = vm.db.names.get(p.name).to_string();
+        match v {
+            Value::Object(Some(o)) if vm.db.objects.get(o).class.is_some_and(|c| vm.is_child_of(c, actor_class)) => {
+                out.push((name, TravelValue::Actor(vm.db.names.get(vm.db.objects.get(o).name).to_string())));
+            }
+            Value::Object(Some(_)) => {}
+            v => out.push((name, TravelValue::Plain(v))),
+        }
+    }
+    Some(TravelActor { class, name: vm.db.names.get(vm.db.objects.get(actor).name).to_string(), props: out })
+}
+
+/// The player's pawn and the inventory chain behind it, for the next level.
+fn export_player(vm: &mut Vm<'_>, pc: ObjId) -> Option<(String, Vec<TravelActor>)> {
+    let pawn = get(vm, pc, "Pawn").as_obj()?;
+    let mut actors = Vec::new();
+    let mut at = Some(pawn);
+    for _ in 0..256 {
+        let Some(a) = at else { break };
+        actors.extend(export_travel(vm, a));
+        at = get(vm, a, "Inventory").as_obj();
+    }
+    Some((player_name(vm, pc), actors))
+}
+
+/// The name the player's replication info holds (empty when it has none).
+fn player_name(vm: &mut Vm<'_>, pc: ObjId) -> String {
+    match get(vm, pc, "PlayerReplicationInfo").as_obj() {
+        Some(pri) => get(vm, pri, "PlayerName").as_str().to_string(),
+        None => String::new(),
+    }
+}
+
+/// Brings the travelling actors of `info` into the new level for the player's pawn: the pawn entry is the
+/// pawn itself, others are spawned at the pawn (owned by it); then their `travel` properties are put back, with
+/// actor references pointing at the new copies. Returns the actors that came, in the order they were listed.
+fn accept_travel(vm: &mut Vm<'_>, pc: ObjId, pawn: ObjId, info: &TravelInfo) -> Vec<ObjId> {
+    // The entry under the player's name; failing that (a game with one player) the first one.
+    let name = player_name(vm, pc);
+    let Some((_, actors)) = info.iter().find(|(n, _)| *n == name).or_else(|| info.first()) else { return Vec::new() };
+    let pawn_class = vm.db.find("Pawn");
+    let mut accepted: Vec<(String, ObjId, &TravelActor)> = Vec::new();
+    for t in actors {
+        let is_pawn = pawn_class.is_some_and(|p| vm.is_child_of(t.class, p));
+        let actor = if is_pawn {
+            Some(pawn)
+        } else {
+            let class_obj = vm.db.get(t.class).object;
+            natives::spawn(vm, Some(pawn), &[Value::Object(Some(class_obj)), Value::Object(Some(pawn))]).ok().and_then(|v| v.as_obj())
+        };
+        if let Some(a) = actor {
+            accepted.push((t.name.clone(), a, t));
+        }
+    }
+    for (_, actor, t) in &accepted {
+        for (prop, value) in &t.props {
+            let v = match value {
+                TravelValue::Plain(v) => v.clone(),
+                TravelValue::Actor(target) => match accepted.iter().find(|(n, ..)| n == target) {
+                    Some((_, o, _)) => Value::Object(Some(*o)),
+                    None => continue,
+                },
+            };
+            set(vm, *actor, prop, v);
+        }
+    }
+    accepted.iter().map(|(_, a, _)| *a).collect()
 }
 
 thread_local! {
@@ -192,6 +292,11 @@ thread_local! {
 
 fn world_options_set(options: &str) {
     NEXT_OPTIONS.with(|o| *o.borrow_mut() = options.to_string());
+}
+
+thread_local! {
+    /// The portal of the URL being travelled to (`#portal`), read once by the login.
+    static NEXT_PORTAL: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
 thread_local! {
@@ -225,18 +330,29 @@ pub fn url_map(url: &str) -> String {
 pub fn travel(vm: &mut Vm<'_>, url: &str) -> Result<Rc<Package>, VmError> {
     let map_name = url_map(url);
     let map = vm.db.set.get(&map_name).map_err(|e| VmError::Runtime(format!("travel to {map_name}: {e}")))?;
-    // The player's travel properties (plain values; references to the old level's objects do not travel).
-    let mut carried = Vec::new();
-    if let Some(pc) = world(vm).player
-        && let Some(pawn) = get(vm, pc, "Pawn").as_obj()
-        && let Some(class) = vm.db.objects.get(pawn).class
-    {
-        let props: Vec<_> = vm.db.get(class).props.iter().filter(|p| p.flags & CPF_TRAVEL != 0).cloned().collect();
-        for p in props {
-            if let Some(v) = vm.db.objects.values(pawn).and_then(|v| v.get(p.slot)).cloned()
-                && !matches!(v, Value::Object(_))
+    // What goes with the player: a restart keeps what came in with the level; otherwise, when the level asked
+    // for items to travel (`bNextItems`), the player's pawn and its inventory are described.
+    let restart = url.trim_start().to_ascii_uppercase().starts_with("?RESTART");
+    let mut info = world(vm).travel_info.clone();
+    if !restart {
+        let items = world(vm).level_info.is_some_and(|li| get(vm, li, "bNextItems").as_bool());
+        if items {
+            if let Some(pc) = world(vm).player
+                && let Some((name, actors)) = export_player(vm, pc)
             {
-                carried.push((vm.db.names.get(p.name).to_string(), v));
+                info.retain(|(n, _)| *n != name);
+                info.push((name, actors));
+            }
+        } else {
+            info.clear();
+        }
+    }
+    if std::env::var_os("HP3_TRAVEL_DEBUG").is_some() {
+        let items = world(vm).level_info.is_some_and(|li| get(vm, li, "bNextItems").as_bool());
+        eprintln!("travel to {url}: restart {restart} items {items}, {} players", info.len());
+        for (n, actors) in &info {
+            for a in actors {
+                eprintln!("  {n}: {} {} ({} values)", vm.db.names.get(vm.db.get(a.class).name), a.name, a.props.len());
             }
         }
     }
@@ -249,8 +365,9 @@ pub fn travel(vm: &mut Vm<'_>, url: &str) -> Result<Rc<Package>, VmError> {
     }
     let options = url.find('?').map(|i| url[i..].split('#').next().unwrap_or("").to_string()).unwrap_or_default();
     world_options_set(&options);
+    NEXT_PORTAL.with(|p| *p.borrow_mut() = url.split_once('#').map(|(_, portal)| portal.trim().to_string()).unwrap_or_default());
     NEXT_WORLD_INFO.with(|w| w.set(old.world_info));
-    load_with(vm, &map, old.config, carried)?;
+    load_with(vm, &map, old.config, Some(info))?;
     // Loading a saved game: the map is loaded as for any travel and the saved level put over it.
     if let Some(slot) = save::option_slot(url) {
         save::finish_load(vm, slot);
@@ -258,8 +375,8 @@ pub fn travel(vm: &mut Vm<'_>, url: &str) -> Result<Rc<Package>, VmError> {
     Ok(map)
 }
 
-/// Like `load`; `carried` are the player pawn's travel properties from the previous level.
-pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, carried: Vec<(String, Value)>) -> Result<(), VmError> {
+/// Like `load`; `travel` is what came with the player from the previous level (`None`: a map opened directly).
+pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, travel: Option<TravelInfo>) -> Result<(), VmError> {
     let game_class = config.get("Engine.Engine", "DefaultGame").map(str::to_string);
     let game_class = game_class.as_deref();
     let actor_class = vm.db.find("Actor").ok_or_else(|| VmError::Runtime("no Actor class".into()))?;
@@ -340,6 +457,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, c
         viewport: Default::default(),
         native_fonts: Default::default(),
         pending_travel: None,
+        travel_info: travel.clone().unwrap_or_default(),
         url_options: String::new(),
         world_info: None,
         save_requested: false,
@@ -403,7 +521,8 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, c
     }
     if let Some(g) = world(vm).game {
         let options = world(vm).url_options.clone();
-        let mut args = [Value::Str(String::new()), Value::Str(options), Value::Str(String::new())];
+        let portal = NEXT_PORTAL.with(|p| std::mem::take(&mut *p.borrow_mut()));
+        let mut args = [Value::Str(portal), Value::Str(options), Value::Str(String::new())];
         let pc = fire(vm, g, "Login", &mut args).as_obj();
         if let Some(pc) = pc {
             world(vm).player = Some(pc);
@@ -413,16 +532,24 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, c
             fire(vm, g, "PostLogin", &mut [Value::Object(Some(pc))]);
         }
         follow_player(vm);
-        // A loaded map finishes by accepting the player's travel: pawn first, then its controller.
+        // A loaded map finishes by accepting the player's travel: both are told it is coming, what travelled is
+        // put back, the game takes the inventory in, and then they are told it has arrived (last listed first).
         if let Some(pc) = world(vm).player {
             if let Some(pawn) = get(vm, pc, "Pawn").as_obj() {
-                if carried.is_empty() {
+                if travel.is_none() {
                     arrive_from(vm, pawn);
                 }
-                for (name, value) in &carried {
-                    set(vm, pawn, name, value.clone());
+                fire(vm, pc, "TravelPreAccept", &mut []);
+                fire(vm, pawn, "TravelPreAccept", &mut []);
+                let info = travel.clone().unwrap_or_default();
+                let accepted = accept_travel(vm, pc, pawn, &info);
+                for &a in accepted.iter().rev() {
+                    fire(vm, a, "TravelPreAccept", &mut []);
                 }
-                fire(vm, pawn, "TravelPostAccept", &mut []);
+                fire(vm, g, "AcceptInventory", &mut [Value::Object(Some(pawn))]);
+                for &a in accepted.iter().rev() {
+                    fire(vm, a, "TravelPostAccept", &mut []);
+                }
             }
             fire(vm, pc, "TravelPostAccept", &mut []);
             init_camera_settings(vm, pc);

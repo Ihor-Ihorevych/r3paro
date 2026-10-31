@@ -390,6 +390,19 @@ impl<'s> Vm<'s> {
     }
 
     /// Fills the properties every object has in script (`Outer`, `Name`, `Class`) from the object table.
+    /// What a script reads from a class object (`SomePickupClass.Name`): a class has no property values of its own,
+    /// only the name, outer and class every object has.
+    fn class_object_property(&self, o: ObjId, slot: usize) -> Value {
+        let ObjKind::Struct(sid) = self.db.objects.get(o).kind else { return Value::Empty };
+        let Some(object) = self.db.find("Object") else { return Value::Empty };
+        let slot_of = |name: &str| self.db.names.find(name).and_then(|n| self.db.get(object).prop(n)).map(|p| p.slot);
+        if slot_of("Name") == Some(slot) {
+            Value::Name(self.db.get(sid).name)
+        } else {
+            Value::Empty
+        }
+    }
+
     pub fn set_intrinsics(&mut self, obj: ObjId, outer: Option<ObjId>) {
         let Some(class) = self.db.objects.get(obj).class else { return };
         let name = self.db.objects.get(obj).name;
@@ -541,7 +554,10 @@ impl<'s> Vm<'s> {
             // The common reads, without building a place.
             Expr::Local(s) => frame.locals.get(*s).cloned().unwrap_or_default(),
             Expr::Instance(s) => match ctx.or(frame.this) {
-                Some(o) => self.db.objects.values(o).and_then(|v| v.get(*s)).cloned().unwrap_or_default(),
+                Some(o) => match self.db.objects.values(o).and_then(|v| v.get(*s)) {
+                    Some(v) => v.clone(),
+                    None => self.class_object_property(o, *s),
+                },
                 None => Value::Empty,
             },
             Expr::Default(_)

@@ -311,6 +311,32 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                 hp3_world::fire(&mut vm, pawn, "SetLocation", &mut [at]);
             }
         }
+        // HP3_TRAVEL=<url>@<tick>: asks the level to switch to <url> with the player's items, as a ServerTravel does.
+        if let Ok(spec) = std::env::var("HP3_TRAVEL")
+            && let Some((url, tick)) = spec.rsplit_once('@')
+            && tick.parse::<u32>() == Ok(frame)
+            && let Some(li) = hp3_world::world(&mut vm).level_info
+        {
+            hp3_world::set(&mut vm, li, "bNextItems", hp3_script::Value::Bool(true));
+            hp3_world::set(&mut vm, li, "NextURL", hp3_script::Value::Str(url.to_string()));
+            hp3_world::set(&mut vm, li, "NextSwitchCountdown", hp3_script::Value::Float(0.0));
+        }
+        // HP3_GIVE_BEANS=<n>@<tick>: the player's controller is given n beans; the bean count is printed after.
+        if let Ok(spec) = std::env::var("HP3_GIVE_BEANS")
+            && let Some((n, tick)) = spec.split_once('@')
+            && let (Ok(n), Ok(tick)) = (n.parse::<i32>(), tick.parse::<u32>())
+            && (frame == tick || frame == tick + 5)
+            && let Some(pc) = hp3_world::world(&mut vm).player
+        {
+            if frame == tick {
+                hp3_world::fire(&mut vm, pc, "GiveBeans", &mut [hp3_script::Value::Int(n)]);
+            }
+            if let Some(pawn) = hp3_world::get(&mut vm, pc, "Pawn").as_obj() {
+                let name = vm.db.names.intern("Jellybean");
+                let count = hp3_world::fire(&mut vm, pawn, "GetInventoryCount", &mut [hp3_script::Value::Name(name)]);
+                println!("beans at {frame}: {count:?}");
+            }
+        }
         // HP3_HOLD=<key>@<tick>[-<tick>]: holds a key (as the app would) over a span of ticks.
         for var in ["HP3_HOLD", "HP3_HOLD2"] {
             let Ok(spec) = std::env::var(var) else { continue };

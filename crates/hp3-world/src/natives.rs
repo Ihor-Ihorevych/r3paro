@@ -190,6 +190,9 @@ pub fn spawn(vm: &mut Vm<'_>, spawner: Option<ObjId>, a: &[Value]) -> Result<Val
     let instigator = spawner.map(|s| get(vm, s, "Instigator")).unwrap_or_default();
     set(vm, obj, "Instigator", instigator);
     world(vm).actors.push(obj);
+    if vm.db.find("Emitter").is_some_and(|e| vm.is_child_of(class, e)) {
+        crate::particles::own_emitters(vm, obj);
+    }
     if let Some(owner) = obj_arg(a, 1) {
         fire(vm, owner, "GainedChild", &mut [Value::Object(Some(obj))]);
     }

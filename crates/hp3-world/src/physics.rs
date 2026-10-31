@@ -125,7 +125,8 @@ pub fn move_actor(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<Hit> {
     // last step). Nudge it out along the contact's normal, as far as it takes to be clear (a few tries), and
     // sweep again, so a pawn does not stay glued to a surface it only grazes.
     for _ in 0..3 {
-        let Some(h) = hit.filter(|h| h.time <= 0.0 && h.normal.length_squared() > 0.5) else { break };
+        let reach = delta.length();
+        let Some(h) = hit.filter(|h| h.time * reach <= 0.02 && h.normal.length_squared() > 0.5) else { break };
         let moving_away = delta.dot(h.normal) > 0.0;
         if moving_away {
             break;
@@ -409,32 +410,73 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     let _ = old_base;
 }
 
-/// A walker met a barrier: a ledge it can mount is handed to the script (true); else it climbs the barrier when the
-/// step up is possible, or slides along it (and lets the script know with `HitWall`).
+/// A normal whose z is below this is the side of a step (a riser); steeper than that is not climbed.
+const MAX_STEP_SIDE_Z: f32 = 0.08;
+
+/// A walker met a barrier: a ledge it can mount is handed to the script (true); else it steps up the barrier
+/// or slides along it (and lets the script know with `HitWall`).
 fn climb_or_slide(vm: &mut Vm<'_>, a: ObjId, delta: Vec3, hit: Hit) -> bool {
     if try_mount(vm, a, Vec3::Z, &hit) {
         return true;
     }
-    let human = world(vm).player.is_some_and(|pc| get(vm, pc, "Pawn").as_obj() == Some(a));
-    let remaining = delta * (1.0 - hit.time);
-    let before = vec(&get(vm, a, "Location"));
-    let up = move_actor(vm, a, Vec3::Z * MAX_STEP_HEIGHT);
-    let climbed = vec(&get(vm, a, "Location")).z - before.z;
-    let blocked = move_actor(vm, a, remaining).is_some_and(|h| h.normal.z < WALKABLE_Z);
-    if up.is_some() || blocked || climbed <= 0.0 {
-        set(vm, a, "Location", value(before));
-        let slide = remaining - hit.normal * remaining.dot(hit.normal);
-        move_and_slide(vm, a, slide);
-        // Hitting another pawn is not hitting a wall; a pawn that is not pushing makes no wall event.
-        let hit_pawn = hit.actor.is_some_and(|o| is_pawn(vm, o));
-        let pushing = vec(&get(vm, a, "Acceleration")).length_squared() > 1e-6 || human;
-        if !hit_pawn && pushing {
-            fire(vm, a, "HitWall", &mut [value(hit.normal), Value::Object(hit.actor)]);
-        }
-    } else {
-        move_actor(vm, a, -Vec3::Z * (climbed + 2.0));
-    }
+    step_up(vm, a, delta * (1.0 - hit.time), hit, 0);
     false
+}
+
+/// Tells the pawn's script it ran into a wall: not for another pawn, and not when it was not pushing.
+fn notify_hit_wall(vm: &mut Vm<'_>, a: ObjId, hit: &Hit) {
+    let human = world(vm).player.is_some_and(|pc| get(vm, pc, "Pawn").as_obj() == Some(a));
+    let hit_pawn = hit.actor.is_some_and(|o| is_pawn(vm, o));
+    let pushing = vec(&get(vm, a, "Acceleration")).length_squared() > 1e-6 || human;
+    if !hit_pawn && pushing {
+        fire(vm, a, "HitWall", &mut [value(hit.normal), Value::Object(hit.actor)]);
+    }
+}
+
+/// Takes a walker past the barrier it met: raised by a step's height (and 2), the rest of the move is made at
+/// that height and, when it ends against yet another riser, raised again (stairs); then the pawn is put back down
+/// onto whatever is under it. A barrier that is no step and no floor is slid along instead, once the script has
+/// been told. Behaviour of the reference engine's pawn step-up (UnPhysic.cpp), written afresh.
+fn step_up(vm: &mut Vm<'_>, a: ObjId, delta: Vec3, hit: Hit, depth: u32) {
+    let lift = MAX_STEP_HEIGHT + 2.0;
+    let mut step_down = true;
+    let steppable = hit.normal.z.abs() < MAX_STEP_SIDE_Z || hit.normal.z >= WALKABLE_Z;
+    let mut now = Some(hit);
+    if steppable {
+        move_actor(vm, a, Vec3::Z * lift);
+        now = move_actor(vm, a, delta);
+    } else if get(vm, a, "Physics").as_byte() != PHYS_WALKING {
+        // Not walking: slide up the slope.
+        now = move_actor(vm, a, delta + Vec3::Z * (delta.length() * hit.normal.z));
+        step_down = false;
+    }
+    if let Some(h) = now {
+        // Another riser close ahead: step down onto this tread and go up again.
+        if h.normal.z.abs() < MAX_STEP_SIDE_Z && h.time * delta.length_squared() > 144.0 && depth < 8 {
+            if step_down {
+                move_actor(vm, a, -Vec3::Z * lift);
+            }
+            step_up(vm, a, delta * (1.0 - h.time), h, depth + 1);
+            return;
+        }
+        notify_hit_wall(vm, a, &h);
+        if get(vm, a, "Physics").as_byte() == PHYS_FALLING {
+            return;
+        }
+        // Slide along the barrier, treated as upright.
+        let mut n = h.normal;
+        n.z = 0.0;
+        let n = n.normalize_or_zero();
+        let along = (delta - n * delta.dot(n)) * (1.0 - h.time);
+        if along.dot(delta) >= 0.0
+            && let Some(second) = move_actor(vm, a, along)
+        {
+            notify_hit_wall(vm, a, &second);
+        }
+    }
+    if step_down {
+        move_actor(vm, a, -Vec3::Z * lift);
+    }
 }
 
 /// Whether a pawn that ran (or fell) into a wall can climb onto a ledge there, and if so hands the move to its
@@ -600,6 +642,9 @@ fn fall(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         }
         set(vm, a, "Velocity", value(vel));
         let Some(hit) = move_and_slide(vm, a, vel * tick) else { continue };
+        if std::env::var_os("HP3_FALL_DEBUG").is_some() {
+            eprintln!("fall: {} vel {vel} step {} hit time {} normal {} actor {:?}", hp3_script::natives::object_path(vm, a), vel * tick, hit.time, hit.normal, hit.actor.map(|o| hp3_script::natives::object_path(vm, o)));
+        }
         if hit.normal.z >= WALKABLE_Z {
             let mut v = vec(&get(vm, a, "Velocity"));
             fire(vm, a, "Landed", &mut [value(hit.normal)]);

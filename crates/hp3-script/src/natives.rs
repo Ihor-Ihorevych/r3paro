@@ -312,8 +312,10 @@ pub fn registry() -> HashMap<String, NativeFn> {
         // Names and objects.
         "Object.EqualEqual_NameName" => |vm, this, a| Value::Bool(a[0].as_name() == a[1].as_name()),
         "Object.NotEqual_NameName" => |vm, this, a| Value::Bool(a[0].as_name() != a[1].as_name()),
-        "Object.EqualEqual_ObjectObject" => |vm, this, a| Value::Bool(a[0].as_obj() == a[1].as_obj()),
-        "Object.NotEqual_ObjectObject" => |vm, this, a| Value::Bool(a[0].as_obj() != a[1].as_obj()),
+        // An actor that was destroyed is `None` to the script that still holds it (the engine clears such
+        // references when it collects the actor).
+        "Object.EqualEqual_ObjectObject" => |vm, this, a| Value::Bool(live(vm, &a[0]) == live(vm, &a[1])),
+        "Object.NotEqual_ObjectObject" => |vm, this, a| Value::Bool(live(vm, &a[0]) != live(vm, &a[1])),
         "Object.Log" => |vm, this, a| {
             let tag = match a.get(1) { Some(Value::Name(n)) if *n != Name::NONE => vm.db.names.get(*n).to_string(), _ => "ScriptLog".into() };
             let line = format!("{tag}: {}", a[0].as_str());
@@ -439,4 +441,9 @@ pub fn registry() -> HashMap<String, NativeFn> {
         },
     ];
     list.into_iter().map(|(k, f)| (k.to_ascii_lowercase(), f)).collect()
+}
+
+/// The object a value refers to, `None` when it is gone (a destroyed actor).
+fn live(vm: &Vm<'_>, v: &Value) -> Option<ObjId> {
+    v.as_obj().filter(|&o| !vm.db.objects.get(o).deleted)
 }

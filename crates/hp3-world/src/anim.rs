@@ -407,6 +407,9 @@ pub fn tick_actor(vm: &mut Vm<'_>, actor: ObjId, dt: f32) {
                         for &(at, event) in list {
                             let f = at * frames;
                             if f > from && f <= to {
+                                if std::env::var_os("HP3_NOTIFY_DEBUG").is_some() {
+                                    eprintln!("notify: seq #{si} {:?} frames {frames} channel {ci} from {from:.2} to {to:.2} at {f:.2}", anims.sequences[si].name);
+                                }
                                 raised.push((event, ci));
                             }
                         }
@@ -490,6 +493,28 @@ fn fade_channels(vm: &mut Vm<'_>, a: ObjId, from: usize, to_inclusive: usize, ta
         let ch = channel_mut(vm, a, ci);
         ch.target_alpha = target;
         ch.blend_rate = per_second;
+    }
+}
+
+/// Fades a group of movement channels to nothing; once every one of them is already at nothing the group is
+/// stopped (no rate, back to its first frame), so an idle pawn's hidden stride raises no notifies and no ends.
+/// Behaviour of the reference engine's `ZeroMovementAlpha`.
+fn zero_movement(vm: &mut Vm<'_>, a: ObjId, from: usize, to_inclusive: usize, per_second: f32) {
+    let mut all_zero = true;
+    for ci in from..=to_inclusive {
+        let ch = channel_mut(vm, a, ci);
+        if ch.alpha > 0.0 {
+            all_zero = false;
+        }
+        ch.target_alpha = 0.0;
+        ch.blend_rate = per_second;
+    }
+    if all_zero {
+        for ci in from..=to_inclusive {
+            let ch = channel_mut(vm, a, ci);
+            ch.rate = 0.0;
+            ch.frame = 0.0;
+        }
     }
 }
 
@@ -586,14 +611,14 @@ fn drive_movement(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     // Nothing of this while falling, or just after the script asked for a pause in blending.
     let now = world(vm).time;
     if falling || now < get(vm, a, "MovementBlendStartTime").as_float() {
-        fade_channels(vm, a, TURN_RIGHT_CH, MOVE_LAST_CH, 0.0, per_second);
+        zero_movement(vm, a, TURN_RIGHT_CH, MOVE_LAST_CH, per_second);
         return;
     }
 
     let accel = crate::physics::vec(&get(vm, a, "Acceleration")) + crate::physics::vec(&get(vm, a, "ConstantAcceleration"));
     let flat_speed2 = vel.x * vel.x + vel.y * vel.y;
     if accel.length_squared() > 1e-6 && flat_speed2 >= 25.0 {
-        fade_channels(vm, a, TURN_RIGHT_CH, TURN_LEFT_CH, 0.0, per_second);
+        zero_movement(vm, a, TURN_RIGHT_CH, TURN_LEFT_CH, per_second);
         world(vm).anim.actors.entry(a).or_default().movement.was_moving = true;
         // Where the pawn is accelerating, relative to where it faces.
         let yaw = get(vm, a, "Rotation").fields().get(1).map_or(0, Value::as_int) as f32 * std::f32::consts::TAU / 65536.0;
@@ -662,7 +687,7 @@ fn drive_movement(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     if std::mem::take(&mut world(vm).anim.actors.entry(a).or_default().movement.was_moving) && !falling {
         fire(vm, a, "ChangeAnimation", &mut []);
     }
-    fade_channels(vm, a, MOVE_FIRST_CH, MOVE_LAST_CH, 0.0, per_second);
+    zero_movement(vm, a, MOVE_FIRST_CH, MOVE_LAST_CH, per_second);
     let yaw = (get(vm, a, "Rotation").fields().get(1).map_or(0, Value::as_int) & 0xFFFF) as f32;
     let old_yaw = world(vm).anim.actors.entry(a).or_default().movement.old_yaw;
     let mut turned = yaw - old_yaw;
@@ -676,7 +701,7 @@ fn drive_movement(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         let turn_rate = turned / dt;
         for (ci, name, active) in [(TURN_RIGHT_CH, turn_right, turn_rate > 1000.0), (TURN_LEFT_CH, turn_left, turn_rate < -1000.0)] {
             if !active || name == Name::NONE {
-                fade_channels(vm, a, ci, ci, 0.0, per_second);
+                zero_movement(vm, a, ci, ci, per_second);
                 continue;
             }
             let current = world(vm).anim.actors.get(&a).and_then(|x| x.channels.get(ci)).and_then(|c| c.sequence);

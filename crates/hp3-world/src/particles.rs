@@ -320,6 +320,29 @@ fn spawn(config: &Config, rng: &mut Rng, origin: Vec3, rot: Mat3, fill_age: f32)
     }
 }
 
+/// Gives an emitter actor spawned at run time copies of its own of the class's default emitter objects, which are
+/// shared with every other of its kind (scripts change them, `Kill` among others, and that must reach only this
+/// actor). Done when the actor is spawned, before any script touches it; a level's own actors have their own.
+pub fn own_emitters(vm: &mut Vm<'_>, a: ObjId) {
+    if vm.db.objects.get(a).key.is_some() || world(vm).particles.owned.contains(&a) {
+        return;
+    }
+    let Value::Array(emitters) = get(vm, a, "Emitters") else { return };
+    world(vm).particles.owned.insert(a);
+    let mut own = Vec::with_capacity(emitters.len());
+    for e in emitters.iter() {
+        let copy = e.as_obj().and_then(|o| {
+            // Reading a property loads the object if it is still lazy.
+            let _ = get(vm, o, "MaxParticles");
+            let entry = vm.db.objects.get(o).clone();
+            let (class, values) = (entry.class?, vm.db.objects.values(o).cloned()?);
+            Some(vm.db.objects.add(entry.name, class, values))
+        });
+        own.push(copy.map_or(e.clone(), |c| Value::Object(Some(c))));
+    }
+    set(vm, a, "Emitters", Value::Array(own.into()));
+}
+
 /// Steps every emitter actor's emitters by `dt`.
 pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     let Some(emitter_class) = vm.db.find("Emitter") else { return };
@@ -331,28 +354,8 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         if vm.db.objects.get(a).deleted || !vm.is_child_of(class, emitter_class) {
             continue;
         }
+        own_emitters(vm, a);
         let Value::Array(emitters) = get(vm, a, "Emitters") else { continue };
-        // An emitter spawned at run time starts with the class's default emitter objects, shared with every other
-        // of its kind; each actor gets copies of its own (scripts change them, e.g. `Kill`).
-        let emitters = if vm.db.objects.get(a).key.is_none() && !world(vm).particles.owned.contains(&a) {
-            world(vm).particles.owned.insert(a);
-            let mut own = Vec::with_capacity(emitters.len());
-            for e in emitters.iter() {
-                let copy = e.as_obj().and_then(|o| {
-                    // Reading a property loads the object if it is still lazy.
-                    let _ = get(vm, o, "MaxParticles");
-                    let entry = vm.db.objects.get(o).clone();
-                    let (class, values) = (entry.class?, vm.db.objects.values(o).cloned()?);
-                    Some(vm.db.objects.add(entry.name, class, values))
-                });
-                own.push(copy.map_or(e.clone(), |c| Value::Object(Some(c))));
-            }
-            set(vm, a, "Emitters", Value::Array(own.clone().into()));
-            Value::Array(own.into())
-        } else {
-            Value::Array(emitters)
-        };
-        let Value::Array(emitters) = emitters else { continue };
         let origin = crate::physics::vec(&get(vm, a, "Location"));
         let rot = rotation_of(vm, a);
         let hidden = get(vm, a, "bHidden").as_bool();

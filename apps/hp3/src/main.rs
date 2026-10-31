@@ -18,6 +18,7 @@ use sdl3::keyboard::{Keycode, Scancode};
 use sdl3::mouse::MouseButton;
 
 mod audio;
+mod gamelog;
 mod levelmenu;
 use hp3_script::Value;
 
@@ -206,6 +207,7 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
         levels.toggle(&current_map);
     }
     let mut pending_level: Option<String> = None;
+    let mut game_log = gamelog::GameLog::new(root);
     let particle_renderer = hp3_render::particles::ParticleRenderer::new(&renderer);
     let mut particle_cache = hp3_engine::ParticleCache::default();
     'main: loop {
@@ -380,6 +382,7 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
         if let Some(a) = &mut audio {
             a.update(&mut vm, camera.position, camera.rotation[1]);
         }
+        game_log.update(&mut vm);
         stages.push(("camera", frame_start.elapsed().as_secs_f32() * 1000.0));
         let frame = match surface.get_current_texture() {
             Ok(f) => f,
