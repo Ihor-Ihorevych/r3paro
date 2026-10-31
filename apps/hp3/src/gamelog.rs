@@ -15,6 +15,8 @@ pub struct GameLog {
     /// How many lines of the VM's log have been written.
     written: usize,
     last_pawn: String,
+    cursor: Option<hp3_script::ObjId>,
+    last_cursor: String,
 }
 
 impl GameLog {
@@ -23,7 +25,7 @@ impl GameLog {
             .ok()
             .and_then(|_| std::fs::File::create(root.join("logs").join("game.log")).ok())
             .map(std::io::BufWriter::new);
-        GameLog { file, started: Instant::now(), last_second: 0, written: 0, last_pawn: String::new() }
+        GameLog { file, started: Instant::now(), last_second: 0, written: 0, last_pawn: String::new(), cursor: None, last_cursor: String::new() }
     }
 
     fn line(&mut self, text: &str) {
@@ -46,6 +48,7 @@ impl GameLog {
         for l in fresh {
             self.line(&l);
         }
+        self.log_cursor(vm);
         let second = self.started.elapsed().as_secs();
         let Some(pc) = hp3_world::world(vm).player else { return };
         let pawn = hp3_world::get(vm, pc, "Pawn").as_obj();
@@ -87,6 +90,24 @@ impl GameLog {
             if let Some(f) = &mut self.file {
                 let _ = f.flush();
             }
+        }
+    }
+
+    /// The aim cursor's state and the fire button, written whenever either changes (to see how long an aim lasts).
+    fn log_cursor(&mut self, vm: &mut Vm<'_>) {
+        if self.cursor.is_none_or(|c| vm.db.objects.get(c).deleted) {
+            let Some(class) = vm.db.find("SpellCursor") else { return };
+            self.cursor = hp3_world::world(vm).actors.clone().into_iter().find(|&a| !vm.db.objects.get(a).deleted && vm.db.objects.get(a).class == Some(class));
+        }
+        let (Some(c), Some(pc)) = (self.cursor, hp3_world::world(vm).player) else { return };
+        let state = vm.state_of(c).map(|s| vm.db.names.get(vm.db.get(s).name).to_string()).unwrap_or_default();
+        let fire = hp3_world::get(vm, pc, "bFire").as_int();
+        let particles = hp3_world::get(vm, c, "CursorParticles").as_obj().map(|o| hp3_script::natives::object_path(vm, o)).unwrap_or_default();
+        let target = hp3_world::get(vm, c, "aCurrentTarget").as_obj().map(|o| hp3_script::natives::object_path(vm, o)).unwrap_or_default();
+        let now = format!("{state} bFire {fire} particles {particles} target {target}");
+        if now != self.last_cursor {
+            self.line(&format!("CURSOR {now}"));
+            self.last_cursor = now;
         }
     }
 }

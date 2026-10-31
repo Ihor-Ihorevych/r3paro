@@ -141,6 +141,8 @@ pub struct Vm<'s> {
     pub(crate) state_changed: crate::fx::FxHashSet<ObjId>,
     /// Statement being executed, for iterators to find their loop body.
     current_pc: usize,
+    /// Script offset of the statement being run (for messages).
+    current_offset: u32,
     /// World data of the crate that embeds the VM.
     pub ext: Option<Box<dyn std::any::Any>>,
     /// Resolved natives, indexed by function struct id (outer `None`: not looked up yet).
@@ -193,6 +195,7 @@ impl<'s> Vm<'s> {
             state_pc: HashMap::default(),
             state_changed: Default::default(),
             current_pc: 0,
+            current_offset: 0,
             ext: None,
             last_state: HashMap::default(),
             native_cache: Vec::new(),
@@ -535,7 +538,7 @@ impl<'s> Vm<'s> {
                     Some(o) => self.place(inner, frame, Some(o))?,
                     None => {
                         let at = self.function_path(frame.func);
-                        self.warn(format!("{at}: accessed none"));
+                        self.warn(format!("{at}: accessed none (statement at {:#06x})", self.current_offset));
                         Place { root: Root::Temp(Value::Empty), path: smallvec::SmallVec::new() }
                     }
                 }
@@ -573,7 +576,7 @@ impl<'s> Vm<'s> {
                     Some(o) => self.eval(inner, frame, Some(o))?,
                     None => {
                         let at = self.function_path(frame.func);
-                        self.warn(format!("{at}: accessed none"));
+                        self.warn(format!("{at}: accessed none (statement at {:#06x})", self.current_offset));
                         Value::Empty
                     }
                 }
@@ -883,6 +886,7 @@ impl<'s> Vm<'s> {
                 return Err(VmError::Runtime(format!("runaway loop in {}", self.function_path(frame.func))));
             }
             self.current_pc = pc;
+            self.current_offset = code.offsets.get(pc).copied().unwrap_or(0);
             if self.profile {
                 *self.profile_counts.entry(frame.func).or_default() += 1;
             }
