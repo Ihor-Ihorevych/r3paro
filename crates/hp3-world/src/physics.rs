@@ -234,7 +234,19 @@ fn floor_below(vm: &mut Vm<'_>, a: ObjId, depth: f32) -> Option<Hit> {
     let loc = vec(&get(vm, a, "Location"));
     let ext = extent(vm, a);
     let player = is_player_pawn(vm, a);
-    let hit = world(vm).collision.trace_as(player, loc, loc - Vec3::Z * depth, ext, Some(a))?;
+    // A box pressed into a wall by a hair has the wall at the very start of its downward sweep, and finds no floor.
+    // Narrower boxes are tried until one is clear of the wall.
+    let mut hit = None;
+    for shrink in [0.0, 2.0, 5.0] {
+        let narrow = Vec3::new((ext.x - shrink).max(1.0), (ext.y - shrink).max(1.0), ext.z);
+        let found = world(vm).collision.trace_as(player, loc, loc - Vec3::Z * depth, narrow, Some(a))?;
+        let embedded_in_wall = found.time <= 0.0 && found.normal.z < WALKABLE_Z;
+        hit = Some(found);
+        if !embedded_in_wall {
+            break;
+        }
+    }
+    let hit = hit?;
     let normal = surface_normal(vm, a, &hit, loc, depth);
     (normal.z >= WALKABLE_Z).then_some(Hit { normal, ..hit })
 }
