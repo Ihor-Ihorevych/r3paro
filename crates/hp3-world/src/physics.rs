@@ -119,7 +119,26 @@ pub fn move_actor(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<Hit> {
         blocks_actors: get(vm, a, "bBlockActors").as_bool() && get(vm, a, "bCollideActors").as_bool(),
         collide_world: get(vm, a, "bCollideWorld").as_bool(),
     };
-    let hit = world(vm).collision.trace_for(how, loc, loc + delta, ext, Some(a));
+    let mut loc = loc;
+    let mut hit = world(vm).collision.trace_for(how, loc, loc + delta, ext, Some(a));
+    // Blocked before moving at all: the box overlaps what it touches by a hair (a sloped hull, a rounding of the
+    // last step). Nudge it out along the contact's normal, as far as it takes to be clear (a few tries), and
+    // sweep again, so a pawn does not stay glued to a surface it only grazes.
+    for _ in 0..3 {
+        let Some(h) = hit.filter(|h| h.time <= 0.0 && h.normal.length_squared() > 0.5) else { break };
+        let moving_away = delta.dot(h.normal) > 0.0;
+        if moving_away {
+            break;
+        }
+        let out = loc + h.normal * 0.4;
+        let clear = world(vm).collision.trace_for(how, out + Vec3::Z * 0.01, out, ext, Some(a)).is_none_or(|c| c.time > 0.0);
+        if !clear {
+            break;
+        }
+        loc = out;
+        set(vm, a, "Location", value(loc));
+        hit = world(vm).collision.trace_for(how, loc, loc + delta, ext, Some(a));
+    }
     let time = hit.map(|h| h.time).unwrap_or(1.0);
     set(vm, a, "Location", value(loc + delta * time));
     // Running into an actor (not the level's geometry, not what it stands on) bumps both of them.
@@ -313,12 +332,28 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         let delta = new_vel * tick;
         let before = vec(&get(vm, a, "Location"));
         if delta.length_squared() > 1e-8 {
-            if let Some(hit) = move_actor(vm, a, delta)
+            let hit = move_actor(vm, a, delta);
+            if std::env::var_os("HP3_WALK_DEBUG").is_some() && human {
+                eprintln!("walk: step {delta} from {before} hit {:?}", hit.map(|h| (h.time, h.normal, h.actor.map(|o| o.0))));
+            }
+            if let Some(hit) = hit
                 && hit.normal.z < WALKABLE_Z
                 && climb_or_slide(vm, a, delta, hit)
             {
                 // The script took the pawn up a ledge: the rest of the step is its business.
                 return;
+            }
+            // Met a slope it may walk on (a ramp, or the sloped foot of a block): the rest of the step goes
+            // along the slope, up or down it, instead of stopping dead against it.
+            if let Some(hit) = hit
+                && hit.normal.z >= WALKABLE_Z
+                && hit.time < 1.0
+            {
+                let remaining = delta * (1.0 - hit.time);
+                let along = remaining - hit.normal * remaining.dot(hit.normal);
+                if along.length_squared() > 1e-8 {
+                    move_actor(vm, a, along);
+                }
             }
         }
         match floor_below(vm, a, MAX_STEP_HEIGHT + 2.0) {

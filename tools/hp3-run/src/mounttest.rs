@@ -60,7 +60,8 @@ fn find_spots(vm: &mut Vm<'_>, pawn: ObjId, volume: ObjId, centre: Vec3) -> Vec<
     for dx in (-range..=range).step_by((range / 4).max(12) as usize) {
         for dy in (-range..=range).step_by((range / 4).max(12) as usize) {
             let mut last_floor = f32::MIN;
-            for dz in (-80..=80).step_by(8) {
+            let zr: i32 = std::env::var("HP3_MOUNT_ZRANGE").ok().and_then(|v| v.parse().ok()).unwrap_or(80);
+            for dz in (-zr..=zr).step_by(8) {
                 let from = centre + Vec3::new(dx as f32, dy as f32, dz as f32);
                 let col = &hp3_world::world(vm).collision;
                 if col.trace_static(from + Vec3::Z * 0.1, from, ext).is_some_and(|h| h.time <= 0.0) {
@@ -110,7 +111,7 @@ fn ring_spots(vm: &mut Vm<'_>, pawn: ObjId, centre: Vec3) -> Vec<(Vec3, i32)> {
         for k in 0..8 {
             let ang = k as f32 * std::f32::consts::TAU / 8.0;
             let dir = Vec3::new(ang.cos(), ang.sin(), 0.0);
-            let above = centre - dir * dist + Vec3::Z * 150.0;
+            let above = centre - dir * dist + Vec3::Z * std::env::var("HP3_MOUNT_RING_Z").ok().and_then(|v| v.parse().ok()).unwrap_or(150.0);
             let col = &hp3_world::world(vm).collision;
             let Some(floor) = col.trace_static(above, above - Vec3::Z * 400.0, ext) else { continue };
             if floor.normal.z < 0.7 {
