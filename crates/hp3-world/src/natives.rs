@@ -58,6 +58,61 @@ pub fn set_base(vm: &mut Vm<'_>, o: ObjId, new_base: Option<ObjId>, notify: bool
     }
 }
 
+/// What an actor iterator asks for beyond being in range.
+struct Spatial {
+    /// A line from the centre must reach the actor without meeting the world.
+    visible: bool,
+    /// Only actors that collide with actors.
+    colliding: bool,
+}
+
+fn spatial(vm: &mut Vm<'_>, this: Option<ObjId>, a: &[Value], what: Spatial) -> Result<Vec<Vec<Value>>, VmError> {
+    let Some(o) = this else { return Ok(Vec::new()) };
+    let radius = a.get(2).map(Value::as_float).unwrap_or(0.0);
+    let center = if given(a, 3) { crate::physics::vec(&a[3]) } else { crate::physics::vec(&get(vm, o, "Location")) };
+    // The visible-actors form has no collision radius in its range test, and 0 means no limit.
+    let plain_visible = what.visible && !what.colliding;
+    let unlimited = plain_visible && radius == 0.0;
+    let ignore_hidden = plain_visible || (what.visible && given(a, 4) && a[4].as_bool());
+    let class = obj_arg(a, 0).and_then(|c| vm.class_of(c));
+    let Some(loc_slot) = location_slot(vm, o) else { return Ok(Vec::new()) };
+    let mut actors = if unlimited { world(vm).actors.clone() } else { actors_near(vm, center, radius, loc_slot) };
+    // Creation order, as a full scan of the actor list gives.
+    actors.sort_unstable();
+    let mut out = Vec::new();
+    for x in actors {
+        if vm.db.objects.get(x).deleted {
+            continue;
+        }
+        let Some(p) = location_at(vm, x, loc_slot) else { continue };
+        let reach = if plain_visible { radius } else { radius + get(vm, x, "CollisionRadius").as_float() };
+        if !unlimited && p.distance_squared(center) >= reach * reach {
+            continue;
+        }
+        if let (Some(want), Some(have)) = (class, vm.db.objects.get(x).class)
+            && !vm.is_child_of(have, want)
+        {
+            continue;
+        }
+        if what.colliding && !get(vm, x, "bCollideActors").as_bool() {
+            continue;
+        }
+        if ignore_hidden && get(vm, x, "bHidden").as_bool() {
+            continue;
+        }
+        if what.visible {
+            let blocked = world(vm).collision.trace_static(center, p, glam::Vec3::ZERO).is_some_and(|h| h.actor != Some(x) && h.actor != Some(o));
+            if blocked {
+                continue;
+            }
+        }
+        let mut item = a.to_vec();
+        item[1] = Value::Object(Some(x));
+        out.push(item);
+    }
+    Ok(out)
+}
+
 /// Which colliding actors a line check looks at.
 struct LineFilter {
     /// Only actors of this class (or a subclass).
@@ -545,51 +600,17 @@ pub fn register(vm: &mut Vm<'_>) {
             _ => String::new(),
         }))
     });
-    // Spatial iterators: (BaseClass, out Actor, Radius, optional Loc). Visibility needs traces, which do not
-    // exist yet, so the visible variants match everything in range.
-    for name in ["Actor.RadiusActors", "Actor.VisibleActors", "Actor.VisibleCollidingActors", "Actor.CollidingActors"] {
-        vm.register_iterator(name, |vm, this, a| {
-            let Some(o) = this else { return Ok(Vec::new()) };
-            let radius = a.get(2).map(Value::as_float).unwrap_or(0.0);
-            let center = if given(a, 3) { vec3(&a[3]) } else { vec3(&get(vm, o, "Location")) };
-            // Distance first, straight from the location slot every actor shares; class checks only in range.
-            let class = obj_arg(a, 0).and_then(|c| vm.class_of(c));
-            let Some(loc_slot) = location_slot(vm, o) else { return Ok(Vec::new()) };
-            let r2 = radius * radius;
-            let center = glam::Vec3::from(center);
-            let mut actors = actors_near(vm, center, radius, loc_slot);
-            // Creation order, as a full scan of the actor list gives.
-            actors.sort_unstable();
-            if std::env::var("HP3_GRID_CHECK").is_ok() {
-                let all = world(vm).actors.clone();
-                let brute = all.iter().filter(|&&x| location_at(vm, x, loc_slot).is_some_and(|p| p.distance_squared(center) <= r2)).count();
-                let grid = actors.iter().filter(|&&x| location_at(vm, x, loc_slot).is_some_and(|p| p.distance_squared(center) <= r2)).count();
-                if brute != grid {
-                    eprintln!("grid mismatch: brute {brute} grid {grid} radius {radius}");
-                }
-            }
-            let mut out = Vec::new();
-            for &x in &actors {
-                let e = vm.db.objects.get(x);
-                if e.deleted {
-                    continue;
-                }
-                let Some(p) = location_at(vm, x, loc_slot) else { continue };
-                if p.distance_squared(center) > r2 {
-                    continue;
-                }
-                if let (Some(want), Some(have)) = (class, e.class)
-                    && !vm.is_child_of(have, want)
-                {
-                    continue;
-                }
-                let mut item = a.to_vec();
-                item[1] = Value::Object(Some(x));
-                out.push(item);
-            }
-            Ok(out)
-        });
-    }
+    // Spatial iterators, each as in the reference:
+    // - RadiusActors(Class, out A, Radius, optional Loc): every actor within Radius plus its own collision radius.
+    // - VisibleActors(Class, out A, optional Radius, optional Loc): visible (not hidden) actors within Radius
+    //   (0 is no limit) that a line from Loc reaches without meeting the world first.
+    // - CollidingActors(Class, out A, Radius, optional Loc): the same as RadiusActors, for actors that collide.
+    // - VisibleCollidingActors(Class, out A, Radius, optional Loc, optional bIgnoreHidden): colliding actors that a
+    //   line from Loc reaches.
+    vm.register_iterator("Actor.RadiusActors", |vm, this, a| spatial(vm, this, a, Spatial { visible: false, colliding: false }));
+    vm.register_iterator("Actor.VisibleActors", |vm, this, a| spatial(vm, this, a, Spatial { visible: true, colliding: false }));
+    vm.register_iterator("Actor.CollidingActors", |vm, this, a| spatial(vm, this, a, Spatial { visible: false, colliding: true }));
+    vm.register_iterator("Actor.VisibleCollidingActors", |vm, this, a| spatial(vm, this, a, Spatial { visible: true, colliding: true }));
     vm.register_iterator("Actor.BasedActors", |vm, this, a| {
         let found: Vec<ObjId> = actors_of(vm, obj_arg(a, 0), Name::NONE).into_iter().filter(|&x| get(vm, x, "Base").as_obj() == this).collect();
         Ok(found.into_iter().map(|x| vec![a[0].clone(), Value::Object(Some(x))]).collect())
