@@ -131,8 +131,14 @@ pub fn move_actor(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<Hit> {
         && h.time * whole <= 0.02
         && delta.dot(h.normal) >= -1e-3 * whole
     {
-        let smaller = Vec3::new((ext.x - 0.2).max(0.5), (ext.y - 0.2).max(0.5), (ext.z - 0.2).max(0.5));
-        hit = world(vm).collision.trace_for(how, loc, loc + delta, smaller, Some(a));
+        // A wall the collision keeps a margin around may need a bigger hair.
+        for shrink in [0.2f32, 1.0, 3.0] {
+            let smaller = Vec3::new((ext.x - shrink).max(0.5), (ext.y - shrink).max(0.5), (ext.z - shrink).max(0.5));
+            hit = world(vm).collision.trace_for(how, loc, loc + delta, smaller, Some(a));
+            if hit.is_none_or(|h| h.time * whole > 0.02) {
+                break;
+            }
+        }
     }
     // Blocked before moving at all: the box overlaps what it touches by a hair (a sloped hull, a rounding of the
     // last step). Nudge it out along the contact's normal, as far as it takes to be clear (a few tries), and
