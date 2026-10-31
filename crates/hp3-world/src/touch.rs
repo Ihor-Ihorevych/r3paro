@@ -339,3 +339,34 @@ pub fn frame_pass(vm: &mut Vm<'_>) {
         }
     }
 }
+
+/// Colliding actors whose cylinders could be reached by a segment from `start` to `end` swept with a box of
+/// half size `pad` (a superset; callers test each one).
+pub fn along(vm: &mut Vm<'_>, start: Vec3, end: Vec3, pad: f32) -> Vec<ObjId> {
+    if !world(vm).touch.primed {
+        prime(vm);
+    }
+    let t = &world(vm).touch;
+    let reach = pad + t.max_radius;
+    let lo = start.min(end) - Vec3::splat(reach);
+    let hi = start.max(end) + Vec3::splat(reach);
+    let (x0, y0) = cell(lo);
+    let (x1, y1) = cell(hi);
+    let mut out: Vec<ObjId> = t.big.clone();
+    if ((x1 - x0 + 1) as i64) * ((y1 - y0 + 1) as i64) > t.cells.len() as i64 {
+        for ((cx, cy), list) in &t.cells {
+            if (x0..=x1).contains(cx) && (y0..=y1).contains(cy) {
+                out.extend_from_slice(list);
+            }
+        }
+    } else {
+        for cx in x0..=x1 {
+            for cy in y0..=y1 {
+                if let Some(list) = t.cells.get(&(cx, cy)) {
+                    out.extend_from_slice(list);
+                }
+            }
+        }
+    }
+    out
+}

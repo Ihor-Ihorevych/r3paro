@@ -102,6 +102,11 @@ impl MoverShape {
         self.to_local = to_world.inverse();
     }
 
+    /// Where a box swept from `start` to `end` first meets the mover's triangles.
+    pub fn hit(&self, start: Vec3, end: Vec3, extent: Vec3) -> Option<Hit> {
+        self.trace(start, end, extent)
+    }
+
     /// How far the mover's triangles reach from its origin.
     pub fn reach(&self) -> f32 {
         self.radius
@@ -134,6 +139,64 @@ impl MoverShape {
             actor: Some(self.actor),
         })
     }
+}
+
+/// Where a box of half size `extent` swept from `start` to `end` first meets an actor's collision cylinder
+/// (`radius`, `half_height`, centered on `center`), or `None`. A sweep that starts inside the cylinder only
+/// counts when it moves toward the axis (it is then stopped at once); moving outward or sideways it is let
+/// through.
+pub fn cylinder_trace(center: Vec3, radius: f32, half_height: f32, start: Vec3, end: Vec3, extent: Vec3) -> Option<Hit> {
+    let reach = radius + extent.x;
+    let half = half_height + extent.z;
+    let (top, bottom) = (center.z + half, center.z - half);
+    let d = end - start;
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    let mut normal = Vec3::ZERO;
+    // Time spent between the cylinder's top and bottom planes.
+    if d.z.abs() > 1e-9 {
+        let (ta, tb) = ((top - start.z) / d.z, (bottom - start.z) / d.z);
+        let (enter, leave) = (ta.min(tb), ta.max(tb));
+        if enter > t0 {
+            t0 = enter;
+            normal = if d.z < 0.0 { Vec3::Z } else { -Vec3::Z };
+        }
+        t1 = t1.min(leave);
+    } else if start.z > top || start.z < bottom {
+        return None;
+    }
+    if t0 >= t1 {
+        return None;
+    }
+    let k = Vec3::new(start.x - center.x, start.y - center.y, 0.0);
+    let c = k.length_squared() - reach * reach;
+    if c < 1.0 && start.z > bottom && start.z < top {
+        let inward = d.x * k.x + d.y * k.y;
+        return (inward < -0.1).then(|| Hit { time: 0.0, location: start, normal: k.normalize_or_zero(), actor: None });
+    }
+    let a = d.x * d.x + d.y * d.y;
+    let b = 2.0 * (k.x * d.x + k.y * d.y);
+    let disc = b * b - 4.0 * a * c;
+    if disc < 0.0 {
+        return None;
+    }
+    if a < 1e-8 {
+        if c > 0.0 {
+            return None;
+        }
+    } else {
+        let root = disc.sqrt();
+        t1 = t1.min((root - b) / (2.0 * a));
+        let t = -(root + b) / (2.0 * a);
+        if t > t0 {
+            t0 = t;
+            let at = start + d * t0 - center;
+            normal = Vec3::new(at.x, at.y, 0.0).normalize_or_zero();
+        }
+    }
+    if t0 >= t1 {
+        return None;
+    }
+    Some(Hit { time: t0, location: start + d * t0, normal, actor: None })
 }
 
 fn cell(v: f32) -> i32 {

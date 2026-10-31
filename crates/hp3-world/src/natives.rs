@@ -590,41 +590,55 @@ pub fn register(vm: &mut Vm<'_>) {
         w.collision.actors = saved;
         Ok(Value::Bool(clear))
     });
-    // TraceActors(BaseClass, out Actor, out HitLoc, out HitNorm, End, optional Start, optional Extent):
-    // every blocking actor the segment passes through, nearest first.
+    // TraceActors(BaseClass, out Actor, out HitLoc, out HitNorm, End, optional Start, optional Extent): every
+    // colliding actor the swept segment crosses, nearest first, and the first thing of the level's geometry
+    // (reported as the level itself for BSP and terrain). A trace without extent only meets actors that block
+    // zero-extent traces, one with extent those that block the other kind; movers are met by their geometry,
+    // volumes not at all, and what the tracer owns (or its pawn) is skipped.
     vm.register_iterator("Actor.TraceActors", |vm, this, a| {
+        use crate::collision::Mover;
         let Some(o) = this else { return Ok(Vec::new()) };
         let end = crate::physics::vec(&a[4]);
         let start = if given(a, 5) { crate::physics::vec(&a[5]) } else { crate::physics::vec(&get(vm, o, "Location")) };
         let extent = if given(a, 6) { crate::physics::vec(&a[6]) } else { glam::Vec3::ZERO };
         let class = obj_arg(a, 0).and_then(|c| vm.class_of(c));
-        let boxes = world(vm).collision.actors.clone();
+        let volume = vm.db.find("Volume");
+        let own_pawn = get(vm, o, "Pawn").as_obj();
+        let flag = if extent == glam::Vec3::ZERO { "bBlockZeroExtentTraces" } else { "bBlockNonZeroExtentTraces" };
         let mut hits = Vec::new();
-        for b in boxes {
-            if Some(b.actor) == this {
+        for b in crate::touch::along(vm, start, end, extent.max_element()) {
+            if b == o || Some(b) == own_pawn || vm.db.objects.get(b).deleted {
                 continue;
             }
-            if let (Some(want), Some(have)) = (class, vm.db.objects.get(b.actor).class)
-                && !vm.is_child_of(have, want)
-            {
+            let Some(have) = vm.db.objects.get(b).class else { continue };
+            if class.is_some_and(|want| !vm.is_child_of(have, want)) || volume.is_some_and(|v| vm.is_child_of(have, v)) {
                 continue;
             }
-            let mut single = crate::collision::Collision::default();
-            single.actors.push(b);
-            if let Some(h) = single.trace(start, end, extent, None) {
+            if !get(vm, b, "bCollideActors").as_bool() || !get(vm, b, flag).as_bool() || get(vm, b, "Owner").as_obj() == Some(o) {
+                continue;
+            }
+            let hit = if let Some(m) = world(vm).collision.mover(b) {
+                m.hit(start, end, extent)
+            } else if get(vm, b, "StaticMesh").as_obj().is_some() && get(vm, b, "bWorldGeometry").as_bool() {
+                None // part of the level's geometry, met below
+            } else {
+                let (r, h) = (get(vm, b, "CollisionRadius").as_float(), get(vm, b, "CollisionHeight").as_float());
+                let center = crate::physics::vec(&get(vm, b, "Location"));
+                crate::collision::cylinder_trace(center, r, h, start, end, extent)
+            };
+            if let Some(mut h) = hit {
+                h.actor = Some(b);
                 hits.push(h);
             }
         }
-        // The level's geometry stops the segment: its first hit (Level for BSP and terrain, the actor for a
-        // static mesh) ends the list. HP3's camera keeps out of walls with this.
         let level = world(vm).level_info;
-        if let Some(mut h) = world(vm).collision.trace_static(start, end, extent) {
+        let ghost = Mover { player: false, blocks_actors: false, collide_world: true };
+        if let Some(mut h) = world(vm).collision.trace_for(ghost, start, end, extent, None) {
             h.actor = h.actor.or(level);
             let wanted = match (class, h.actor.and_then(|x| vm.db.objects.get(x).class)) {
                 (Some(want), Some(have)) => vm.is_child_of(have, want),
                 _ => true,
             };
-            hits.retain(|x| x.time <= h.time);
             if wanted {
                 hits.push(h);
             }

@@ -291,7 +291,8 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             let phys = hp3_world::get(&mut vm, p, "Physics").as_byte();
             let acc = hp3_world::physics::vec(&hp3_world::get(&mut vm, p, "Acceleration"));
             let at = hp3_world::physics::vec(&hp3_world::get(&mut vm, p, "Location"));
-            println!("pawnpos {frame}: at ({:.1}, {:.1}, {:.1}) accel {:.0}", at.x, at.y, at.z, acc.length());
+            let cam = hp3_world::get(&mut vm, pc, "Camera").as_obj().map(|c| hp3_world::physics::vec(&hp3_world::get(&mut vm, c, "Location"))).unwrap_or_default();
+            println!("pawnpos {frame}: at ({:.1}, {:.1}, {:.1}) accel {:.0} camera ({:.1}, {:.1}, {:.1})", at.x, at.y, at.z, acc.length(), cam.x, cam.y, cam.z);
             println!(
                 "pawnlog {frame}: phys {phys} pawn yaw {} vel yaw {vyaw} speed {:.0} view yaw {} camera yaw {cam_yaw} anim {}",
                 yaw(pr),
