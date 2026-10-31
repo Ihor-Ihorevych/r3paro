@@ -20,6 +20,7 @@ pub struct GameLog {
     last_emitter_log: u128,
     last_pose_log: u128,
     blocked_frames: u32,
+    anchor: glam::Vec3,
 }
 
 impl GameLog {
@@ -28,7 +29,7 @@ impl GameLog {
             .ok()
             .and_then(|_| std::fs::File::create(root.join("logs").join("game.log")).ok())
             .map(std::io::BufWriter::new);
-        GameLog { file, started: Instant::now(), last_second: 0, written: 0, last_pawn: String::new(), cursor: None, last_cursor: String::new(), last_emitter_log: 0, last_pose_log: 0, blocked_frames: 0 }
+        GameLog { file, started: Instant::now(), last_second: 0, written: 0, last_pawn: String::new(), cursor: None, last_cursor: String::new(), last_emitter_log: 0, last_pose_log: 0, blocked_frames: 0, anchor: Default::default() }
     }
 
     fn line(&mut self, text: &str) {
@@ -107,7 +108,14 @@ impl GameLog {
             let accel = hp3_world::physics::vec(&hp3_world::get(vm, p, "Acceleration"));
             let vel = hp3_world::physics::vec(&hp3_world::get(vm, p, "Velocity"));
             let phys = hp3_world::get(vm, p, "Physics").as_byte();
-            blocked_now = accel.length() > 100.0 && vel.truncate().length() < 20.0 && (phys == 1 || phys == 2);
+            let at = hp3_world::physics::vec(&hp3_world::get(vm, p, "Location"));
+            let _ = vel;
+            // Pushing, and not further than 3 units from where it was a third of a second ago.
+            if accel.length() > 100.0 && at.distance(self.anchor) < 3.0 {
+                blocked_now = phys == 1 || phys == 2;
+            } else {
+                self.anchor = at;
+            }
             if blocked_now {
                 self.blocked_frames += 1;
                 if self.blocked_frames == 20 || (self.blocked_frames > 20 && self.blocked_frames % 60 == 0) {
