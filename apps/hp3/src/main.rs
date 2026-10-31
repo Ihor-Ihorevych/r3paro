@@ -87,7 +87,10 @@ fn mouse_name(b: MouseButton) -> Option<&'static str> {
 
 /// The game's view: the player controller's `PlayerCalcView`.
 fn game_camera(vm: &mut Vm<'_>) -> Option<Camera> {
-    if let Some((position, rotation, fov)) = hp3_world::player_view(vm) {
+    if let Some((mut position, rotation, fov)) = hp3_world::player_view(vm) {
+        if let Some(pawn) = hp3_world::world(vm).player.and_then(|pc| hp3_world::get(vm, pc, "Pawn").as_obj()) {
+            position.z += hp3_world::physics::view_offset(vm, pawn);
+        }
         return Some(Camera { position, rotation, fov_degrees: fov });
     }
     // The game's camera is not running: follow the pawn from behind instead.

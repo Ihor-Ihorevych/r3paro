@@ -421,7 +421,7 @@ pub fn actor_instances(
         };
         let skinned = if draw_type == DT_MESH { cache.skinned(vm, loader, r, dynamic, a, mesh, &skins) } else { None };
         let Some(gpu) = skinned.or_else(|| cache.get(vm, loader, r, dynamic, mesh, &skins)) else { continue };
-        let loc = vec3(&get(vm, a, "Location"));
+        let loc = vec3(&get(vm, a, "Location")) + Vec3::Z * hp3_world::physics::view_offset(vm, a);
         let rot: Vec<i32> = get(vm, a, "Rotation").fields().iter().map(Value::as_int).collect();
         let rot = [rot.first().copied().unwrap_or(0), rot.get(1).copied().unwrap_or(0), rot.get(2).copied().unwrap_or(0)];
         let scale = match get(vm, a, "DrawScale").as_float() {

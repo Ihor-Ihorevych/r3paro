@@ -418,6 +418,33 @@ fn ground_velocity(vm: &mut Vm<'_>, a: ObjId, accel: Vec3, mut vel: Vec3, dt: f3
 /// (else the pawn slides along it); the pawn is put back on the floor and takes what it stands on as its
 /// `Base`. With no floor under it, a pawn that must not walk off ledges has the step undone, and any other one
 /// starts to fall. At the end the velocity is what the pawn actually moved.
+/// Walks, and keeps what a step or a slope lifted the pawn by as a view offset that eases out, so the pawn and the
+/// camera rise over a stair instead of jumping a step at a time. The offset is only for drawing; the pawn is where it is.
+fn walk_smoothed(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
+    let before = vec(&get(vm, a, "Location")).z;
+    let had_base = get(vm, a, "Base").as_obj();
+    walk(vm, a, dt);
+    let rise = vec(&get(vm, a, "Location")).z - before;
+    let walking = get(vm, a, "Physics").as_byte() == PHYS_WALKING;
+    let w = world(vm);
+    let mut off = w.step_smooth.get(&a).copied().unwrap_or(0.0);
+    if walking && had_base == get(vm, a, "Base").as_obj() && rise.abs() > 0.3 && rise.abs() <= MAX_STEP_HEIGHT + 4.0 {
+        off -= rise;
+    }
+    off *= (-12.0 * dt).exp();
+    let w = world(vm);
+    if off.abs() < 0.05 {
+        w.step_smooth.remove(&a);
+    } else {
+        w.step_smooth.insert(a, off);
+    }
+}
+
+/// How far below (negative) or above where it is a walking pawn is drawn, while it eases onto a new step.
+pub fn view_offset(vm: &mut Vm<'_>, a: ObjId) -> f32 {
+    world(vm).step_smooth.get(&a).copied().unwrap_or(0.0)
+}
+
 fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     let Some(controller) = get(vm, a, "Controller").as_obj() else {
         set(vm, a, "Acceleration", value(Vec3::ZERO));
@@ -1163,7 +1190,7 @@ pub fn step_actor(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
             moving_brush(vm, a, dt);
             return;
         }
-        PHYS_WALKING => walk(vm, a, dt),
+        PHYS_WALKING => walk_smoothed(vm, a, dt),
         PHYS_FALLING => fall(vm, a, dt),
         PHYS_FLYING | PHYS_SWIMMING => fly(vm, a, dt),
         PHYS_ROTATING => rotate(vm, a, dt),
@@ -1333,7 +1360,7 @@ pub fn step(vm: &mut Vm<'_>, dt: f32) {
                 moving_brush(vm, a, dt);
                 continue;
             }
-            PHYS_WALKING => walk(vm, a, dt),
+            PHYS_WALKING => walk_smoothed(vm, a, dt),
             PHYS_FALLING => fall(vm, a, dt),
             PHYS_FLYING | PHYS_SWIMMING => fly(vm, a, dt),
             PHYS_ROTATING => rotate(vm, a, dt),
