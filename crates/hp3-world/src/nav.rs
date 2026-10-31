@@ -254,6 +254,9 @@ fn start_move(vm: &mut Vm<'_>, controller: ObjId, target: Option<ObjId>, destina
     set(vm, controller, "MoveTarget", Value::Object(target));
     set(vm, controller, "Destination", value(destination));
     set(vm, controller, "MoveTimer", Value::Float(timer));
+    if std::env::var_os("HP3_MOVE_DEBUG").is_some() {
+        eprintln!("move start: {} from {from} to {destination} timer {timer:.2} walk {walk:?} accel {:?} state {:?}", hp3_script::natives::object_path(vm, pawn), get(vm, pawn, "AccelRate"), vm.state_of(pawn).map(|s| vm.db.names.get(vm.db.get(s).name).to_string()));
+    }
     world(vm).nav.moves.insert(controller, Move { target, destination, timer });
     vm.latent.insert(controller, Latent::Other("move"));
 }
