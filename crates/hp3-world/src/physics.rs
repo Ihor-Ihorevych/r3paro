@@ -912,6 +912,7 @@ fn moving_brush(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         return;
     }
     let started = vec(&get(vm, a, "Location"));
+    let mut first_step = get(vm, a, "PhysAlpha").as_float() <= 0.0;
     let mut left = dt;
     while get(vm, a, "bInterpolating").as_bool() && left > 0.0 {
         let rate = get(vm, a, "PhysRate").as_float();
@@ -936,6 +937,12 @@ fn moving_brush(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
             break;
         }
         carry_riders(vm, a, here, to - here, here_rot, rot);
+        if first_step && to != here {
+            first_step = false;
+            let riders = world(vm).actors.clone().into_iter().filter(|&r| r != a && get(vm, r, "Base").as_obj() == Some(a)).count();
+            let name = hp3_script::natives::object_path(vm, a);
+            vm.log.push(format!("mover {name} moves with {riders} riders"));
+        }
         set(vm, a, "PhysAlpha", Value::Float(alpha));
         if alpha >= 1.0 {
             set(vm, a, "bInterpolating", Value::Bool(false));

@@ -33,6 +33,13 @@ pub fn set_base(vm: &mut Vm<'_>, o: ObjId, new_base: Option<ObjId>, notify: bool
         }
     }
     let old = get(vm, o, "Base").as_obj();
+    if new_base != old && get(vm, o, "AttachTag").as_name() != Name::NONE {
+        // Attached actors (a knight on its panel): every change of what they ride on is written to the game log.
+        let (from, to) = (old.map(|b| hp3_script::natives::object_path(vm, b)), new_base.map(|b| hp3_script::natives::object_path(vm, b)));
+        let who = hp3_script::natives::object_path(vm, o);
+        let state = vm.state_of(o).map(|s| vm.db.names.get(vm.db.get(s).name).to_string()).unwrap_or_default();
+        vm.log.push(format!("base: {who} (state {state}) {from:?} -> {to:?}"));
+    }
     if new_base != old {
         if let Some(b) = old
             && !get(vm, b, "bWorldGeometry").as_bool()
@@ -391,6 +398,11 @@ pub fn register(vm: &mut Vm<'_>) {
         if let Some(o) = this {
             let new = a[0].as_byte();
             if get(vm, o, "Physics").as_byte() != new {
+                if get(vm, o, "AttachTag").as_name() != Name::NONE {
+                    let who = hp3_script::natives::object_path(vm, o);
+                    let old_physics = get(vm, o, "Physics").as_byte();
+                    vm.log.push(format!("physics: {who} {old_physics} -> {new}"));
+                }
                 set(vm, o, "Physics", Value::Byte(new));
                 if matches!(new, 2 | 3 | 4 | 6 | 7 | 8 | 10 | 11 | 13 | 14) && get(vm, o, "Base").as_obj().is_some() {
                     set_base(vm, o, None, false);
