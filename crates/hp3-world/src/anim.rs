@@ -188,6 +188,30 @@ pub fn actor_matrix(vm: &mut Vm<'_>, a: ObjId) -> glam::Mat4 {
     glam::Mat4::from_translation(loc + prepivot) * hp3_anim::rotator_matrix(rot) * glam::Mat4::from_scale(s3 * scale)
 }
 
+/// The root bone, and the head and feet when the skeleton has them, for the game log: where each is against the
+/// pawn and which way its up axis points (to see how a pose leans).
+pub fn pose_debug(vm: &mut Vm<'_>, a: ObjId) -> String {
+    let Some(mesh) = get(vm, a, "Mesh").as_obj() else { return String::new() };
+    let Some(skel) = skeleton_of(vm, mesh) else { return String::new() };
+    let origin = crate::physics::vec(&get(vm, a, "Location"));
+    let mut names: Vec<String> = skel.skeleton.names.iter().take(1).cloned().collect();
+    for want in ["bip01 head", "head", "bip01 l foot", "bip01 r foot", "bip01 spine", "bip01 spine1"] {
+        if skel.skeleton.find(want).is_some() {
+            names.push(want.to_string());
+        }
+    }
+    let mut out = String::new();
+    for n in names {
+        if let Some(m) = bone_matrix(vm, a, &n) {
+            let at = m.w_axis.truncate() - origin;
+            let up = m.z_axis.truncate().normalize_or_zero();
+            let fwd = m.x_axis.truncate().normalize_or_zero();
+            out += &format!(" [{n} at ({:.0},{:.0},{:.0}) x ({:.2},{:.2},{:.2}) z ({:.2},{:.2},{:.2})]", at.x, at.y, at.z, fwd.x, fwd.y, fwd.z, up.x, up.y, up.z);
+        }
+    }
+    out
+}
+
 /// A bone's current transform in world space (scale included), from the actor's animation channel 0.
 pub fn bone_matrix(vm: &mut Vm<'_>, a: ObjId, bone: &str) -> Option<glam::Mat4> {
     let mesh = get(vm, a, "Mesh").as_obj()?;

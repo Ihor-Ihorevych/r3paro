@@ -18,6 +18,7 @@ pub struct GameLog {
     cursor: Option<hp3_script::ObjId>,
     last_cursor: String,
     last_emitter_log: u128,
+    last_pose_log: u128,
 }
 
 impl GameLog {
@@ -26,7 +27,7 @@ impl GameLog {
             .ok()
             .and_then(|_| std::fs::File::create(root.join("logs").join("game.log")).ok())
             .map(std::io::BufWriter::new);
-        GameLog { file, started: Instant::now(), last_second: 0, written: 0, last_pawn: String::new(), cursor: None, last_cursor: String::new(), last_emitter_log: 0 }
+        GameLog { file, started: Instant::now(), last_second: 0, written: 0, last_pawn: String::new(), cursor: None, last_cursor: String::new(), last_emitter_log: 0, last_pose_log: 0 }
     }
 
     fn line(&mut self, text: &str) {
@@ -76,6 +77,29 @@ impl GameLog {
                 .collect();
             format!("{path} controller {ctl} state {state} phys {phys} at {at} rot {rot:?} vel {vel} accel {accel} anims [{}]", channels.join(" | "))
         };
+        // While hanging from a Carpe Retractum line: the pose every 0.15 s, to see how the body leans.
+        if let Some(p) = pawn
+            && vm.state_of(p).map(|s| vm.db.names.get(vm.db.get(s).name).to_string()).is_some_and(|n| n.contains("Retractum"))
+            && self.started.elapsed().as_millis() / 150 != self.last_pose_log
+        {
+            self.last_pose_log = self.started.elapsed().as_millis() / 150;
+            let rot: Vec<i32> = hp3_world::get(vm, p, "Rotation").fields().iter().map(hp3_script::Value::as_int).collect();
+            let phys = hp3_world::get(vm, p, "Physics").as_byte();
+            let roll_to = hp3_world::get(vm, p, "bRollToDesired").as_bool();
+            let pose = hp3_world::anim::pose_debug(vm, p);
+            let set = hp3_world::anim::set_of(vm, p);
+            let chans = hp3_world::world(vm).anim.actors.get(&p).map(|x| x.channels.clone()).unwrap_or_default();
+            let anims: Vec<String> = chans
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.sequence.is_some() && c.alpha > 0.001)
+                .map(|(i, c)| {
+                    let n = c.sequence.and_then(|s| set.as_ref().map(|set| set.sequences[s].name.clone())).unwrap_or_default();
+                    format!("ch{i} {n} a{:.2} f{:.1}", c.alpha, c.frame)
+                })
+                .collect();
+            self.line(&format!("HANG rot {rot:?} phys {phys} rollToDesired {roll_to} anims [{}] bones{pose}", anims.join(" | ")));
+        }
         // A change of the controlled pawn is written at once, the rest once a second.
         let now = pawn.map(|p| hp3_script::natives::object_path(vm, p)).unwrap_or_default();
         if now != self.last_pawn {
