@@ -212,11 +212,20 @@ pub fn exec(vm: &mut Vm<'_>, pc: ObjId, cmd: &str) {
     let args: Vec<Value> = words.map(|w| Value::Str(w.to_string())).collect();
     let targets = [Some(pc), get(vm, pc, "Pawn").as_obj(), get(vm, pc, "myHUD").as_obj()];
     for t in targets.into_iter().flatten() {
-        let Some(n) = vm.db.names.find(name) else { return };
+        let Some(n) = vm.db.names.find(name) else { break };
         if vm.find_function(Some(t), None, n).is_some() {
+            let path = hp3_script::natives::object_path(vm, t);
             let mut a = args.clone();
-            crate::fire(vm, t, name, &mut a);
+            let result = crate::fire(vm, t, name, &mut a);
+            vm.log.push(format!("exec: {cmd} on {path} -> {result:?}"));
+            if name.eq_ignore_ascii_case("EndCreaturePossess") {
+                let kw = get(vm, pc, "KWPawn").as_obj().map(|o| hp3_script::natives::object_path(vm, o));
+                let pawn = get(vm, pc, "Pawn").as_obj().map(|o| hp3_script::natives::object_path(vm, o));
+                let main = get(vm, pc, "Pawn").as_obj().map(|o| get(vm, o, "bIsMainPlayer").as_bool());
+                vm.log.push(format!("exec: EndCreaturePossess: controller KWPawn {kw:?}, Pawn {pawn:?}, bIsMainPlayer {main:?}"));
+            }
             return;
         }
     }
+    vm.log.push(format!("exec: {cmd}: no such function on the controller, its pawn or the HUD"));
 }

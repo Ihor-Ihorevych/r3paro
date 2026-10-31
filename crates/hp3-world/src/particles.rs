@@ -340,7 +340,10 @@ pub fn own_emitters(vm: &mut Vm<'_>, a: ObjId) {
         });
         own.push(copy.map_or(e.clone(), |c| Value::Object(Some(c))));
     }
+    let count = own.len();
     set(vm, a, "Emitters", Value::Array(own.into()));
+    let path = hp3_script::natives::object_path(vm, a);
+    vm.log.push(format!("emitter spawned: {path} with {count} emitters"));
 }
 
 /// Steps every emitter actor's emitters by `dt`.
@@ -583,6 +586,8 @@ pub fn register(vm: &mut Vm<'_>) {
     // Emitter.Kill(): stop all emission, let what is on screen fade, and destroy the actor when it is empty.
     vm.register("Emitter.Kill", |vm, this, _a| {
         let Some(actor) = this else { return Ok(Value::Empty) };
+        let path = hp3_script::natives::object_path(vm, actor);
+        vm.log.push(format!("emitter killed: {path}"));
         if let Value::Array(emitters) = get(vm, actor, "Emitters") {
             for e in emitters.iter().filter_map(Value::as_obj) {
                 for name in ["RespawnDeadParticles", "AutomaticInitialSpawning", "AutoReset", "AutoDestroy"] {

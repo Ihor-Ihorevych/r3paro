@@ -27,7 +27,7 @@ fn key_name(sc: Scancode) -> Option<String> {
     let name = sc.name();
     Some(match sc {
         Scancode::Space => "Space".into(),
-        Scancode::Return => "Enter".into(),
+        Scancode::Return | Scancode::KpEnter => "Enter".into(),
         Scancode::Escape => "Escape".into(),
         Scancode::Tab => "Tab".into(),
         Scancode::Backspace => "Backspace".into(),

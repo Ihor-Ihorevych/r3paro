@@ -59,7 +59,18 @@ impl GameLog {
             let vel = vec(&hp3_world::get(vm, p, "Velocity"));
             let accel = vec(&hp3_world::get(vm, p, "Acceleration"));
             let ctl = hp3_world::get(vm, p, "Controller").as_obj().map(|c| hp3_script::natives::object_path(vm, c)).unwrap_or_default();
-            format!("{path} controller {ctl} state {state} phys {phys} at {at} rot {rot:?} vel {vel} accel {accel}")
+            let set = hp3_world::anim::set_of(vm, p);
+            let chans = hp3_world::world(vm).anim.actors.get(&p).map(|x| x.channels.clone()).unwrap_or_default();
+            let channels: Vec<String> = chans
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.sequence.is_some() && c.alpha > 0.001)
+                .map(|(i, c)| {
+                    let n = c.sequence.and_then(|s| set.as_ref().map(|set| set.sequences[s].name.clone())).unwrap_or_default();
+                    format!("ch{i} {n} a{:.2} f{:.1}", c.alpha, c.frame)
+                })
+                .collect();
+            format!("{path} controller {ctl} state {state} phys {phys} at {at} rot {rot:?} vel {vel} accel {accel} anims [{}]", channels.join(" | "))
         };
         // A change of the controlled pawn is written at once, the rest once a second.
         let now = pawn.map(|p| hp3_script::natives::object_path(vm, p)).unwrap_or_default();
