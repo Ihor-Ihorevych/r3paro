@@ -121,7 +121,13 @@ impl<'s> Loader<'s> {
             (format, palette, (masked, translucent))
         })?;
         let format = Format::from_u8(format)?;
-        let Asset::Texture(tex) = &*self.asset(pkg, index)? else { return None };
+        // A procedural texture (fire, water...) keeps the picture it was saved with, which stands in for it.
+        let asset = self.asset(pkg, index)?;
+        let tex = match &*asset {
+            Asset::Texture(t) => t,
+            Asset::Procedural(p) => &p.texture,
+            _ => return None,
+        };
         let mip = tex.mips.first()?;
         let palette = match palette_ref.and_then(|p| self.set.resolve(pkg, p)) {
             Some((ppkg, pi)) => match self.asset(&ppkg, pi).as_deref() {
@@ -133,8 +139,26 @@ impl<'s> Loader<'s> {
         let data = pkg.data.get(mip.data_offset..mip.data_offset + mip.data_len)?;
         let (w, h) = (mip.width as usize, mip.height as usize);
         let mut rgba = texture::decode_rgba(format, w, h, data, palette.as_ref())?;
+        // A procedural texture saved with an empty picture (a fire spark: the engine draws its sparks at run time)
+        // is shown as a soft round glow in the colours of its palette, dark at the edge to bright at the middle.
+        let blank_procedural = matches!(&*asset, Asset::Procedural(_)) && format == Format::P8 && data.iter().take(w * h).all(|&b| b == 0);
+        if blank_procedural
+            && let Some(pal) = palette.as_ref().filter(|p| p.colors.len() >= 2)
+        {
+            for y in 0..h {
+                for x in 0..w {
+                    let (dx, dy) = ((x as f32 + 0.5) / w as f32 * 2.0 - 1.0, (y as f32 + 0.5) / h as f32 * 2.0 - 1.0);
+                    let glow = (1.0 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0).powi(2);
+                    let c = pal.colors[((glow * (pal.colors.len() - 1) as f32) as usize).min(pal.colors.len() - 1)];
+                    let o = (y * w + x) * 4;
+                    rgba[o..o + 4].copy_from_slice(&[c.r, c.g, c.b, (glow * 255.0) as u8]);
+                }
+            }
+        }
         let (masked, translucent) = masked;
-        let masked = masked || (format == Format::P8 && palette.is_some_and(|p| p.colors.first().is_some_and(|c| c.a == 0)));
+        let masked = masked && !blank_procedural;
+        let translucent = translucent || blank_procedural;
+        let masked = !blank_procedural && (masked || (format == Format::P8 && palette.is_some_and(|p| p.colors.first().is_some_and(|c| c.a == 0))));
         // Masked palettised textures: index 0 is transparent whatever its color (often a key color).
         if masked && format == Format::P8 {
             for (i, &index) in data.iter().take(w * h).enumerate() {
@@ -207,7 +231,10 @@ impl<'s> Loader<'s> {
                     }
                 }
                 None
-            })??;
+            })
+            .flatten();
+            // A procedural texture with no image to work on is its own baked picture.
+            let Some(next) = next else { return procedural.then_some((p, i)) };
             let (np, ni) = self.set.resolve(&p, next)?;
             p = np;
             i = ni;
