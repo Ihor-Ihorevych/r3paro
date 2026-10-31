@@ -174,6 +174,9 @@ pub fn move_actor(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<Hit> {
             }
         }
         let Some(out) = freed else { break };
+        if player {
+            vm.log.push(format!("nudge: pushed out of a surface with normal ({:.2},{:.2},{:.2}) by {:.2}", h.normal.x, h.normal.y, h.normal.z, (out - loc).length()));
+        }
         loc = out;
         set(vm, a, "Location", value(loc));
         hit = world(vm).collision.trace_for(how, loc, loc + delta, ext, Some(a));
@@ -603,8 +606,11 @@ fn step_up(vm: &mut Vm<'_>, a: ObjId, delta: Vec3, hit: Hit, depth: u32) {
     if depth == 0 && is_player_pawn(vm, a) {
         let end = vec(&get(vm, a, "Location"));
         if (end - start).truncate().length() < 1.0 && (end.z - start.z).abs() < 1.0 {
+            let (velocity, acceleration) = (vec(&get(vm, a, "Velocity")), vec(&get(vm, a, "Acceleration")));
             vm.log.push(format!(
-                "stepup failed at {start}: face ({:.2},{:.2},{:.2}) time {:.3} steppable {steppable} wanted {delta} lifted {lifted:.1} across {across} then {}",
+                "stepup failed at {start}: velocity {} accel {} face ({:.2},{:.2},{:.2}) time {:.3} steppable {steppable} wanted {delta} lifted {lifted:.1} across {across} then {}",
+                velocity,
+                acceleration,
                 hit.normal.x,
                 hit.normal.y,
                 hit.normal.z,
