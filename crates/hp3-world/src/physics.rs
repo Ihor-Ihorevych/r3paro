@@ -125,6 +125,15 @@ pub fn move_actor(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<Hit> {
     // How much of the move is already made (moving off a surface the box starts inside).
     let mut made = 0.0f32;
     let mut hit = world(vm).collision.trace_for(how, loc, loc + delta, ext, Some(a));
+    // A box that only touches a surface and moves along it (up the face of a riser) is not stopped by it. Swept
+    // again with a box a hair smaller, the touch is gone and only what really lies in the way remains.
+    if let Some(h) = hit
+        && h.time * whole <= 0.02
+        && delta.dot(h.normal) >= -1e-3 * whole
+    {
+        let smaller = Vec3::new((ext.x - 0.2).max(0.5), (ext.y - 0.2).max(0.5), (ext.z - 0.2).max(0.5));
+        hit = world(vm).collision.trace_for(how, loc, loc + delta, smaller, Some(a));
+    }
     // Blocked before moving at all: the box overlaps what it touches by a hair (a sloped hull, a rounding of the
     // last step). Nudge it out along the contact's normal, as far as it takes to be clear (a few tries), and
     // sweep again, so a pawn does not stay glued to a surface it only grazes.
