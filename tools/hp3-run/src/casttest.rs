@@ -255,11 +255,11 @@ pub fn step(vm: &mut Vm<'_>, t: &mut CastTest, frame: u32) {
         if r == tap {
             hp3_world::world(vm).input.key_down("LeftMouse");
         }
-        if r == tap + 6 {
+        if r == tap + std::env::var("HP3_CAST_TAPHOLD").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(6) {
             hp3_world::world(vm).input.key_up("LeftMouse");
         }
     }
-    if std::env::var_os("HP3_CAST_STATES").is_some() && r >= 30 && r <= 150 && r % 8 == 0 {
+    if std::env::var_os("HP3_CAST_STATES").is_some() && r >= 30 && r <= 600 && r % 8 == 0 {
         println!("cast: r={r} harry state {} bJustCast {}", state_name(vm, pawn), get(vm, pawn, "bJustCast").as_bool());
     }
     if (100..=200).contains(&r) && r % 2 == 0 {

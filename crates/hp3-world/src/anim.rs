@@ -653,7 +653,8 @@ fn tween_arg(a: &[Value], i: usize) -> f32 {
 fn handles_anim_end(vm: &mut Vm<'_>, c: ObjId) -> bool {
     let Some(n) = vm.db.names.find("AnimEnd") else { return false };
     let Some(f) = vm.find_function(Some(c), None, n) else { return false };
-    !vm.function_path(f).to_ascii_lowercase().starts_with("engine.")
+    // A controller that defines nothing of its own gets the empty event of Actor.
+    !vm.function_path(f).eq_ignore_ascii_case("Actor.AnimEnd")
 }
 
 /// Ends the waits of `FinishAnim` calls on this actor's channel.

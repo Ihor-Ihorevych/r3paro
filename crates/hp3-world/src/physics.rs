@@ -487,17 +487,57 @@ fn find_ledge(col: &crate::collision::Collision, l: &Ledge) -> Option<Vec3> {
 }
 
 fn fall(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
-    let accel = vec(&get(vm, a, "Acceleration"));
-    let mut vel = vec(&get(vm, a, "Velocity"));
-    let air = get(vm, a, "AirControl").as_float();
-    vel += Vec3::new(accel.x, accel.y, 0.0) * air * dt;
-    vel.z += gravity(vm, a) * dt;
+    // What the pawn can steer by in the air: a part of its ground acceleration, none when the way ahead is a
+    // wall (so air control cannot be used to climb it), and only enough to keep its sideways speed once that
+    // is at the ground speed.
+    let mut accel = vec(&get(vm, a, "Acceleration"));
+    accel.z = 0.0;
+    let vel0 = vec(&get(vm, a, "Velocity"));
+    let (accel_rate, ground_speed) = (get(vm, a, "AccelRate").as_float(), get(vm, a, "GroundSpeed").as_float());
+    let mut air = get(vm, a, "AirControl").as_float();
+    if air > 0.05 && dt > 0.0 {
+        let mut ahead = (accel.normalize_or_zero() * air * accel_rate + vel0) * dt;
+        ahead.z = 0.0;
+        let (loc, ext) = (vec(&get(vm, a, "Location")), extent(vm, a));
+        if world(vm).collision.trace_static(loc, loc + ahead, ext).is_some() {
+            air = 0.0;
+        }
+    }
+    let mut max_accel = accel_rate * air;
+    let speed2d = vel0.truncate().length();
+    let mut bound = 0.0;
+    if speed2d < 10.0 && air > 0.0 && dt > 0.0 {
+        max_accel += (10.0 - speed2d) / dt;
+    } else if speed2d >= ground_speed {
+        if air <= 0.05 {
+            max_accel = 1.0;
+        } else {
+            bound = speed2d;
+        }
+    }
+    if accel.length_squared() > max_accel * max_accel {
+        accel = accel.normalize_or_zero() * max_accel;
+    }
     // A pawn can be pushed by a steady acceleration of its own (Carpe Retractum pulls with it) on top of gravity.
-    vel += vec(&get(vm, a, "ConstantAcceleration")) * dt;
+    let push = vec(&get(vm, a, "ConstantAcceleration"));
+    let g = Vec3::new(0.0, 0.0, gravity(vm, a));
     let terminal = 4000.0;
-    vel.z = vel.z.max(-terminal);
-    set(vm, a, "Velocity", value(vel));
-    if let Some(hit) = move_and_slide(vm, a, vel * dt) {
+    // Slices of at most 0.05 s, so a long frame lands and bounces off walls like a short one.
+    let mut left = dt;
+    for _ in 0..8 {
+        if left <= 0.0 {
+            break;
+        }
+        let tick = if left > 0.05 { 0.05f32.min(left * 0.5) } else { left };
+        left -= tick;
+        let mut vel = vec(&get(vm, a, "Velocity")) + (accel + g + push) * tick;
+        vel.z = vel.z.max(-terminal);
+        if bound != 0.0 && vel.truncate().length_squared() > bound * bound {
+            let flat = vel.truncate().normalize_or_zero() * bound;
+            vel = Vec3::new(flat.x, flat.y, vel.z);
+        }
+        set(vm, a, "Velocity", value(vel));
+        let Some(hit) = move_and_slide(vm, a, vel * tick) else { continue };
         if hit.normal.z >= WALKABLE_Z {
             let mut v = vec(&get(vm, a, "Velocity"));
             fire(vm, a, "Landed", &mut [value(hit.normal)]);
@@ -506,7 +546,10 @@ fn fall(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
             }
             v.z = 0.0;
             set(vm, a, "Velocity", value(v));
-        } else if !try_mount(vm, a, Vec3::Z, &hit) {
+            return;
+        } else if try_mount(vm, a, Vec3::Z, &hit) {
+            return;
+        } else {
             fire(vm, a, "HitWall", &mut [value(hit.normal), Value::Object(hit.actor)]);
         }
     }
@@ -588,44 +631,209 @@ fn indexed_rot(vm: &mut Vm<'_>, a: ObjId, name: &str, i: usize) -> [i32; 3] {
 
 /// Movers between keyframes (`InterpolateTo`): from key `PrevKeyNum` to `KeyNum` as `PhysAlpha` goes from 0
 /// to 1 at `PhysRate`, gliding (eased) or moving evenly by `MoverGlideType`; `InterpolateEnd` at the end.
-fn moving_brush(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
-    if !get(vm, a, "bInterpolating").as_bool() {
-        return;
-    }
-    let rate = get(vm, a, "PhysRate").as_float();
-    let alpha = (get(vm, a, "PhysAlpha").as_float() + rate * dt).min(1.0);
-    set(vm, a, "PhysAlpha", Value::Float(alpha));
-    let f = if get(vm, a, "MoverGlideType").as_byte() == 1 { alpha * alpha * (3.0 - 2.0 * alpha) } else { alpha };
-    let (prev, key) = (get(vm, a, "PrevKeyNum").as_byte() as usize, get(vm, a, "KeyNum").as_byte() as usize);
-    let base = vec(&get(vm, a, "BasePos"));
-    let (p0, p1) = (indexed_vec(vm, a, "KeyPos", prev), indexed_vec(vm, a, "KeyPos", key));
-    let old = vec(&get(vm, a, "Location"));
-    let pos = base + p0.lerp(p1, f);
-    let br: Vec<i32> = get(vm, a, "BaseRot").fields().iter().map(Value::as_int).collect();
-    let (r0, r1) = (indexed_rot(vm, a, "KeyRot", prev), indexed_rot(vm, a, "KeyRot", key));
-    let rot: Vec<Value> = (0..3)
-        .map(|i| Value::Int(br.get(i).copied().unwrap_or(0) + r0[i] + ((r1[i] - r0[i]) as f32 * f).round() as i32))
-        .collect();
-    set(vm, a, "Location", value(pos));
-    set(vm, a, "Rotation", Value::Struct(rot.into()));
-    // Actors standing on the mover ride along.
-    let delta = pos - old;
-    if delta != Vec3::ZERO {
-        let riders: Vec<ObjId> = world(vm).actors.iter().copied().filter(|&r| r != a).collect();
-        for r in riders {
-            if get(vm, r, "Base").as_obj() == Some(a) {
-                let p = vec(&get(vm, r, "Location"));
-                set(vm, r, "Location", value(p + delta));
-            }
-        }
-    }
+fn rotator_ints(v: &Value) -> [i32; 3] {
+    let f = v.fields();
+    [0, 1, 2].map(|i| f.get(i).map(Value::as_int).unwrap_or(0))
+}
+
+fn rotator_value(r: [i32; 3]) -> Value {
+    Value::Struct(Box::new(r.map(Value::Int)))
+}
+
+/// Puts a mover's collision shape where the actor now is.
+fn place_mover_shape(vm: &mut Vm<'_>, a: ObjId) {
     let t = crate::mover_transform(vm, a);
     if let Some(m) = world(vm).collision.movers.iter_mut().find(|m| m.actor == a) {
         m.place(t);
     }
-    if alpha >= 1.0 {
-        set(vm, a, "bInterpolating", Value::Bool(false));
-        fire(vm, a, "InterpolateEnd", &mut [Value::Object(None)]);
+}
+
+/// The rotation a mover has at fraction `f` of its way from where it started (`OldRot`) to its key's rotation.
+/// With `bUseShortestRotation` each angle takes the short way round, and a leftover under 10 units is ignored.
+fn mover_rotation(vm: &mut Vm<'_>, a: ObjId, f: f32, done: bool) -> [i32; 3] {
+    let old = rotator_ints(&get(vm, a, "OldRot"));
+    let key = get(vm, a, "KeyNum").as_byte() as usize;
+    let (base, k) = (rotator_ints(&get(vm, a, "BaseRot")), indexed_rot(vm, a, "KeyRot", key));
+    let shortest = get(vm, a, "bUseShortestRotation").as_bool();
+    if shortest && done {
+        return k;
+    }
+    [0, 1, 2].map(|i| {
+        let goal = if shortest { (base[i] & 0xFFFF) + k[i] } else { base[i] + k[i] };
+        let mut d = goal - old[i];
+        if shortest {
+            d = (d + 32768).rem_euclid(65536) - 32768;
+            if d.abs() < 10 {
+                d = 0;
+            }
+        }
+        old[i] + (d as f32 * f) as i32
+    })
+}
+
+/// Whether `other` is something a mover has to deal with when it moves into it: it blocks the mover's kind of
+/// actor, is not part of the level's fixed decoration and is not riding the mover (or carrying it).
+fn can_be_encroached(vm: &mut Vm<'_>, mover: ObjId, other: ObjId) -> bool {
+    if other == mover || vm.db.objects.get(other).deleted || Some(other) == world(vm).level_info {
+        return false;
+    }
+    if !get(vm, other, "bCollideActors").as_bool() || !get(vm, other, "bBlockActors").as_bool() {
+        return false;
+    }
+    if stands_on(vm, other, mover) || stands_on(vm, mover, other) || world(vm).collision.mover(other).is_some() {
+        return false;
+    }
+    let class = vm.db.objects.get(other).class;
+    !vm.db.find("StaticMeshActor").is_some_and(|sm| class.is_some_and(|c| vm.is_child_of(c, sm)))
+}
+
+/// Actors that overlap the mover where it now is, among those it has to deal with.
+fn encroached_by(vm: &mut Vm<'_>, a: ObjId) -> Vec<ObjId> {
+    // Only blocking actors near the mover can be in its way (their boxes are kept for the frame).
+    let at = vec(&get(vm, a, "Location"));
+    let reach = world(vm).collision.mover(a).map_or(0.0, |m| m.reach());
+    let near: Vec<ObjId> = world(vm)
+        .collision
+        .actors
+        .iter()
+        .filter(|b| b.center.distance(at) <= reach + b.extent.length())
+        .map(|b| b.actor)
+        .collect();
+    let mut found = Vec::new();
+    for o in near {
+        if !can_be_encroached(vm, a, o) {
+            continue;
+        }
+        let (at, ext) = (vec(&get(vm, o, "Location")), extent(vm, o));
+        if world(vm).collision.mover(a).is_some_and(|m| m.overlaps(at, ext)) {
+            found.push(o);
+        }
+    }
+    found
+}
+
+/// Whether the mover may take the step to `to`/`rot`: every actor in its way is first pushed along with it, and
+/// if one is still in the way the mover's own `EncroachingOn` decides (true: the step is refused). Actors it
+/// does end up overlapping are told with `EncroachedBy`.
+fn clear_way(vm: &mut Vm<'_>, a: ObjId, from: Vec3, to: Vec3, rot: [i32; 3]) -> bool {
+    let old_rot = rotator_ints(&get(vm, a, "Rotation"));
+    set(vm, a, "Location", value(to));
+    set(vm, a, "Rotation", rotator_value(rot));
+    place_mover_shape(vm, a);
+    let in_way = encroached_by(vm, a);
+    // Pushing happens with the mover where it still is.
+    set(vm, a, "Location", value(from));
+    set(vm, a, "Rotation", rotator_value(old_rot));
+    place_mover_shape(vm, a);
+    for &o in &in_way {
+        move_and_slide(vm, o, to - from);
+    }
+    set(vm, a, "Location", value(to));
+    set(vm, a, "Rotation", rotator_value(rot));
+    place_mover_shape(vm, a);
+    let mut refused = false;
+    for &o in &in_way {
+        if !encroached_by(vm, a).contains(&o) {
+            continue;
+        }
+        if fire(vm, a, "EncroachingOn", &mut [Value::Object(Some(o))]).as_bool() {
+            refused = true;
+            break;
+        }
+    }
+    if refused {
+        set(vm, a, "Location", value(from));
+        set(vm, a, "Rotation", rotator_value(old_rot));
+        place_mover_shape(vm, a);
+        return false;
+    }
+    for o in encroached_by(vm, a) {
+        fire(vm, o, "EncroachedBy", &mut [Value::Object(Some(a))]);
+    }
+    true
+}
+
+/// Carries what rides on the mover along its step: the same shift, plus the swing a rotation gives a rider at
+/// some distance from the pivot, and the turn itself for the rider's heading.
+fn carry_riders(vm: &mut Vm<'_>, a: ObjId, from: Vec3, delta: Vec3, old_rot: [i32; 3], new_rot: [i32; 3]) {
+    use hp3_script::natives::rot_axes;
+    let riders: Vec<ObjId> = world(vm).actors.iter().copied().filter(|&r| r != a).collect();
+    let (o, n) = (rot_axes(old_rot), rot_axes(new_rot));
+    let turn = [0, 1, 2].map(|i| ((new_rot[i] & 0xFFFF) - (old_rot[i] & 0xFFFF) + 32768).rem_euclid(65536) - 32768);
+    for r in riders {
+        if get(vm, r, "Base").as_obj() != Some(a) || vm.db.objects.get(r).deleted {
+            continue;
+        }
+        let rel = vec(&get(vm, r, "Location")) - from;
+        let mut shift = delta;
+        if old_rot != new_rot {
+            let along = |axis: [f32; 3]| Vec3::from(axis);
+            let swung = along(n[0]) * along(o[0]).dot(rel) + along(n[1]) * along(o[1]).dot(rel) + along(n[2]) * along(o[2]).dot(rel);
+            shift += swung - rel;
+            let mut heading = rotator_ints(&get(vm, r, "Rotation"));
+            let pawn = is_pawn(vm, r);
+            for i in 0..3 {
+                if !(pawn && i == 2) {
+                    heading[i] += turn[i];
+                }
+            }
+            set(vm, r, "Rotation", rotator_value(heading));
+            if pawn && let Some(c) = get(vm, r, "Controller").as_obj() {
+                let mut cr = rotator_ints(&get(vm, c, "Rotation"));
+                cr[0] += turn[0];
+                cr[1] += turn[1];
+                set(vm, c, "Rotation", rotator_value(cr));
+            }
+        }
+        move_and_slide(vm, r, shift);
+    }
+}
+
+/// Movers between keyframes (`InterpolateTo` sets `OldPos`/`OldRot`, `PhysAlpha` 0, `PhysRate`): they go from
+/// where they started to the key's place as `PhysAlpha` runs to 1, gliding (eased) or moving evenly by
+/// `MoverGlideType`. What is in the way is pushed or may refuse the step (`EncroachingOn`); what rides the mover
+/// is carried; arriving clears `bInterpolating` and raises `KeyFrameReached`.
+fn moving_brush(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
+    if !get(vm, a, "bInterpolating").as_bool() {
+        return;
+    }
+    let started = vec(&get(vm, a, "Location"));
+    let mut left = dt;
+    while get(vm, a, "bInterpolating").as_bool() && left > 0.0 {
+        let rate = get(vm, a, "PhysRate").as_float();
+        let from_alpha = get(vm, a, "PhysAlpha").as_float();
+        let mut alpha = from_alpha + left * rate;
+        if alpha > 1.0 {
+            // The step's remainder carries on after the arrival; the time used is only up to it.
+            left *= (alpha - 1.0) / (alpha - from_alpha);
+            alpha = 1.0;
+        } else {
+            left = 0.0;
+        }
+        let f = if get(vm, a, "MoverGlideType").as_byte() == 1 { alpha * alpha * (3.0 - 2.0 * alpha) } else { alpha };
+        let key = get(vm, a, "KeyNum").as_byte() as usize;
+        let (old_pos, goal) = (vec(&get(vm, a, "OldPos")), vec(&get(vm, a, "BasePos")) + indexed_vec(vm, a, "KeyPos", key));
+        let to = old_pos + (goal - old_pos) * f;
+        let rot = mover_rotation(vm, a, f, alpha >= 1.0);
+        let here = vec(&get(vm, a, "Location"));
+        let here_rot = rotator_ints(&get(vm, a, "Rotation"));
+        if !clear_way(vm, a, here, to, rot) {
+            // Turned back by what is in the way: the alpha stays and it tries again next time.
+            break;
+        }
+        carry_riders(vm, a, here, to - here, here_rot, rot);
+        set(vm, a, "PhysAlpha", Value::Float(alpha));
+        if alpha >= 1.0 {
+            set(vm, a, "bInterpolating", Value::Bool(false));
+            let mut v = vec(&get(vm, a, "Velocity"));
+            v.z = v.z.max(rate * (goal.z - old_pos.z));
+            set(vm, a, "Velocity", value(v));
+            fire(vm, a, "KeyFrameReached", &mut []);
+        }
+    }
+    let moved = vec(&get(vm, a, "Location")) - started;
+    if dt > 0.0 {
+        set(vm, a, "Velocity", value(moved / dt));
     }
 }
 
