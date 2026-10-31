@@ -130,11 +130,16 @@ pub fn move_actor(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<Hit> {
         if moving_away {
             break;
         }
-        let out = loc + h.normal * 0.4;
-        let clear = world(vm).collision.trace_for(how, out + Vec3::Z * 0.01, out, ext, Some(a)).is_none_or(|c| c.time > 0.0);
-        if !clear {
-            break;
+        // A pawn sunk further into a surface needs a bigger push: try 0.4, then 1, 2, 4 and 8 units.
+        let mut freed = None;
+        for push in [0.4f32, 1.0, 2.0, 4.0, 8.0] {
+            let out = loc + h.normal * push;
+            if world(vm).collision.trace_for(how, out + Vec3::Z * 0.01, out, ext, Some(a)).is_none_or(|c| c.time > 0.0) {
+                freed = Some(out);
+                break;
+            }
         }
+        let Some(out) = freed else { break };
         loc = out;
         set(vm, a, "Location", value(loc));
         hit = world(vm).collision.trace_for(how, loc, loc + delta, ext, Some(a));
@@ -333,8 +338,8 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         let before = vec(&get(vm, a, "Location"));
         if delta.length_squared() > 1e-8 {
             let hit = move_actor(vm, a, delta);
-            if std::env::var_os("HP3_WALK_DEBUG").is_some() && human {
-                eprintln!("walk: step {delta} from {before} hit {:?}", hit.map(|h| (h.time, h.normal, h.actor.map(|o| o.0))));
+            if std::env::var_os("HP3_WALK_DEBUG").is_some_and(|v| human || v == "all") {
+                eprintln!("walk: {} step {delta} from {before} hit {:?}", hp3_script::natives::object_path(vm, a), hit.map(|h| (h.time, h.normal, h.actor.map(|o| o.0))));
             }
             if let Some(hit) = hit
                 && hit.normal.z < WALKABLE_Z
