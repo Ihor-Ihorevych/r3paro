@@ -125,7 +125,42 @@ pub fn move_actor(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<Hit> {
     let hit = world(vm).collision.trace_for(how, loc, loc + delta, ext, Some(a));
     let time = hit.map(|h| h.time).unwrap_or(1.0);
     set(vm, a, "Location", value(loc + delta * time));
+    // Running into an actor (not the level's geometry, not what it stands on) bumps both of them.
+    if let Some(other) = hit.and_then(|h| h.actor)
+        && !get(vm, other, "bWorldGeometry").as_bool()
+        && !stands_on(vm, a, other)
+    {
+        notify_bump(vm, other, a);
+        notify_bump(vm, a, other);
+    }
     hit
+}
+
+/// Whether `a` is based (directly or through other bases) on `other`.
+fn stands_on(vm: &mut Vm<'_>, a: ObjId, other: ObjId) -> bool {
+    let mut at = get(vm, a, "Base").as_obj();
+    for _ in 0..16 {
+        match at {
+            Some(b) if b == other => return true,
+            Some(b) => at = get(vm, b, "Base").as_obj(),
+            None => return false,
+        }
+    }
+    false
+}
+
+/// `who` was run into by `other`: a pawn's controller hears `NotifyBump` first and may take it; otherwise `Bump`.
+fn notify_bump(vm: &mut Vm<'_>, who: ObjId, other: ObjId) {
+    if vm.db.objects.get(who).deleted || vm.db.objects.get(other).deleted {
+        return;
+    }
+    if is_pawn(vm, who)
+        && let Some(c) = get(vm, who, "Controller").as_obj()
+        && fire(vm, c, "NotifyBump", &mut [Value::Object(Some(other))]).as_bool()
+    {
+        return;
+    }
+    fire(vm, who, "Bump", &mut [Value::Object(Some(other))]);
 }
 
 /// Moves along `delta`, sliding along what it hits (at most twice).

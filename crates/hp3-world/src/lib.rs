@@ -885,6 +885,14 @@ fn build_collision(vm: &mut Vm<'_>, map: &Rc<Package>, model: Option<ObjRef>, ac
                     draw
                 );
             }
+            if std::env::var_os("HP3_COLLISION_STATS").is_some() {
+                eprintln!(
+                    "meshstats {} tris={} model={}",
+                    vm.db.names.get(vm.db.objects.get(mesh).name),
+                    sm.collision_triangles.len(),
+                    !sm.collision_model.is_none()
+                );
+            }
             if !sm.collision_triangles.is_empty() {
                 for t in &sm.collision_triangles {
                     let [a0, b0, c0] = t.vertices.map(|i| pos.get(i as usize).copied().unwrap_or(Vec3::ZERO));
