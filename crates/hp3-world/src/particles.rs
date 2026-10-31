@@ -355,12 +355,15 @@ pub fn own_emitters(vm: &mut Vm<'_>, a: ObjId) {
     let mut own = Vec::with_capacity(emitters.len());
     for e in emitters.iter() {
         let copy = e.as_obj().and_then(|o| {
-            // Reading a property loads the object if it is still lazy.
-            let _ = get(vm, o, "MaxParticles");
+            // The default emitter may not be loaded yet: bring it in before copying it.
+            vm.ensure_loaded(o);
             let entry = vm.db.objects.get(o).clone();
             let (class, values) = (entry.class?, vm.db.objects.values(o).cloned()?);
             Some(vm.db.objects.add(entry.name, class, values))
         });
+        if copy.is_none() {
+            vm.log.push(format!("emitter copy failed for {:?}", e.as_obj()));
+        }
         own.push(copy.map_or(e.clone(), |c| Value::Object(Some(c))));
     }
     let count = own.len();
