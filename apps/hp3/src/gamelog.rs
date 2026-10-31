@@ -102,31 +102,28 @@ impl GameLog {
                 .collect();
             self.line(&format!("HANG rot {rot:?} phys {phys} rollToDesired {roll_to} anims [{}] bones{pose}", anims.join(" | ")));
         }
-        // A pawn that pushes and does not move (for a third of a second, then once a second more): what is around it.
-        let mut blocked_now = false;
+        // A pawn that pushes and gets nowhere in the direction it pushes (under 15 units in half a second): what is
+        // around it, there and then.
         if let Some(p) = pawn {
             let accel = hp3_world::physics::vec(&hp3_world::get(vm, p, "Acceleration"));
-            let vel = hp3_world::physics::vec(&hp3_world::get(vm, p, "Velocity"));
             let phys = hp3_world::get(vm, p, "Physics").as_byte();
             let at = hp3_world::physics::vec(&hp3_world::get(vm, p, "Location"));
-            let _ = vel;
-            // Pushing, and not further than 3 units from where it was a third of a second ago.
-            if accel.length() > 100.0 && at.distance(self.anchor) < 3.0 {
-                blocked_now = phys == 1 || phys == 2;
+            if accel.truncate().length() > 100.0 && (phys == 1 || phys == 2) {
+                self.blocked_frames += 1;
+                if self.blocked_frames >= 30 {
+                    let dir = accel.truncate().normalize_or_zero();
+                    let progress = (at - self.anchor).truncate().dot(dir);
+                    if progress < 15.0 {
+                        let d = hp3_world::physics::debug_blocked(vm, p);
+                        self.line(&format!("BLOCKED phys {phys} at {at} progress {progress:.1} {d}"));
+                    }
+                    self.blocked_frames = 0;
+                    self.anchor = at;
+                }
             } else {
+                self.blocked_frames = 0;
                 self.anchor = at;
             }
-            if blocked_now {
-                self.blocked_frames += 1;
-                if self.blocked_frames == 20 || (self.blocked_frames > 20 && self.blocked_frames % 60 == 0) {
-                    let d = hp3_world::physics::debug_blocked(vm, p);
-                    let at = hp3_world::physics::vec(&hp3_world::get(vm, p, "Location"));
-                    self.line(&format!("BLOCKED phys {phys} at {at} {d}"));
-                }
-            }
-        }
-        if !blocked_now {
-            self.blocked_frames = 0;
         }
         // A change of the controlled pawn is written at once, the rest once a second.
         let now = pawn.map(|p| hp3_script::natives::object_path(vm, p)).unwrap_or_default();
