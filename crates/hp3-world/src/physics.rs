@@ -562,7 +562,7 @@ fn step_up(vm: &mut Vm<'_>, a: ObjId, delta: Vec3, hit: Hit, depth: u32) {
     }
     if depth == 0 && is_player_pawn(vm, a) {
         let end = vec(&get(vm, a, "Location"));
-        if (end - start).truncate().length() < 1.0 {
+        if (end - start).truncate().length() < 1.0 && (end.z - start.z).abs() < 1.0 {
             vm.log.push(format!(
                 "stepup failed at {start}: face ({:.2},{:.2},{:.2}) time {:.3} steppable {steppable} wanted {delta} lifted {lifted:.1} across {across} then {}",
                 hit.normal.x,
