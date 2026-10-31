@@ -111,16 +111,13 @@ pub fn move_actor(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<Hit> {
     }
     let ext = extent(vm, a);
     let player = is_player_pawn(vm, a);
-    // Pawns always collide with the level and with blocking actors; any other actor does so only with its
-    // `bCollideWorld` / `bBlockActors` (a spell flies through the creatures it touches).
-    let how = if is_pawn(vm, a) {
-        crate::collision::Mover { player, blocks_actors: true, collide_world: true }
-    } else {
-        crate::collision::Mover {
-            player,
-            blocks_actors: get(vm, a, "bBlockActors").as_bool(),
-            collide_world: get(vm, a, "bCollideWorld").as_bool(),
-        }
+    // The level stops an actor only with `bCollideWorld`, and other actors only with `bCollideActors` and
+    // `bBlockActors` (a spell flies through the creatures it touches, and a pawn in the middle of a climb has all
+    // of them off so it can pass through what it climbs).
+    let how = crate::collision::Mover {
+        player,
+        blocks_actors: get(vm, a, "bBlockActors").as_bool() && get(vm, a, "bCollideActors").as_bool(),
+        collide_world: get(vm, a, "bCollideWorld").as_bool(),
     };
     let hit = world(vm).collision.trace_for(how, loc, loc + delta, ext, Some(a));
     let time = hit.map(|h| h.time).unwrap_or(1.0);

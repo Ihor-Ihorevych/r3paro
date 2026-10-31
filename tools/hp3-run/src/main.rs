@@ -228,11 +228,17 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             let actors = hp3_world::world(&mut vm).actors.clone();
             for a in actors {
                 let path = hp3_script::natives::object_path(&mut vm, a);
-                if names.split(',').any(|n| path.ends_with(&format!(".{n}"))) {
+                if names.split(',').any(|n| path.ends_with(&format!(".{n}")) || n.strip_prefix('~').is_some_and(|w| path.contains(w))) {
                     let state = vm.state_of(a).map(|s| vm.db.names.get(vm.db.get(s).name).to_string()).unwrap_or_default();
                     let at = hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "Location"));
                     let rot: Vec<i32> = hp3_world::get(&mut vm, a, "Rotation").fields().iter().map(hp3_script::Value::as_int).collect();
-                    println!("watch {frame} {path} at {at} rot {rot:?} state {state} phys {:?}", hp3_world::get(&mut vm, a, "Physics"));
+                    println!(
+                        "watch {frame} {path} at {at} rot {rot:?} state {state} phys {:?} hidden {:?} draw {:?} mesh {:?}",
+                        hp3_world::get(&mut vm, a, "Physics"),
+                        hp3_world::get(&mut vm, a, "bHidden"),
+                        hp3_world::get(&mut vm, a, "DrawType"),
+                        hp3_world::get(&mut vm, a, "Mesh").as_obj().is_some()
+                    );
                 }
             }
         }

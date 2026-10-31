@@ -404,7 +404,8 @@ pub fn actor_instances(
     let actors = world(vm).actors.clone();
     let mut out = Vec::new();
     for a in actors {
-        if vm.db.objects.get(a).deleted || get(vm, a, "bHidden").as_bool() {
+        // `bSpecialHidden` keeps an actor out of the normal view (the animation helper of a ledge climb has it).
+        if vm.db.objects.get(a).deleted || get(vm, a, "bHidden").as_bool() || get(vm, a, "bSpecialHidden").as_bool() {
             continue;
         }
         let draw_type = get(vm, a, "DrawType").as_byte();

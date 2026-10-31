@@ -90,6 +90,8 @@ struct MusicTrack {
     step: f32,
     /// Stop (drop the track) once faded out.
     stopping: bool,
+    /// A sting: plays over the music instead of replacing it.
+    stab: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -101,7 +103,8 @@ pub struct Listener {
 
 pub struct Mixer {
     voices: Vec<Voice>,
-    music: Option<MusicTrack>,
+    /// The level's music and any stings playing over it.
+    music: Vec<MusicTrack>,
     pub listener: Listener,
     pub effect_volume: f32,
     pub voice_volume: f32,
@@ -115,7 +118,7 @@ impl Default for Mixer {
     fn default() -> Mixer {
         Mixer {
             voices: Vec::new(),
-            music: None,
+            music: Vec::new(),
             listener: Listener { position: [0.0; 3], right: [0.0, 1.0] },
             effect_volume: 1.0,
             voice_volume: 1.0,
@@ -170,10 +173,21 @@ impl Mixer {
         self.voices.len()
     }
 
-    /// Starts `sound` as the music, fading the previous track out over `fade_in` seconds and the new one in.
-    pub fn play_music(&mut self, sound: Arc<Sound>, handle: i32, looping: bool, fade_in: f32) {
+    /// Starts `sound` as music, fading in over `fade_in` seconds. Music replaces the music that was playing (it
+    /// fades out over the same time); a sting (`stab`) plays over what is there and leaves it playing.
+    pub fn play_music(&mut self, sound: Arc<Sound>, handle: i32, looping: bool, fade_in: f32, stab: bool) {
         let step = if fade_in > 0.0 { 1.0 / (fade_in * OUTPUT_RATE as f32) } else { 1.0 };
-        self.music = Some(MusicTrack {
+        if !stab {
+            for old in self.music.iter_mut().filter(|m| !m.stab) {
+                old.target = 0.0;
+                old.step = step;
+                old.stopping = true;
+            }
+            if fade_in <= 0.0 {
+                self.music.retain(|m| m.stab);
+            }
+        }
+        self.music.push(MusicTrack {
             sound,
             position: 0.0,
             looping,
@@ -182,26 +196,25 @@ impl Mixer {
             target: 1.0,
             step,
             stopping: false,
+            stab,
         });
     }
 
-    /// Fades the music out (`handle` 0 stops whichever plays).
+    /// Fades music out (`handle` 0 stops all of it, a handle only that track).
     pub fn stop_music(&mut self, handle: i32, fade_out: f32) {
-        if let Some(m) = &mut self.music
-            && (handle == 0 || m.handle == handle)
-        {
-            if fade_out > 0.0 {
+        if fade_out > 0.0 {
+            for m in self.music.iter_mut().filter(|m| handle == 0 || m.handle == handle) {
                 m.target = 0.0;
                 m.step = 1.0 / (fade_out * OUTPUT_RATE as f32);
                 m.stopping = true;
-            } else {
-                self.music = None;
             }
+        } else {
+            self.music.retain(|m| !(handle == 0 || m.handle == handle));
         }
     }
 
     pub fn music_playing(&self) -> bool {
-        self.music.is_some()
+        !self.music.is_empty()
     }
 
     /// Mixes `out.len() / 2` stereo frames (interleaved left, right), replacing the buffer's contents.
@@ -266,7 +279,8 @@ impl Mixer {
             }
         }
         self.voices.retain(|v| v.looping || v.position < v.sound.frames() as f64);
-        if let Some(m) = &mut self.music {
+        let music_volume = self.music_volume;
+        for m in &mut self.music {
             let step = m.sound.rate as f64 / OUTPUT_RATE as f64;
             let total = m.sound.frames();
             let ch = m.sound.channels.max(1);
@@ -287,15 +301,18 @@ impl Mixer {
                 let frac = (m.position - i as f64) as f32;
                 let j = if i + 1 < total { i + 1 } else if m.looping { 0 } else { i };
                 let at = |frame: usize, c: usize| m.sound.samples[frame * ch + c.min(ch - 1)] as f32 / 32768.0;
-                let g = m.level * self.music_volume;
+                let g = m.level * music_volume;
                 out[f * 2] += (at(i, 0) + (at(j, 0) - at(i, 0)) * frac) * g;
                 out[f * 2 + 1] += (at(i, 1) + (at(j, 1) - at(i, 1)) * frac) * g;
                 m.position += step;
             }
             if ended || (m.stopping && m.level <= 0.0) {
-                self.music = None;
+                m.stopping = true;
+                m.level = 0.0;
+                m.target = -1.0;
             }
         }
+        self.music.retain(|m| m.target >= 0.0);
         for s in out.iter_mut() {
             // Soft limiting keeps loud mixes from clipping harshly.
             *s = if s.abs() > 0.9 { s.signum() * (0.9 + 0.1 * ((s.abs() - 0.9) * 10.0).tanh()) } else { *s };
@@ -410,13 +427,35 @@ mod tests {
     fn music_fades_in_and_out() {
         let mut m = Mixer::default();
         m.music_volume = 1.0;
-        m.play_music(tone(OUTPUT_RATE as usize * 10), 1, true, 0.01);
+        m.play_music(tone(OUTPUT_RATE as usize * 10), 1, true, 0.01, false);
         let mut out = vec![0.0; 2 * 960];
         m.mix(&mut out);
         assert!(out[0] < 0.1 && out[out.len() - 2] > 0.4);
         m.stop_music(1, 0.01);
         m.mix(&mut out);
         m.mix(&mut out);
+        assert!(!m.music_playing());
+    }
+
+    #[test]
+    fn a_sting_plays_over_the_music_and_new_music_replaces_it() {
+        let mut m = Mixer::default();
+        m.play_music(tone(OUTPUT_RATE as usize * 10), 1, true, 0.0, false);
+        m.play_music(tone(OUTPUT_RATE as usize), 2, false, 0.0, true);
+        assert_eq!(m.music.len(), 2);
+        // The sting ends by itself; the music goes on.
+        let mut out = vec![0.0; 2 * OUTPUT_RATE as usize * 2];
+        m.mix(&mut out);
+        assert_eq!(m.music.len(), 1);
+        assert!(m.music_playing());
+        // New music takes the place of the old, which is let go at once with no fade.
+        m.play_music(tone(OUTPUT_RATE as usize * 10), 3, true, 0.0, false);
+        assert_eq!(m.music.len(), 1);
+        assert_eq!(m.music[0].handle, 3);
+        // A handle that is no longer playing stops nothing; the playing one stops.
+        m.stop_music(1, 0.0);
+        assert!(m.music_playing());
+        m.stop_music(3, 0.0);
         assert!(!m.music_playing());
     }
 }

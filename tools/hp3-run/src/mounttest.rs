@@ -31,7 +31,9 @@ impl MountTest {
 }
 
 /// Frames each spot gets.
-const TRIAL: u32 = 60;
+fn trial_len() -> u32 {
+    std::env::var("HP3_MOUNT_TRIAL").ok().and_then(|v| v.parse().ok()).unwrap_or(60)
+}
 
 fn state_name(vm: &mut Vm<'_>, a: ObjId) -> String {
     vm.state_of(a).map(|s| vm.db.names.get(vm.db.get(s).name).to_string()).unwrap_or_else(|| "-".into())
@@ -164,7 +166,7 @@ pub fn step(vm: &mut Vm<'_>, t: &mut MountTest, frame: u32) {
         }
     }
     let r = frame - t.started.unwrap_or(frame);
-    let (trial, k) = ((r / TRIAL) as usize, r % TRIAL);
+    let (trial, k) = ((r / trial_len()) as usize, r % trial_len());
     let Some(&(stand, yaw)) = t.spots.get(trial) else {
         println!("mount: no climb in {} tries", t.spots.len());
         std::process::exit(0)
@@ -194,7 +196,12 @@ pub fn step(vm: &mut Vm<'_>, t: &mut MountTest, frame: u32) {
     if k == 40 {
         input.key_up("W");
     }
-    if k % 10 == 9 {
+    if k % 10 == 9 && k >= 40 || k % 10 == 9 && trial_len() == 60 {
+        let here = vec(&get(vm, pawn, "Location"));
+        let r = get(vm, pawn, "CollisionRadius").as_float();
+        let ext = Vec3::new(r, r, get(vm, pawn, "CollisionHeight").as_float());
+        let below = hp3_world::world(vm).collision.trace_static(here, here - Vec3::Z * 300.0, ext).map(|h| (here.z - h.location.z, h.actor.map(|a| a.0)));
+        println!("mount:   floor below (distance, actor) {below:?} cylinder {ext}");
         println!("mount:   k={k} at {} rot {} accel {} phys {:?}", vec(&get(vm, pawn, "Location")), get(vm, pawn, "Rotation").fields().iter().map(|f| f.as_int().to_string()).collect::<Vec<_>>().join(","), vec(&get(vm, pawn, "Acceleration")), get(vm, pawn, "Physics"));
     }
     let state = state_name(vm, pawn);
@@ -211,7 +218,7 @@ pub fn step(vm: &mut Vm<'_>, t: &mut MountTest, frame: u32) {
                 println!("mount: warning: {line}");
             }
         }
-        if k == TRIAL - 1 {
+        if k == trial_len() - 1 {
             std::process::exit(0);
         }
     }

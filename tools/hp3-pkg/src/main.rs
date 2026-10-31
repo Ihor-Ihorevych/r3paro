@@ -128,6 +128,9 @@ fn dump(root: &Path, package: &str, path: &str) -> R {
     match &o.body {
         Body::Class { structure, class, defaults, .. } => {
             println!("class flags {:#010x}, script {} bytes, {} defaults", class.class_flags, structure.script_size, defaults.len());
+            for t in defaults {
+                println!("  default {}[{}] {:?} {} bytes{}", pkg.name(t.name), t.array_index, t.ty, t.data.len(), if t.ty == hp3_package::props::TagType::Bool { format!(" = {}", t.bool_value) } else { format!(" {:02x?}", &t.data[..t.data.len().min(12)]) });
+            }
         }
         Body::Function { structure, function } => {
             println!("function native={} flags={:#010x} script {} bytes", function.native_index, function.function_flags, structure.script_size);

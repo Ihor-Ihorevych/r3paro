@@ -158,11 +158,11 @@ impl AudioSystem {
                         m.stop(tag_of(&sound), emitter.map_or(0, |o| o.0 as u64 + 1));
                     }
                 }
-                Event::Music { song, handle, fade_in, looping, stab: _ } => {
+                Event::Music { song, handle, fade_in, looping, stab } => {
                     if let Some(track) = self.music(&song)
                         && let Ok(mut m) = self.mixer.lock()
                     {
-                        m.play_music(track, handle, looping, fade_in);
+                        m.play_music(track, handle, looping, fade_in, stab);
                     }
                 }
                 Event::StopMusic { handle, fade_out } => {
