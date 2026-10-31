@@ -44,17 +44,20 @@ books), Lumos (gargoyles), Spongify (pads), Rictusempra (Poxie, crate spawner, F
 (salamander base), Lapifors and Draconifors (statues; the player takes over the dragon), Carpe Retractum (hook
 swing, pull-and-drop with hang and release, item pull).
 
+Also done and checked: blocked moves send `Bump` to both actors; `Trace`, `FastTrace`, `TraceActors` and the four
+radius iterators follow the reference's filters; Patronum (charged on a bell target, charge level decides freeze or
+knock-back on a Dementor, overcharge fails the cast); the dragon's fire (pick up a fire powerup, fire at a
+`SpellTrigger`: `HP3_CAST_FLAME`); a character bouncing on an enabled Spongify pad (`HP3_CAST_DROP`).
+Verdimillous and Incendio have no target anywhere in the game data (stubs / sound-table entries only).
+
 Open, in the order they matter:
 - Static mesh collision follows the reference: a simple box or collision model when the mesh has one, otherwise the
-  triangles of collision-enabled materials; today render triangles are used, so some meshes stop spells (and
-  walkers) where the original does not.
-- `Bump` is never sent when a move is blocked (doors that open on bump, pushed objects).
-- `Trace`/`TraceActors`/`CollidingActors`/`RadiusActors` filters (`bProjTarget`, `bBlockZero/NonZeroExtentTraces`,
-  owner skipping, line of sight) are looser than the original's.
+  triangles of collision-enabled materials. Every collidable mesh in this install already has triangles, so only the
+  optional simple-box path differs.
 - Creatures whose spell target is a companion-cast proxy (`CompanionSpellTrigger`: skeletons, knight collapses)
   need Ron or Hermione nearby to react; companions in the hubs still follow imperfectly.
-- Not checked: Patronum (needs a charged cast and a Dementor), Verdimillous, Incendio, Peeves' proxies, the dragon's
-  fire (`DraconisForsFireSpell`) on webs and triggers, Spongify bouncing a character.
+- Peeves reacts only inside his scripted encounter (he starts hidden and disabled), so his spell handling is not
+  covered by the harness yet.
 
 ## Later
 

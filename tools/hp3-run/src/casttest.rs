@@ -265,6 +265,31 @@ pub fn step(vm: &mut Vm<'_>, t: &mut CastTest, frame: u32) {
     if (100..=200).contains(&r) && r % 2 == 0 {
         report_spell(vm, r);
     }
+    // HP3_CAST_DROP=<tick>: at that tick the caster is dropped from above the target (a spongified pad bounces him).
+    if let Some(drop) = std::env::var("HP3_CAST_DROP").ok().and_then(|v| v.parse::<u32>().ok()) {
+        if r == drop {
+            let at = vec(&get(vm, target, "Location"));
+            let height = get(vm, target, "CollisionHeight").as_float();
+            set(vm, pawn, "Location", v3(at + Vec3::Z * (height + 130.0)));
+            set(vm, pawn, "Velocity", v3(Vec3::ZERO));
+            fire(vm, pawn, "SetPhysics", &mut [Value::Byte(2)]);
+            println!("cast: drop: caster to {} above the target", vec(&get(vm, pawn, "Location")));
+        }
+        if r >= drop && r < drop + 150 && (r - drop) % 3 == 0 {
+            let touching = match get(vm, pawn, "Touching") {
+                Value::Array(v) => v.len(),
+                _ => 0,
+            };
+            println!(
+                "cast: drop: r+{} z {:.1} vz {:.1} physics {:?} touching {touching} target {}",
+                r - drop,
+                vec(&get(vm, pawn, "Location")).z,
+                vec(&get(vm, pawn, "Velocity")).z,
+                get(vm, pawn, "Physics"),
+                behaviour(vm, target)
+            );
+        }
+    }
     if r == t.report_at {
         finish(vm, t, target);
     }
