@@ -435,7 +435,7 @@ pub fn actor_instances(
         let s3 = if s3 == Vec3::ZERO { Vec3::ONE } else { s3 };
         // Skeletal meshes stand on their feet; static meshes are placed at the actor's location.
         let prepivot = if draw_type == DT_MESH { hp3_world::mesh_offset(vm, a) } else { vec3(&get(vm, a, "PrePivot")) };
-        let transform = Mat4::from_translation(loc + prepivot) * rotation_matrix(rot) * Mat4::from_scale(s3 * scale);
+        let transform = hp3_world::anim::hang_correction(vm, a) * Mat4::from_translation(loc + prepivot) * rotation_matrix(rot) * Mat4::from_scale(s3 * scale);
         // Actors are lit as a whole by the lights around them (half: the shader doubles it).
         // Capped, so an actor next to a strong light is bright but not washed out.
         let light = lighting.map(|l| l.actor_light(loc).min(Vec3::splat(1.25)) * 0.5).unwrap_or(Vec3::splat(0.5));

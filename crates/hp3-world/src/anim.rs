@@ -214,6 +214,39 @@ pub fn pose_debug(vm: &mut Vm<'_>, a: ObjId) -> String {
 
 /// A bone's current transform in world space (scale included), from the actor's animation channel 0.
 pub fn bone_matrix(vm: &mut Vm<'_>, a: ObjId, bone: &str) -> Option<glam::Mat4> {
+    // The hang correction turns the whole actor, so the bones go with it.
+    let corrected = hang_correction(vm, a) * actor_matrix(vm, a);
+    bone_matrix_in(vm, a, bone, corrected)
+}
+
+/// While a pawn hangs from a Carpe Retractum line, the animations tilt its whole body (the root bone swings to one
+/// side and pitches as it is pulled), so it is turned back upright about its own place: a rotation in world space,
+/// the identity at any other time.
+pub fn hang_correction(vm: &mut Vm<'_>, a: ObjId) -> glam::Mat4 {
+    let hanging = vm.state_of(a).is_some_and(|s| vm.db.names.get(vm.db.get(s).name).eq_ignore_ascii_case("StateRetractum"));
+    if !hanging {
+        return glam::Mat4::IDENTITY;
+    }
+    let Some(mesh) = get(vm, a, "Mesh").as_obj() else { return glam::Mat4::IDENTITY };
+    let Some(skel) = skeleton_of(vm, mesh) else { return glam::Mat4::IDENTITY };
+    let Some(root_name) = skel.skeleton.names.first().cloned() else { return glam::Mat4::IDENTITY };
+    let plain = actor_matrix(vm, a);
+    let Some(current) = bone_matrix_in(vm, a, &root_name, plain) else { return glam::Mat4::IDENTITY };
+    let rest = plain * skel.to_actor * hp3_anim::bones(&skel.skeleton, None, None, 0.0)[0];
+    let axes = |m: glam::Mat4| glam::Mat3::from_cols(m.x_axis.truncate().normalize_or_zero(), m.y_axis.truncate().normalize_or_zero(), m.z_axis.truncate().normalize_or_zero());
+    let (current, rest) = (axes(current), axes(rest));
+    // Which way the body's up points now, given that it pointed straight up at rest.
+    let up_in_bone = rest.inverse() * glam::Vec3::Z;
+    let up_now = (current * up_in_bone).normalize_or_zero();
+    if up_now == glam::Vec3::ZERO || up_now.dot(glam::Vec3::Z) > 0.9999 {
+        return glam::Mat4::IDENTITY;
+    }
+    let turn = glam::Quat::from_rotation_arc(up_now, glam::Vec3::Z);
+    let at = crate::physics::vec(&get(vm, a, "Location"));
+    glam::Mat4::from_translation(at) * glam::Mat4::from_quat(turn) * glam::Mat4::from_translation(-at)
+}
+
+fn bone_matrix_in(vm: &mut Vm<'_>, a: ObjId, bone: &str, actor: glam::Mat4) -> Option<glam::Mat4> {
     let mesh = get(vm, a, "Mesh").as_obj()?;
     let skel = skeleton_of(vm, mesh)?;
     let index = skel.skeleton.find(bone)?;
@@ -249,7 +282,7 @@ pub fn bone_matrix(vm: &mut Vm<'_>, a: ObjId, bone: &str) -> Option<glam::Mat4> 
         }
         None => hp3_anim::bones(&skel.skeleton, None, None, 0.0),
     };
-    Some(actor_matrix(vm, a) * skel.to_actor * *bones.get(index)?)
+    Some(actor * skel.to_actor * *bones.get(index)?)
 }
 
 /// `m` without scale: unit axes, same origin.
