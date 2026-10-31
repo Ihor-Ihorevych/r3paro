@@ -120,16 +120,32 @@ pub fn move_actor(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<Hit> {
         collide_world: get(vm, a, "bCollideWorld").as_bool(),
     };
     let mut loc = loc;
+    let whole = delta.length();
+    let mut delta = delta;
+    // How much of the move is already made (moving off a surface the box starts inside).
+    let mut made = 0.0f32;
     let mut hit = world(vm).collision.trace_for(how, loc, loc + delta, ext, Some(a));
     // Blocked before moving at all: the box overlaps what it touches by a hair (a sloped hull, a rounding of the
     // last step). Nudge it out along the contact's normal, as far as it takes to be clear (a few tries), and
     // sweep again, so a pawn does not stay glued to a surface it only grazes.
-    for _ in 0..3 {
+    for _ in 0..10 {
         let reach = delta.length();
         let Some(h) = hit.filter(|h| h.time * reach <= 0.02 && h.normal.length_squared() > 0.5) else { break };
         let moving_away = delta.dot(h.normal) > 0.0;
         if moving_away {
-            break;
+            // Starting inside a surface it is leaving (a tread a hair above the feet, as it goes up): it goes on,
+            // half a unit at a time, until it is out, and the rest of the move is swept from there.
+            let step = delta.normalize_or_zero() * reach.min(0.5);
+            loc += step;
+            made += step.length();
+            delta -= step;
+            set(vm, a, "Location", value(loc));
+            if delta.length_squared() < 1e-8 {
+                hit = None;
+                break;
+            }
+            hit = world(vm).collision.trace_for(how, loc, loc + delta, ext, Some(a));
+            continue;
         }
         // A pawn sunk further into a surface needs a bigger push: try 0.4, then 1, 2, 4 and 8 units.
         let mut freed = None;
@@ -147,6 +163,13 @@ pub fn move_actor(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<Hit> {
     }
     let time = hit.map(|h| h.time).unwrap_or(1.0);
     set(vm, a, "Location", value(loc + delta * time));
+    // The hit's time is a share of the whole move asked for, not of what was left of it.
+    if made > 0.0
+        && let Some(h) = hit.as_mut()
+        && whole > 0.0
+    {
+        h.time = (made + h.time * delta.length()) / whole;
+    }
     // Running into an actor (not the level's geometry, not what it stands on) bumps both of them.
     if let Some(other) = hit.and_then(|h| h.actor)
         && !get(vm, other, "bWorldGeometry").as_bool()
