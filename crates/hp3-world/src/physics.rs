@@ -561,6 +561,17 @@ fn step_up(vm: &mut Vm<'_>, a: ObjId, delta: Vec3, hit: Hit, depth: u32) {
         let over_clear = world(vm).collision.trace_as(player, loc + Vec3::Z * lift, loc + Vec3::Z * lift + ahead, ext, Some(a)).is_none();
         steppable = up_clear && over_clear;
     }
+    // A walker pressed against a riser has almost no speed and what it has may drift sideways along the face; the
+    // step goes where it is pushed (the player's heading), by at least a few units, so that it comes down on the
+    // tread and not back where it stood.
+    let mut delta = delta;
+    if depth == 0 && steppable && get(vm, a, "Physics").as_byte() == PHYS_WALKING && is_player_pawn(vm, a) {
+        let push = vec(&get(vm, a, "Acceleration"));
+        let push = Vec3::new(push.x, push.y, 0.0).normalize_or_zero();
+        if push != Vec3::ZERO {
+            delta = push * delta.length().max(6.0);
+        }
+    }
     let mut now = Some(hit);
     let start = vec(&get(vm, a, "Location"));
     let mut lifted = 0.0;
