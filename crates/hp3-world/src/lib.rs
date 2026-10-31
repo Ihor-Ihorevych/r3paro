@@ -519,6 +519,24 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
     for &a in &actors {
         fire(vm, a, "PostPersistentDataRestored", &mut []);
     }
+    // Actors with an `AttachTag` ride on the actor with that tag or name (a knight on its panel).
+    let by_name = |vm: &mut Vm<'_>, o: ObjId| vm.db.objects.get(o).name;
+    for &a in &actors {
+        let tag = get(vm, a, "AttachTag").as_name();
+        if tag == hp3_script::Name::NONE {
+            continue;
+        }
+        let mut found = None;
+        for &b in &actors {
+            if b != a && (get(vm, b, "Tag").as_name() == tag || by_name(vm, b) == tag) {
+                found = Some(b);
+                break;
+            }
+        }
+        if let Some(b) = found {
+            natives::set_base(vm, a, Some(b), false);
+        }
+    }
     if let Some(g) = world(vm).game {
         let options = world(vm).url_options.clone();
         let portal = NEXT_PORTAL.with(|p| std::mem::take(&mut *p.borrow_mut()));

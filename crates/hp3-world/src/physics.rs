@@ -892,7 +892,14 @@ fn carry_riders(vm: &mut Vm<'_>, a: ObjId, from: Vec3, delta: Vec3, old_rot: [i3
                 set(vm, c, "Rotation", rotator_value(cr));
             }
         }
-        move_and_slide(vm, r, shift);
+        if get(vm, r, "bHardAttach").as_bool() {
+            // Hard-attached to the mover: it goes exactly where the mover goes, whatever is in the way.
+            let there = vec(&get(vm, r, "Location")) + shift;
+            set(vm, r, "Location", value(there));
+            crate::touch::settle(vm, r);
+        } else {
+            move_and_slide(vm, r, shift);
+        }
     }
 }
 
