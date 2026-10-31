@@ -25,6 +25,12 @@ pub struct CastTest {
     waited: u32,
     /// Where the player's pawn was put, and which pawn it was.
     caster: Option<(ObjId, Vec3)>,
+    /// HP3_CAST_FLAME: the trigger the dragon was sent to burn, the tick it began, and what the trigger did.
+    flame: Option<ObjId>,
+    flame_from: u32,
+    flame_pickup: u32,
+    flame_calm: u32,
+    flame_history: Vec<(u32, String)>,
 }
 
 impl CastTest {
@@ -45,6 +51,11 @@ impl CastTest {
             history: Vec::new(),
             waited: 0,
             caster: None,
+            flame: None,
+            flame_from: 0,
+            flame_pickup: 0,
+            flame_calm: 0,
+            flame_history: Vec::new(),
             report_at: std::env::var("HP3_CAST_REPORT").ok().and_then(|v| v.parse().ok()).unwrap_or(260),
         })
     }
@@ -107,6 +118,9 @@ pub fn step(vm: &mut Vm<'_>, t: &mut CastTest, frame: u32) {
         println!("cast: starting at tick {frame}");
     }
     let Some(pc) = hp3_world::world(vm).player else { return };
+    if t.target.is_some() {
+        drive_flame(vm, t, pc, r);
+    }
     let Some(pawn) = get(vm, pc, "Pawn").as_obj() else {
         // The player may have handed control to something else (a possessed creature): keep watching the target.
         if let Some(target) = t.target {
@@ -119,8 +133,7 @@ pub fn step(vm: &mut Vm<'_>, t: &mut CastTest, frame: u32) {
                 println!("cast: r={r} the player has no pawn (controller state {}, view target {view:?})", state_name(vm, pc));
             }
             if r == t.report_at {
-                report_result(vm, t, target);
-                std::process::exit(0);
+                finish(vm, t, target);
             }
         }
         return;
@@ -181,16 +194,26 @@ pub fn step(vm: &mut Vm<'_>, t: &mut CastTest, frame: u32) {
     if t.history.last().is_none_or(|(_, s)| *s != now_state) {
         t.history.push((r, now_state.clone()));
     }
-    // HP3_CAST_PROPS=A,B: print these properties of the target (and of the caster as "pawn.X") every 60 ticks.
-    if r >= 100 && r % 60 == 0
+    // HP3_CAST_PROPS=A,B: print these properties of the target (and of the caster as "pawn.X") every 60 ticks (HP3_CAST_EVERY=n changes that).
+    let every = std::env::var("HP3_CAST_EVERY").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(60);
+    if r >= 100 && r % every == 0
         && let Ok(names) = std::env::var("HP3_CAST_PROPS")
     {
         let mut line = format!("cast: r={r} {now_state}");
         for n in names.split(',') {
-            let (who, prop) = match n.strip_prefix("pawn.") {
+            let (mut who, path) = match n.strip_prefix("pawn.") {
                 Some(p) => (pawn, p),
                 None => (target, n),
             };
+            // `bell.Location`: follow the object properties before the last name.
+            let mut parts: Vec<&str> = path.split('.').collect();
+            let prop = parts.pop().unwrap_or(path);
+            for hop in parts {
+                match get(vm, who, hop).as_obj() {
+                    Some(next) => who = next,
+                    None => break,
+                }
+            }
             let v = get(vm, who, prop);
             let text = match &v {
                 Value::Float(f) => format!("{f:.2}"),
@@ -222,7 +245,9 @@ pub fn step(vm: &mut Vm<'_>, t: &mut CastTest, frame: u32) {
     if r == 90 {
         report_cursor(vm);
     }
-    if r == 110 {
+    // HP3_CAST_HOLD=<ticks>: keep fire held that much longer (a charged spell such as Patronum needs it).
+    let hold = std::env::var("HP3_CAST_HOLD").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+    if r == 110 + hold {
         hp3_world::world(vm).input.key_up("LeftMouse");
     }
     // HP3_CAST_TAP=<r>: press and release fire again at that tick (letting go of a hook, for one).
@@ -241,9 +266,17 @@ pub fn step(vm: &mut Vm<'_>, t: &mut CastTest, frame: u32) {
         report_spell(vm, r);
     }
     if r == t.report_at {
-        report_result(vm, t, target);
-        std::process::exit(0);
+        finish(vm, t, target);
     }
+}
+
+/// Prints the outcome and ends the run.
+fn finish(vm: &mut Vm<'_>, t: &CastTest, target: ObjId) {
+    report_result(vm, t, target);
+    for (at, state) in &t.flame_history {
+        println!("cast: flame trigger {state} at r={at}");
+    }
+    std::process::exit(0);
 }
 
 fn place(vm: &mut Vm<'_>, t: &mut CastTest, pc: ObjId, pawn: ObjId) {
@@ -323,6 +356,116 @@ fn place(vm: &mut Vm<'_>, t: &mut CastTest, pc: ObjId, pawn: ObjId) {
         t.before,
         get(vm, target, "bProjTarget").as_bool()
     );
+}
+
+/// HP3_CAST_FLAME=<n>: once the player is the dragon (the Draconifors cast worked), put it in front of the n-th
+/// trigger that burns (vulnerable to the dragon's fire), facing it, and hold fire like a player would.
+fn drive_flame(vm: &mut Vm<'_>, t: &mut CastTest, pc: ObjId, r: u32) {
+    let Some(n) = std::env::var("HP3_CAST_FLAME").ok().and_then(|v| v.parse::<usize>().ok()) else { return };
+    let Some(dragon) = get(vm, pc, "ViewTarget").as_obj() else { return };
+    if t.flame.is_none() {
+        // The transformation has to be over: the dragon is in its active state.
+        if r < 60 || state_name(vm, dragon) != "StateActive" {
+            if r % 120 == 0 {
+                println!("cast: flame: waiting for {} (state {}, controller {})", name_of(vm, dragon), behaviour(vm, dragon), state_name(vm, pc));
+            }
+            return;
+        }
+        let actors = hp3_world::world(vm).actors.clone();
+        let burns: Vec<ObjId> = actors
+            .into_iter()
+            .filter(|&a| get(vm, a, "vulnerableToClass").as_obj().is_some_and(|c| name_of(vm, c) == "DraconisForsFireSpell"))
+            .collect();
+        let Some(&trigger) = burns.get(n) else {
+            println!("cast: flame: no trigger #{n} ({} burn)", burns.len());
+            std::process::exit(5)
+        };
+        // The dragon only breathes fire once it holds ammunition: fly it through a fire powerup first, as a
+        // player would, and let the pickup run.
+        if t.flame_pickup == 0 {
+            let powerup = actors_of(vm, "DraconisForsFirePowerup").into_iter().next();
+            if let Some(p) = powerup {
+                let at = vec(&get(vm, p, "Location"));
+                println!("cast: flame: dragon picks up {} at {at} (ammo {:?})", name_of(vm, p), get(vm, dragon, "FlameAmmo"));
+                fire(vm, dragon, "SetLocation", &mut [v3(at)]);
+            }
+            t.flame_pickup = r;
+            return;
+        }
+        // Picking the powerup up may start a tutorial cutscene; wait until the player has the dragon back and it
+        // has been still for a moment.
+        let calm = r >= t.flame_pickup + 30
+            && get(vm, pc, "Pawn").as_obj() == Some(dragon)
+            && state_name(vm, dragon) == "StateActive";
+        t.flame_calm = if calm { t.flame_calm + 1 } else { 0 };
+        if t.flame_calm < 90 {
+            return;
+        }
+        let controls = get(vm, pc, "Pawn").as_obj().map(|p| name_of(vm, p));
+        println!("cast: flame: ammo {:?}, the player controls {controls:?}", get(vm, dragon, "FlameAmmo"));
+        let at = vec(&get(vm, trigger, "Location"));
+        // HP3_CAST_FLAME_SIDE=0..3: which side of the trigger the dragon comes from (a cutscene trigger may sit on one).
+        let side = std::env::var("HP3_CAST_FLAME_SIDE").ok().and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+        let ang = side as f32 * std::f32::consts::FRAC_PI_2;
+        let dir = Vec3::new(ang.cos(), ang.sin(), 0.0);
+        let from = at - dir * std::env::var("HP3_CAST_FLAME_DIST").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(90.0);
+        let yaw = side * 16384;
+        set(vm, dragon, "Location", v3(from));
+        set(vm, dragon, "Velocity", v3(Vec3::ZERO));
+        set(vm, dragon, "Rotation", rot(0, yaw));
+        set(vm, pc, "Rotation", rot(0, yaw));
+        println!(
+            "cast: flame: dragon {} to {from}, trigger {} at {at} (collide {}, projTarget {}, radius {}, height {})",
+            name_of(vm, dragon),
+            name_of(vm, trigger),
+            get(vm, trigger, "bCollideActors").as_bool(),
+            get(vm, trigger, "bProjTarget").as_bool(),
+            get(vm, trigger, "CollisionRadius").as_float(),
+            get(vm, trigger, "CollisionHeight").as_float()
+        );
+        hp3_world::world(vm).input.key_down("LeftMouse");
+        t.flame = Some(trigger);
+        t.flame_from = r;
+    }
+    let Some(trigger) = t.flame else { return };
+    let rel = r - t.flame_from;
+    if (rel < 60 && rel % 4 == 0) || rel % 120 == 5 {
+        println!(
+            "cast: flame: r+{} bFire {} dragon state {} physics {:?} controller {:?} ammo {:?} shooting {}",
+            r - t.flame_from,
+            get(vm, pc, "bFire").as_bool(),
+            state_name(vm, dragon),
+            get(vm, dragon, "Physics"),
+            get(vm, dragon, "Controller").as_obj().map(|c| name_of(vm, c)),
+            get(vm, dragon, "FlameAmmo"),
+            get(vm, dragon, "bDoFlameShoot").as_bool()
+        );
+    }
+    if rel < 90 && rel % 3 == 0 {
+        for sp in actors_of(vm, "DraconisForsFireSpell") {
+            println!(
+                "cast: flame: spell at {} vel {} phys {:?} touching {}",
+                vec(&get(vm, sp, "Location")),
+                vec(&get(vm, sp, "Velocity")),
+                get(vm, sp, "Physics"),
+                match get(vm, sp, "Touching") {
+                    Value::Array(v) => v.len(),
+                    _ => 0,
+                }
+            );
+        }
+    }
+    let state = behaviour(vm, trigger);
+    if t.flame_history.last().is_none_or(|(_, s)| *s != state) {
+        t.flame_history.push((r - t.flame_from, state));
+    }
+}
+
+/// Every actor of a class (or a subclass of it).
+fn actors_of(vm: &mut Vm<'_>, class: &str) -> Vec<ObjId> {
+    let Some(want) = vm.db.find(class) else { return Vec::new() };
+    let all = hp3_world::world(vm).actors.clone();
+    all.into_iter().filter(|&a| vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, want))).collect()
 }
 
 fn report_cursor(vm: &mut Vm<'_>) {
