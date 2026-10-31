@@ -173,6 +173,18 @@ pub fn move_actor(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<Hit> {
                 break;
             }
         }
+        // Wedged where the contact's normal leads only deeper into geometry: any other way out will do.
+        if freed.is_none() {
+            'search: for push in [2.0f32, 4.0, 8.0, 16.0, 32.0] {
+                for dir in [Vec3::Z, Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y] {
+                    let out = loc + dir * push;
+                    if world(vm).collision.trace_for(how, out + Vec3::Z * 0.01, out, ext, Some(a)).is_none_or(|c| c.time > 0.0) {
+                        freed = Some(out);
+                        break 'search;
+                    }
+                }
+            }
+        }
         let Some(out) = freed else { break };
         if player {
             vm.log.push(format!("nudge: pushed out of a surface with normal ({:.2},{:.2},{:.2}) by {:.2}", h.normal.x, h.normal.y, h.normal.z, (out - loc).length()));
