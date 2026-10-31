@@ -207,7 +207,7 @@ pub fn bone_matrix(vm: &mut Vm<'_>, a: ObjId, bone: &str) -> Option<glam::Mat4> 
         .iter()
         .skip(1)
         .filter(|c| c.sequence.is_some() && c.alpha > 0.001)
-        .map(|c| hp3_anim::Layer { sequence: c.sequence, frame: c.frame, alpha: c.alpha, root: c.bone.as_deref().and_then(|b| skel.skeleton.find(b)), looping: c.looping })
+        .map(|c| hp3_anim::Layer { sequence: c.sequence, frame: c.frame, alpha: c.alpha * c.tween_weight(), root: c.bone.as_deref().and_then(|b| skel.skeleton.find(b)), looping: c.looping })
         .collect();
     let bones = match &set {
         Some(set) => {
@@ -315,6 +315,17 @@ fn play(vm: &mut Vm<'_>, actor: ObjId, seq: Name, rate: f32, tween: f32, channel
         ch.rate = base * rate;
         return true;
     }
+    // How long the fade into the new sequence takes. A one-shot played on an empty channel starts at once; a
+    // tween time of -1 asks for as long as one frame of what was playing (a fortieth of a second when nothing
+    // was), as the original does.
+    let mut tween = tween;
+    if !looping && ch.sequence.is_none() {
+        tween = 0.0;
+    } else if tween == -1.0 {
+        let old_frames = ch.sequence.and_then(|s| set.sequences.get(s)).map_or(0.0, |s| s.frames as f32);
+        let new_frames = set.sequences[si].frames.max(1) as f32;
+        tween = if ch.rate > 0.0 && old_frames > 0.0 { old_frames / new_frames / ch.rate } else { 0.025 };
+    }
     // The pose it leaves is faded away from over the tween time.
     let from = (tween > 0.0).then_some((ch.sequence, ch.frame, ch.looping));
     *ch = Channel {
@@ -365,8 +376,18 @@ pub fn tick_actor(vm: &mut Vm<'_>, actor: ObjId, dt: f32) {
                     let step = if ch.blend_rate > 0.0 { ch.blend_rate * dt } else { f32::MAX };
                     ch.alpha = if ch.alpha < ch.target_alpha { (ch.alpha + step).min(ch.target_alpha) } else { (ch.alpha - step).max(ch.target_alpha) };
                 }
+                // While a new sequence fades in it waits on its first frame: time goes to the fade, and only what is
+                // left over after it plays the sequence.
+                let mut dt = dt;
                 if ch.tween_t < ch.tween_total {
-                    ch.tween_t += dt;
+                    let left = ch.tween_total - ch.tween_t;
+                    if dt <= left {
+                        ch.tween_t += dt;
+                        dt = 0.0;
+                    } else {
+                        ch.tween_t = ch.tween_total;
+                        dt -= left;
+                    }
                 }
                 if ch.tween_only {
                     if ch.tween_t >= ch.tween_total {

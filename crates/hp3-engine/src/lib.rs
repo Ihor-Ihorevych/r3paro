@@ -326,12 +326,12 @@ impl MeshCache {
         for c in channels.iter().skip(1) {
             if c.sequence.is_some() && c.alpha > 0.001 {
                 let root = c.bone.as_deref().and_then(|b| s.skeleton.find(b));
-                layers.push(hp3_anim::Layer { sequence: c.sequence, frame: c.frame, alpha: c.alpha, root, looping: c.looping });
+                layers.push(hp3_anim::Layer { sequence: c.sequence, frame: c.frame, alpha: c.alpha * c.tween_weight(), root, looping: c.looping });
                 layer_hash = layer_hash
                     .wrapping_mul(1_000_003)
                     .wrapping_add(c.sequence.unwrap_or(0) as u64 + 1)
                     .wrapping_mul(31)
-                    .wrapping_add(c.frame.to_bits() as u64 ^ ((c.alpha.to_bits() as u64) << 20));
+                    .wrapping_add(c.frame.to_bits() as u64 ^ (((c.alpha * c.tween_weight()).to_bits() as u64) << 20));
             }
         }
         // Bone controllers change the pose too: they are part of what was last written.
