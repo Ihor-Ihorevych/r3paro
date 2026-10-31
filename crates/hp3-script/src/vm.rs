@@ -227,7 +227,7 @@ impl<'s> Vm<'s> {
     }
 
     pub fn warn(&mut self, s: String) {
-        if self.log.len() < 10_000 {
+        if self.log.len() < 200_000 {
             self.log.push(s);
         }
     }

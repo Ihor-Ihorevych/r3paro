@@ -306,6 +306,9 @@ pub fn tick_controller(vm: &mut Vm<'_>, only: ObjId, dt: f32) {
                 let reach = get(vm, p, "CollisionRadius").as_float().max(8.0) * 0.5 + target_radius;
                 if delta.length() <= reach.max(8.0) || m.timer <= 0.0 {
                     arrived = delta.length() <= reach.max(8.0);
+                    if !arrived && std::env::var_os("HP3_MOVE_DEBUG").is_some() {
+                        eprintln!("move fail: pawn {} at {at} dest {dest} dist {:.1} reach {:.1} speed {:?} ground {:?} phys {}", hp3_script::natives::object_path(vm, p), delta.length(), reach, get(vm, p, "Velocity"), get(vm, p, "GroundSpeed"), get(vm, p, "Physics").as_byte());
+                    }
                     set(vm, p, "Acceleration", value(Vec3::ZERO));
                     true
                 } else {
