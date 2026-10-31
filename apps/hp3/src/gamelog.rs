@@ -19,6 +19,7 @@ pub struct GameLog {
     last_cursor: String,
     last_emitter_log: u128,
     last_pose_log: u128,
+    blocked_frames: u32,
 }
 
 impl GameLog {
@@ -27,7 +28,7 @@ impl GameLog {
             .ok()
             .and_then(|_| std::fs::File::create(root.join("logs").join("game.log")).ok())
             .map(std::io::BufWriter::new);
-        GameLog { file, started: Instant::now(), last_second: 0, written: 0, last_pawn: String::new(), cursor: None, last_cursor: String::new(), last_emitter_log: 0, last_pose_log: 0 }
+        GameLog { file, started: Instant::now(), last_second: 0, written: 0, last_pawn: String::new(), cursor: None, last_cursor: String::new(), last_emitter_log: 0, last_pose_log: 0, blocked_frames: 0 }
     }
 
     fn line(&mut self, text: &str) {
@@ -100,17 +101,24 @@ impl GameLog {
                 .collect();
             self.line(&format!("HANG rot {rot:?} phys {phys} rollToDesired {roll_to} anims [{}] bones{pose}", anims.join(" | ")));
         }
-        // A pawn that pushes and does not move: what is around it, once a second.
-        if let Some(p) = pawn
-            && second != self.last_second
-        {
+        // A pawn that pushes and does not move (for a third of a second, then once a second more): what is around it.
+        let mut blocked_now = false;
+        if let Some(p) = pawn {
             let accel = hp3_world::physics::vec(&hp3_world::get(vm, p, "Acceleration"));
             let vel = hp3_world::physics::vec(&hp3_world::get(vm, p, "Velocity"));
             let phys = hp3_world::get(vm, p, "Physics").as_byte();
-            if accel.length() > 100.0 && vel.truncate().length() < 20.0 && (phys == 1 || phys == 2) {
-                let d = hp3_world::physics::debug_blocked(vm, p);
-                self.line(&format!("BLOCKED phys {phys} {d}"));
+            blocked_now = accel.length() > 100.0 && vel.truncate().length() < 20.0 && (phys == 1 || phys == 2);
+            if blocked_now {
+                self.blocked_frames += 1;
+                if self.blocked_frames == 20 || (self.blocked_frames > 20 && self.blocked_frames % 60 == 0) {
+                    let d = hp3_world::physics::debug_blocked(vm, p);
+                    let at = hp3_world::physics::vec(&hp3_world::get(vm, p, "Location"));
+                    self.line(&format!("BLOCKED phys {phys} at {at} {d}"));
+                }
             }
+        }
+        if !blocked_now {
+            self.blocked_frames = 0;
         }
         // A change of the controlled pawn is written at once, the rest once a second.
         let now = pawn.map(|p| hp3_script::natives::object_path(vm, p)).unwrap_or_default();
