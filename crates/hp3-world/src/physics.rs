@@ -209,7 +209,25 @@ fn floor_below(vm: &mut Vm<'_>, a: ObjId, depth: f32) -> Option<Hit> {
     let loc = vec(&get(vm, a, "Location"));
     let ext = extent(vm, a);
     let player = is_player_pawn(vm, a);
-    world(vm).collision.trace_as(player, loc, loc - Vec3::Z * depth, ext, Some(a)).filter(|h| h.normal.z >= WALKABLE_Z)
+    let hit = world(vm).collision.trace_as(player, loc, loc - Vec3::Z * depth, ext, Some(a))?;
+    let normal = surface_normal(vm, a, &hit, loc, depth);
+    (normal.z >= WALKABLE_Z).then_some(Hit { normal, ..hit })
+}
+
+/// The normal of the surface a pawn's box came down on. The box meets the edge or corner of a step or a bevelled
+/// tread as often as its flat top, and then reports a slanted normal; the surface it rests on is what lies under
+/// its middle, so a thin box dropped from `from` over the same depth tells it.
+fn surface_normal(vm: &mut Vm<'_>, a: ObjId, hit: &Hit, from: Vec3, depth: f32) -> Vec3 {
+    if hit.normal.z >= WALKABLE_Z {
+        return hit.normal;
+    }
+    let ext = extent(vm, a);
+    let thin = Vec3::new(2.0, 2.0, ext.z);
+    let player = is_player_pawn(vm, a);
+    match world(vm).collision.trace_as(player, from, from - Vec3::Z * depth, thin, Some(a)) {
+        Some(under) if under.normal.z >= WALKABLE_Z => under.normal,
+        _ => hit.normal,
+    }
 }
 
 /// Whether `a` is the pawn the local player controls (what `bBlockPlayers` actors block).
@@ -440,7 +458,18 @@ fn notify_hit_wall(vm: &mut Vm<'_>, a: ObjId, hit: &Hit) {
 fn step_up(vm: &mut Vm<'_>, a: ObjId, delta: Vec3, hit: Hit, depth: u32) {
     let lift = MAX_STEP_HEIGHT + 2.0;
     let mut step_down = true;
-    let steppable = hit.normal.z.abs() < MAX_STEP_SIDE_Z || hit.normal.z >= WALKABLE_Z;
+    let mut steppable = hit.normal.z.abs() < MAX_STEP_SIDE_Z || hit.normal.z >= WALKABLE_Z;
+    // The edge of a step, met by a box instead of a cylinder, reads as a slanted face. When there is room to go up
+    // by a step and on over the top, it is a step all the same.
+    if !steppable && hit.normal.z >= MAX_STEP_SIDE_Z && delta.length_squared() > 1e-8 && get(vm, a, "Physics").as_byte() == PHYS_WALKING {
+        let loc = vec(&get(vm, a, "Location"));
+        let ext = extent(vm, a);
+        let player = is_player_pawn(vm, a);
+        let ahead = delta.normalize_or_zero() * (ext.x * 2.0 + 4.0);
+        let up_clear = world(vm).collision.trace_as(player, loc, loc + Vec3::Z * lift, ext, Some(a)).is_none();
+        let over_clear = world(vm).collision.trace_as(player, loc + Vec3::Z * lift, loc + Vec3::Z * lift + ahead, ext, Some(a)).is_none();
+        steppable = up_clear && over_clear;
+    }
     let mut now = Some(hit);
     if steppable {
         move_actor(vm, a, Vec3::Z * lift);
@@ -645,7 +674,10 @@ fn fall(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         if std::env::var_os("HP3_FALL_DEBUG").is_some() {
             eprintln!("fall: {} vel {vel} step {} hit time {} normal {} actor {:?}", hp3_script::natives::object_path(vm, a), vel * tick, hit.time, hit.normal, hit.actor.map(|o| hp3_script::natives::object_path(vm, o)));
         }
-        if hit.normal.z >= WALKABLE_Z {
+        // Coming down on the edge of a step counts as landing on the step when its top lies under the middle.
+        let landing = surface_normal(vm, a, &hit, hit.location, 24.0);
+        if landing.z >= WALKABLE_Z {
+            let hit = Hit { normal: landing, ..hit };
             let mut v = vec(&get(vm, a, "Velocity"));
             fire(vm, a, "Landed", &mut [value(hit.normal)]);
             if get(vm, a, "Physics").as_byte() == PHYS_FALLING {
