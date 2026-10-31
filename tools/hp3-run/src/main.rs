@@ -55,6 +55,19 @@ fn list_class(vm: &mut hp3_script::Vm<'_>) {
             }
             let state = vm.state_of(a).map(|s| vm.db.names.get(vm.db.structs[s.0 as usize].name).to_string());
             println!("  {name} state {state:?}{info}");
+            // Emitter actors: what each emitter shows (its texture object and class).
+            if let hp3_script::Value::Array(list) = hp3_world::get(vm, a, "Emitters") {
+                for (i, e) in list.iter().enumerate() {
+                    if let Some(eo) = e.as_obj() {
+                        let tex = hp3_world::get(vm, eo, "Texture").as_obj();
+                        let tex_desc = tex.map(|t| {
+                            let class = vm.db.objects.get(t).class.map(|c| vm.db.names.get(vm.db.get(c).name).to_string()).unwrap_or_default();
+                            format!("{} ({class})", hp3_script::natives::object_path(vm, t))
+                        });
+                        println!("      emitter {i}: texture {tex_desc:?} blend {:?}", hp3_world::get(vm, eo, "ColorMultiplierRange"));
+                    }
+                }
+            }
         }
     }
 }
@@ -259,6 +272,31 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
         {
             println!("console: OPEN ?LOAD={slot}");
             hp3_world::save::console(&mut vm, &format!("OPEN ?LOAD={slot}"));
+        }
+        // HP3_CHANNELS=<name>@<every>: prints the blend weights and rates of an actor's animation channels.
+        if let Ok(spec) = std::env::var("HP3_CHANNELS")
+            && let Some((name, every)) = spec.split_once('@')
+            && every.parse::<u32>().is_ok_and(|e| e > 0 && frame % e == 0)
+        {
+            let actors = hp3_world::world(&mut vm).actors.clone();
+            for a in actors {
+                if !hp3_script::natives::object_path(&vm, a).ends_with(&format!(".{name}")) {
+                    continue;
+                }
+                let set = hp3_world::anim::set_of(&mut vm, a);
+                let chans = hp3_world::world(&mut vm).anim.actors.get(&a).map(|x| x.channels.clone()).unwrap_or_default();
+                let line: Vec<String> = chans
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| c.sequence.is_some() && c.alpha > 0.001 || *(&c.playing) && c.alpha > 0.001)
+                    .map(|(i, c)| {
+                        let n = c.sequence.and_then(|s| set.as_ref().map(|set| set.sequences[s].name.clone())).unwrap_or_default();
+                        format!("ch{i} {n} a{:.2} f{:.1} r{:.2}", c.alpha, c.frame, c.rate)
+                    })
+                    .collect();
+                let vel = hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "Velocity"));
+                println!("channels {frame} speed {:.0}: {}", vel.truncate().length(), line.join(" | "));
+            }
         }
         // HP3_TELEPORT=<x>,<y>,<z>@<tick>: moves the player's pawn there (as SetLocation does), to walk into a trigger.
         if let Ok(spec) = std::env::var("HP3_TELEPORT")

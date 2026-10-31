@@ -160,7 +160,7 @@ impl AudioSystem {
                     ));
                     *self.repeats.entry(format!("{name} by {who}")).or_default() += 1;
                     let Some(s) = loaded else { continue };
-                    let flat = no_3d || !attenuate || slot == SLOT_INTERFACE;
+                    let flat = no_3d || slot == SLOT_INTERFACE;
                     let placement = if flat {
                         Placement::Flat
                     } else {

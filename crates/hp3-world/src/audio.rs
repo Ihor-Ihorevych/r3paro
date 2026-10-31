@@ -114,6 +114,26 @@ fn play(vm: &mut Vm<'_>, this: Option<ObjId>, a: &[Value], attenuate_by_default:
         let state = vm.state_of(emitter).map(|s| vm.db.names.get(vm.db.get(s).name).to_string()).unwrap_or_default();
         format!("{path} ({class}, state {state})")
     };
+    // Volumes arrive in a 0..2 range and are halved before they are played. An unattenuated sound plays flat
+    // only when its maker belongs to what the player is viewing (or it is marked No3D); any other still has a
+    // place in the world and fades with distance.
+    let attenuate = bool_or(a, 6, attenuate_by_default);
+    let mut no_3d = bool_or(a, 7, false);
+    if !attenuate && !no_3d {
+        let view = world(vm).player.and_then(|pc| get(vm, pc, "ViewTarget").as_obj().or_else(|| get(vm, pc, "Pawn").as_obj()));
+        let mut at = Some(emitter);
+        for _ in 0..8 {
+            match at {
+                Some(o) if Some(o) == view => {
+                    no_3d = true;
+                    break;
+                }
+                Some(o) => at = get(vm, o, "Owner").as_obj(),
+                None => break,
+            }
+        }
+    }
+    let volume = volume * 0.5;
     let event = Event::Play {
         who,
         sound,
@@ -124,8 +144,8 @@ fn play(vm: &mut Vm<'_>, this: Option<ObjId>, a: &[Value], attenuate_by_default:
         no_override: bool_or(a, 3, false),
         radius,
         pitch: float_or(a, 5, 1.0),
-        attenuate: bool_or(a, 6, attenuate_by_default),
-        no_3d: bool_or(a, 7, false),
+        attenuate,
+        no_3d,
     };
     world(vm).audio.events.push(event);
 }

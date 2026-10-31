@@ -179,11 +179,14 @@ impl<'s> Loader<'s> {
         let (mut p, mut i) = self.set.resolve(pkg, r)?;
         for _ in 0..16 {
             let chain = self.set.export_chain(&p, i);
-            if chain.iter().any(|c| c.eq_ignore_ascii_case("Texture")) {
+            // A procedural texture of the Fire package (wet, water, fire, ice...) has no pixels of its own; the
+            // image it works on (`SourceTexture`) stands in for it, without the animation.
+            let procedural = chain.iter().any(|c| c.eq_ignore_ascii_case("FractalTexture"));
+            if !procedural && chain.iter().any(|c| c.eq_ignore_ascii_case("Texture")) {
                 return Some((p, i));
             }
             let next = self.with_tags(&p, i, |tags, _| {
-                for name in ["Diffuse", "Material", "Material1", "Material2", "SelfIllumination", "Materials"] {
+                for name in ["SourceTexture", "Diffuse", "Material", "Material1", "Material2", "SelfIllumination", "Materials"] {
                     if let Some(t) = props::find(&p, tags, name, 0) {
                         match t.ty {
                             TagType::Object => return t.as_obj(),

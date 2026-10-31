@@ -141,9 +141,24 @@ impl Mixer {
                 None => {}
             }
         }
-        // Many voices at once are not worth mixing: drop the oldest.
+        // Many voices at once are not worth mixing: the one that matters least goes (as the original's priority
+        // sort does): the quietest as heard now, one-shots before loops, and for equal loudness the oldest.
         if self.voices.len() >= 48 {
-            self.voices.remove(0);
+            let listener = self.listener;
+            let heard = |v: &Voice| -> f32 {
+                let fall = match v.placement {
+                    Placement::Flat => 1.0,
+                    Placement::World { position, radius } => {
+                        let d = ((position[0] - listener.position[0]).powi(2) + (position[1] - listener.position[1]).powi(2) + (position[2] - listener.position[2]).powi(2)).sqrt();
+                        let radius = radius.max(1.0);
+                        if d <= radius { 1.0 } else { radius / d }
+                    }
+                };
+                v.volume.clamp(0.0, 1.0) * fall + if v.looping { 0.05 } else { 0.0 }
+            };
+            if let Some((worst, _)) = self.voices.iter().enumerate().min_by(|a, b| heard(a.1).total_cmp(&heard(b.1))) {
+                self.voices.remove(worst);
+            }
         }
         self.voices.push(Voice {
             sound: r.sound,

@@ -194,7 +194,21 @@ pub fn bone_matrix(vm: &mut Vm<'_>, a: ObjId, bone: &str) -> Option<glam::Mat4> 
     let skel = skeleton_of(vm, mesh)?;
     let index = skel.skeleton.find(bone)?;
     let set = set_of(vm, a);
-    let ch = world(vm).anim.actors.get(&a).and_then(|x| x.channels.first().cloned()).unwrap_or_default();
+    let channels = world(vm).anim.actors.get(&a).map(|x| x.channels.clone()).unwrap_or_default();
+    let base = channels.first().map(|c| hp3_anim::Base {
+        sequence: c.sequence,
+        frame: c.frame,
+        looping: c.looping,
+        from: c.from.filter(|_| c.tween_t < c.tween_total),
+        weight: c.tween_weight(),
+    });
+    // The other channels blended over the base, limited to their bone: the same pose the renderer draws.
+    let layers: Vec<hp3_anim::Layer> = channels
+        .iter()
+        .skip(1)
+        .filter(|c| c.sequence.is_some() && c.alpha > 0.001)
+        .map(|c| hp3_anim::Layer { sequence: c.sequence, frame: c.frame, alpha: c.alpha, root: c.bone.as_deref().and_then(|b| skel.skeleton.find(b)), looping: c.looping })
+        .collect();
     let bones = match &set {
         Some(set) => {
             let key = (mesh, Rc::as_ptr(set) as usize);
@@ -207,7 +221,7 @@ pub fn bone_matrix(vm: &mut Vm<'_>, a: ObjId, bone: &str) -> Option<glam::Mat4> 
                 }
             };
             let turns = world(vm).anim.actors.get(&a).map(|x| turns_for(&skel.skeleton, &x.bone_turns)).unwrap_or_default();
-            hp3_anim::bones_with(&skel.skeleton, Some((set, &map)), ch.sequence, ch.frame, &turns)
+            hp3_anim::bones_blended(&skel.skeleton, Some((set, &map)), &base.unwrap_or_default(), &layers, &turns)
         }
         None => hp3_anim::bones(&skel.skeleton, None, None, 0.0),
     };

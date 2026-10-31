@@ -234,6 +234,20 @@ pub fn step(vm: &mut Vm<'_>, t: &mut CastTest, frame: u32) {
             println!("cast: wand now holds {now:?}");
         }
     }
+    if r == 45 && std::env::var_os("HP3_CAST_GESTURE").is_some() {
+        // Gives the first spell gesture the spell's icon, as the cursor does when it locks on.
+        if let (Some(g), Some(spell)) = (actors_of(vm, "SpellGesture").first().copied(), vm.db.find(&t.spell)) {
+            let n = vm.db.names.intern("SpellIcon");
+            let icon = vm.db.get(spell).props.iter().find(|p| p.name == n).and_then(|p| vm.db.get(spell).defaults.get(p.slot).cloned()).unwrap_or_default();
+            println!("cast: gesture icon {icon:?}");
+            fire(vm, g, "ChangeGesture", &mut [icon]);
+            if let Value::Array(list) = get(vm, g, "Emitters")
+                && let Some(e) = list.first().and_then(Value::as_obj)
+            {
+                println!("cast: gesture emitter 0 texture now {:?}", get(vm, e, "Texture").as_obj().map(|t| hp3_script::natives::object_path(vm, t)));
+            }
+        }
+    }
     if r == 50 {
         hp3_world::world(vm).input.key_down("LeftMouse");
     }
