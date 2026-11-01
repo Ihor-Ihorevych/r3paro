@@ -282,7 +282,11 @@ pub fn strafe_turns(vm: &mut Vm<'_>, a: ObjId) -> Vec<(usize, glam::Mat4)> {
 /// side and pitches as it is pulled), so it is turned back upright about its own place: a rotation in world space,
 /// the identity at any other time.
 pub fn hang_correction(vm: &mut Vm<'_>, a: ObjId) -> glam::Mat4 {
-    let hanging = vm.state_of(a).is_some_and(|s| vm.db.names.get(vm.db.get(s).name).eq_ignore_ascii_case("StateRetractum"));
+    // Hanging from a Carpe line, or climbing a ledge (the climb animations lean the body the same way).
+    let hanging = vm.state_of(a).is_some_and(|s| {
+        let n = vm.db.names.get(vm.db.get(s).name);
+        ["StateRetractum", "Mounting", "MountFinish", "MountHanging"].iter().any(|w| n.eq_ignore_ascii_case(w))
+    });
     // The jump and fall animations of the controlled pawn lean the body the same way.
     let airborne = !hanging && get(vm, a, "Physics").as_byte() == crate::physics::PHYS_FALLING && crate::physics::is_player_pawn(vm, a);
     // On the ground the sideways and backward runs twist the root bone about 45 degrees; the body is turned back
