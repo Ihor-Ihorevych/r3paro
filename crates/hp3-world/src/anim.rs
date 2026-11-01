@@ -223,7 +223,7 @@ pub fn bone_matrix(vm: &mut Vm<'_>, a: ObjId, bone: &str) -> Option<glam::Mat4> 
 }
 
 /// How much of the run's sideways lean is taken out of the controlled pawn (1 is all of it).
-const LEAN_CANCEL: f32 = 0.85;
+const LEAN_CANCEL: f32 = 1.0;
 
 /// The controlled pawn's run animations swing the root bone and the upper body from side to side (the sideways and
 /// backward ones twist it about 45 degrees and the upper body and head keep turning the same way). The root is turned back as a whole (`hang_correction`); these are the turns
