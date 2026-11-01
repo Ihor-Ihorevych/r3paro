@@ -667,6 +667,37 @@ pub fn player_view(vm: &mut Vm<'_>) -> Option<(glam::Vec3, [i32; 3], f32)> {
 }
 
 /// Advances the level by `dt` seconds: actor ticks, timers, then state code.
+/// A Monster Book that is out of its dormant state without a combat manager has started its fight with nobody to run
+/// it: the companions are sent into the fight the way a cutscene's `FightWithHero` command does, which creates the
+/// manager that spawns the pages, runs the health bar and ends the fight.
+fn start_book_fights(vm: &mut Vm<'_>) {
+    let Some(book_class) = vm.db.find("MonsterBook") else { return };
+    let Some(pc) = world(vm).player else { return };
+    let Some(lead) = get(vm, pc, "Pawn").as_obj() else { return };
+    let actors = world(vm).actors.clone();
+    let books: Vec<ObjId> = actors
+        .into_iter()
+        .filter(|&a| !vm.db.objects.get(a).deleted && vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, book_class)))
+        .collect();
+    for book in books {
+        let awake = vm.state_of(book).is_some_and(|s| !vm.db.names.get(vm.db.get(s).name).eq_ignore_ascii_case("stateNotFighting"));
+        if !awake || get(vm, book, "mbcm").as_obj().is_some() || get(vm, book, "bBattleEnded").as_bool() {
+            continue;
+        }
+        let label = get(vm, book, "Label").as_str().to_string();
+        if label.is_empty() {
+            continue;
+        }
+        let Some(companion) = get(vm, lead, "TrailingChar").as_obj() else { continue };
+        let name = get(vm, companion, "Label").as_str().to_string();
+        vm.log.push(format!("book fight: starting it for {label} with {name} as the companion"));
+        fire(vm, lead, "OnCutExitCommand", &mut [Value::Str(format!("FIGHTWITHHERO {name} {label}"))]);
+        if get(vm, book, "mbcm").as_obj().is_none() {
+            vm.log.push("book fight: no combat manager after the command".into());
+        }
+    }
+}
+
 pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     // The step is scaled by the level's time dilation; while someone has paused the game only the menus run.
     let dilation = world(vm).level_info.map(|li| get(vm, li, "TimeDilation").as_float()).filter(|d| *d > 0.0).unwrap_or(1.0);
@@ -682,6 +713,9 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         w.frame += 1;
         w.actors.clone()
     };
+    if world(vm).frame % 30 == 0 {
+        start_book_fights(vm);
+    }
     if let Some(li) = world(vm).level_info {
         let t = world(vm).time;
         set(vm, li, "TimeSeconds", Value::Float(t));
