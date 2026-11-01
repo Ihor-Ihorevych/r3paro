@@ -248,6 +248,27 @@ pub fn hang_correction(vm: &mut Vm<'_>, a: ObjId) -> glam::Mat4 {
     glam::Mat4::from_translation(at) * glam::Mat4::from_quat(turn) * glam::Mat4::from_translation(-at)
 }
 
+/// For the game log: how far the root bone's heading and up have turned from the rest pose, in degrees
+/// (heading about the vertical, tilt of up), and the first bones' places, to see what an animation does to the body.
+pub fn root_twist(vm: &mut Vm<'_>, a: ObjId) -> Option<(f32, f32)> {
+    let mesh = get(vm, a, "Mesh").as_obj()?;
+    let skel = skeleton_of(vm, mesh)?;
+    let root_name = skel.skeleton.names.first().cloned()?;
+    let plain = actor_matrix(vm, a);
+    let current = bone_matrix_in(vm, a, &root_name, plain)?;
+    let rest = plain * skel.to_actor * hp3_anim::bones(&skel.skeleton, None, None, 0.0)[0];
+    let axes = |m: glam::Mat4| glam::Mat3::from_cols(m.x_axis.truncate().normalize_or_zero(), m.y_axis.truncate().normalize_or_zero(), m.z_axis.truncate().normalize_or_zero());
+    let (c, r) = (axes(current), axes(rest));
+    // The body's own forward at rest is the bone's axis that points along the actor's x; follow it.
+    let fwd_in_bone = r.inverse() * glam::Vec3::X;
+    let up_in_bone = r.inverse() * glam::Vec3::Z;
+    let fwd = c * fwd_in_bone;
+    let up = (c * up_in_bone).normalize_or_zero();
+    let yaw = fwd.y.atan2(fwd.x).to_degrees();
+    let tilt = up.dot(glam::Vec3::Z).clamp(-1.0, 1.0).acos().to_degrees();
+    Some((yaw, tilt))
+}
+
 fn bone_matrix_in(vm: &mut Vm<'_>, a: ObjId, bone: &str, actor: glam::Mat4) -> Option<glam::Mat4> {
     let mesh = get(vm, a, "Mesh").as_obj()?;
     let skel = skeleton_of(vm, mesh)?;

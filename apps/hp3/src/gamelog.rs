@@ -19,6 +19,7 @@ pub struct GameLog {
     last_cursor: String,
     last_emitter_log: u128,
     last_pose_log: u128,
+    last_twist_log: u128,
     blocked_frames: u32,
     anchor: glam::Vec3,
 }
@@ -29,7 +30,7 @@ impl GameLog {
             .ok()
             .and_then(|_| std::fs::File::create(root.join("logs").join("game.log")).ok())
             .map(std::io::BufWriter::new);
-        GameLog { file, started: Instant::now(), last_second: 0, written: 0, last_pawn: String::new(), cursor: None, last_cursor: String::new(), last_emitter_log: 0, last_pose_log: 0, blocked_frames: 0, anchor: Default::default() }
+        GameLog { file, started: Instant::now(), last_second: 0, written: 0, last_pawn: String::new(), cursor: None, last_cursor: String::new(), last_emitter_log: 0, last_pose_log: 0, last_twist_log: 0, blocked_frames: 0, anchor: Default::default() }
     }
 
     fn line(&mut self, text: &str) {
@@ -101,6 +102,25 @@ impl GameLog {
                 })
                 .collect();
             self.line(&format!("HANG rot {rot:?} phys {phys} rollToDesired {roll_to} anims [{}] bones{pose}", anims.join(" | ")));
+        }
+        // While a sideways or backward run animation plays: how the body is turned, a few times a second.
+        if let Some(p) = pawn
+            && self.started.elapsed().as_millis() / 300 != self.last_twist_log
+        {
+            let set = hp3_world::anim::set_of(vm, p);
+            let chans = hp3_world::world(vm).anim.actors.get(&p).map(|x| x.channels.clone()).unwrap_or_default();
+            let names: Vec<String> = chans
+                .iter()
+                .filter(|c| c.sequence.is_some() && c.alpha > 0.001)
+                .filter_map(|c| c.sequence.and_then(|s| set.as_ref().map(|set| format!("{} a{:.2}", set.sequences[s].name, c.alpha))))
+                .collect();
+            if names.iter().any(|n| n.starts_with("run_left") || n.starts_with("run_right") || n.starts_with("run_back") || n.starts_with("jump")) {
+                self.last_twist_log = self.started.elapsed().as_millis() / 300;
+                if let Some((yaw, tilt)) = hp3_world::anim::root_twist(vm, p) {
+                    let rot: Vec<i32> = hp3_world::get(vm, p, "Rotation").fields().iter().map(hp3_script::Value::as_int).collect();
+                    self.line(&format!("TWIST root heading {yaw:.1} deg, up tilt {tilt:.1} deg, pawn rot {rot:?}, anims {}", names.join(" | ")));
+                }
+            }
         }
         // A pawn that pushes and gets nowhere in the direction it pushes (under 15 units in half a second): what is
         // around it, there and then.
