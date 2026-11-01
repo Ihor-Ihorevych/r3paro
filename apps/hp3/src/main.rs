@@ -347,7 +347,7 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
         let frame_start = Instant::now();
         let mut stages: Vec<(&str, f32)> = Vec::new();
         // One world tick per drawn frame, with the real time since the last one (at most a thirtieth of a second,
-        // so a stall does not make the world jump). HP3_FIXED_STEP=1 keeps a fixed 60 Hz instead.
+        // so a stall does not make the world jump), but not more than 60 times a second. HP3_FIXED_STEP=1 keeps a fixed 60 Hz instead.
         if fixed_step {
             accumulator += dt;
             while accumulator >= 1.0 / 60.0 {
@@ -355,7 +355,13 @@ fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
                 accumulator -= 1.0 / 60.0;
             }
         } else {
-            hp3_world::tick(&mut vm, dt.min(1.0 / 30.0));
+            // The world never ticks faster than 60 Hz: scripts (the imp cutscene's among them) advance by whole
+            // ticks, so a faster monitor would play them too fast. A slower frame ticks with the time it took.
+            accumulator += dt;
+            if accumulator >= 1.0 / 60.0 - 0.0005 {
+                hp3_world::tick(&mut vm, accumulator.min(1.0 / 30.0));
+                accumulator = 0.0;
+            }
         }
         stages.push(("ticks", frame_start.elapsed().as_secs_f32() * 1000.0));
         // A level switch the game asked for: the new level is loaded and its scene built.
