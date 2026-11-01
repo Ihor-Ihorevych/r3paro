@@ -105,7 +105,7 @@ impl GameLog {
         }
         // While a sideways or backward run animation plays: how the body is turned, a few times a second.
         if let Some(p) = pawn
-            && self.started.elapsed().as_millis() / 300 != self.last_twist_log
+            && self.started.elapsed().as_millis() / 120 != self.last_twist_log
         {
             let set = hp3_world::anim::set_of(vm, p);
             let chans = hp3_world::world(vm).anim.actors.get(&p).map(|x| x.channels.clone()).unwrap_or_default();
@@ -114,8 +114,8 @@ impl GameLog {
                 .filter(|c| c.sequence.is_some() && c.alpha > 0.001)
                 .filter_map(|c| c.sequence.and_then(|s| set.as_ref().map(|set| format!("{} a{:.2}", set.sequences[s].name, c.alpha))))
                 .collect();
-            if names.iter().any(|n| n.starts_with("run_left") || n.starts_with("run_right") || n.starts_with("run_back") || n.starts_with("jump")) {
-                self.last_twist_log = self.started.elapsed().as_millis() / 300;
+            if names.iter().any(|n| n.starts_with("run") || n.starts_with("jump")) {
+                self.last_twist_log = self.started.elapsed().as_millis() / 120;
                 if let Some((yaw, tilt)) = hp3_world::anim::root_twist(vm, p) {
                     let rot: Vec<i32> = hp3_world::get(vm, p, "Rotation").fields().iter().map(hp3_script::Value::as_int).collect();
                     let turns: Vec<String> = hp3_world::world(vm).anim.actors.get(&p).map(|x| x.bone_turns.iter().map(|t| format!("{} {:?} a{:.2}", t.0, t.1, t.2)).collect()).unwrap_or_default();

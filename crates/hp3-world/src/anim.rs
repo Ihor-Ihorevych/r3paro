@@ -349,7 +349,7 @@ pub fn bone_headings(vm: &mut Vm<'_>, a: ObjId) -> String {
         };
         let (Some(raw), Some(shown)) = (bone_matrix_in(vm, a, &n, plain), bone_matrix_in(vm, a, &n, drawn)) else { continue };
         let (r, d) = (heading(raw), heading(shown));
-        if r.abs() > 20.0 || d.abs() > 20.0 {
+        if r.abs() > 8.0 || d.abs() > 8.0 {
             out += &format!(" [{n} {r:.0}/{d:.0}]");
         }
     }
