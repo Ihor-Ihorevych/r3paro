@@ -1178,7 +1178,9 @@ pub fn register(vm: &mut Vm<'_>) {
                 Some(s.sequences[si].frames as f32)
             });
             if let Some(f) = frames {
-                channel_mut(vm, o, ci).frame = if in_frames { t } else { t * f };
+                // HP3's own scripts pass a frame number (the pickup's start frame of 1) without the unit flag; a time
+                // of one whole or more cannot be a share of the sequence, so it is read as frames.
+                channel_mut(vm, o, ci).frame = if in_frames || t >= 1.0 { t.min(f) } else { t * f };
             }
         }
         Ok(Value::Empty)
