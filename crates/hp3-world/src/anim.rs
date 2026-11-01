@@ -219,12 +219,14 @@ pub fn bone_matrix(vm: &mut Vm<'_>, a: ObjId, bone: &str) -> Option<glam::Mat4> 
     bone_matrix_in(vm, a, bone, corrected)
 }
 
-/// While a pawn hangs from a Carpe Retractum line, the animations tilt its whole body (the root bone swings to one
+/// While a pawn hangs from a Carpe Retractum line (or the controlled pawn is in the air), the animations tilt its whole body (the root bone swings to one
 /// side and pitches as it is pulled), so it is turned back upright about its own place: a rotation in world space,
 /// the identity at any other time.
 pub fn hang_correction(vm: &mut Vm<'_>, a: ObjId) -> glam::Mat4 {
     let hanging = vm.state_of(a).is_some_and(|s| vm.db.names.get(vm.db.get(s).name).eq_ignore_ascii_case("StateRetractum"));
-    if !hanging {
+    // The jump and fall animations of the controlled pawn lean the body the same way.
+    let airborne = !hanging && get(vm, a, "Physics").as_byte() == crate::physics::PHYS_FALLING && crate::physics::is_player_pawn(vm, a);
+    if !hanging && !airborne {
         return glam::Mat4::IDENTITY;
     }
     let Some(mesh) = get(vm, a, "Mesh").as_obj() else { return glam::Mat4::IDENTITY };
