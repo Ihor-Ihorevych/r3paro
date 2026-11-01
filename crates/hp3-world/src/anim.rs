@@ -430,6 +430,12 @@ fn play(vm: &mut Vm<'_>, actor: ObjId, seq: Name, rate: f32, tween: f32, channel
         return false;
     };
     let base = set.sequences[si].rate;
+    if name.to_ascii_lowercase().contains("pickup") {
+        let key = set_key(&set);
+        let list: Vec<(f32, Name)> = world(vm).anim.notifies.get(&(key, si)).cloned().unwrap_or_default();
+        let registered: Vec<String> = list.iter().map(|(t, e)| format!("{:.1}->{}", t * set.sequences[si].frames as f32, vm.db.names.get(*e))).collect();
+        vm.log.push(format!("anim: play {name} rate {rate} channel {channel} frames {} notifies {registered:?}", set.sequences[si].frames));
+    }
     let ch = channel_mut(vm, actor, channel);
     // Looping the sequence that already loops keeps its place.
     if looping && ch.looping && ch.playing && ch.sequence == Some(si) {
@@ -561,6 +567,9 @@ pub fn tick_actor(vm: &mut Vm<'_>, actor: ObjId, dt: f32) {
         }
         for (event, channel) in raised {
             let name = vm.db.names.get(event).to_string();
+            if name.to_ascii_lowercase().contains("pickup") {
+                vm.log.push(format!("anim: notify {name} raised on channel {channel}"));
+            }
             world(vm).anim.actors.entry(a).or_default().last_notify_channel = channel;
             if std::env::var("HP3_ANIM_TRACE").is_ok() {
                 eprintln!("anim: notify {name} on {a:?} channel {channel}");
