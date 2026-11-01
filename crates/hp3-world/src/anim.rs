@@ -222,6 +222,9 @@ pub fn bone_matrix(vm: &mut Vm<'_>, a: ObjId, bone: &str) -> Option<glam::Mat4> 
     bone_matrix_extra(vm, a, bone, corrected, &extra)
 }
 
+/// How much of the run's sideways lean is taken out of the controlled pawn (1 is all of it).
+const LEAN_CANCEL: f32 = 0.85;
+
 /// The controlled pawn's run animations swing the root bone and the upper body from side to side (the sideways and
 /// backward ones twist it about 45 degrees and the upper body and head keep turning the same way). The root is turned back as a whole (`hang_correction`); these are the turns
 /// that bring the spine, neck and head round to face the way the pawn does too. Empty at any other time.
@@ -264,7 +267,7 @@ pub fn strafe_turns(vm: &mut Vm<'_>, a: ObjId) -> Vec<(usize, glam::Mat4)> {
         let side = glam::Vec3::new(heading.y, -heading.x, 0.0);
         let up2 = (back * current * (rest.inverse() * glam::Vec3::Z)).normalize_or_zero();
         let flat = (up2 - side * up2.dot(side)).normalize_or_zero();
-        let lean = if up2 == glam::Vec3::ZERO || flat == glam::Vec3::ZERO { glam::Quat::IDENTITY } else { glam::Quat::from_rotation_arc(up2, flat) };
+        let lean = if up2 == glam::Vec3::ZERO || flat == glam::Vec3::ZERO { glam::Quat::IDENTITY } else { glam::Quat::IDENTITY.slerp(glam::Quat::from_rotation_arc(up2, flat), LEAN_CANCEL) };
         if yaw.abs() < 0.01 && lean.angle_between(glam::Quat::IDENTITY) < 0.01 {
             continue;
         }
@@ -306,7 +309,7 @@ pub fn hang_correction(vm: &mut Vm<'_>, a: ObjId) -> glam::Mat4 {
         let heading = glam::Vec3::new(heading.x, heading.y, 0.0).normalize_or_zero();
         let side = glam::Vec3::new(heading.y, -heading.x, 0.0);
         let upright = (up_now - side * up_now.dot(side)).normalize_or_zero();
-        let lean = if upright == glam::Vec3::ZERO || up_now == glam::Vec3::ZERO { glam::Quat::IDENTITY } else { glam::Quat::from_rotation_arc(up_now, upright) };
+        let lean = if upright == glam::Vec3::ZERO || up_now == glam::Vec3::ZERO { glam::Quat::IDENTITY } else { glam::Quat::IDENTITY.slerp(glam::Quat::from_rotation_arc(up_now, upright), LEAN_CANCEL) };
         let fwd = lean * (current * (rest.inverse() * glam::Vec3::X));
         let yaw = fwd.y.atan2(fwd.x);
         if yaw.abs() < 0.02 && lean.angle_between(glam::Quat::IDENTITY) < 0.01 {
