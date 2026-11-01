@@ -256,12 +256,20 @@ pub fn strafe_turns(vm: &mut Vm<'_>, a: ObjId) -> Vec<(usize, glam::Mat4)> {
         let current = axes(m);
         let f = current * (rest.inverse() * glam::Vec3::X);
         let yaw = f.y.atan2(f.x);
-        if yaw.abs() < 0.01 {
+        // The sideways lean the stride gives this part of the spine, after the turn: its up axis loses the part that
+        // points to the pawn's side.
+        let back = glam::Mat3::from_rotation_z(-yaw);
+        let heading = plain.x_axis.truncate();
+        let heading = glam::Vec3::new(heading.x, heading.y, 0.0).normalize_or_zero();
+        let side = glam::Vec3::new(heading.y, -heading.x, 0.0);
+        let up2 = (back * current * (rest.inverse() * glam::Vec3::Z)).normalize_or_zero();
+        let flat = (up2 - side * up2.dot(side)).normalize_or_zero();
+        let lean = if up2 == glam::Vec3::ZERO || flat == glam::Vec3::ZERO { glam::Quat::IDENTITY } else { glam::Quat::from_rotation_arc(up2, flat) };
+        if yaw.abs() < 0.01 && lean.angle_between(glam::Quat::IDENTITY) < 0.01 {
             continue;
         }
-        // About the bone's own place: its world rotation turned back by `yaw` about the vertical, in its own axes.
-        let back = glam::Mat3::from_rotation_z(-yaw);
-        let local = current.inverse() * back * current;
+        // About the bone's own place: its world rotation turned back and uprighted, in its own axes.
+        let local = current.inverse() * glam::Mat3::from_quat(lean) * back * current;
         turns.push((i, glam::Mat4::from_mat3(local)));
     }
     turns
