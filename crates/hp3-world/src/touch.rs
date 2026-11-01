@@ -236,6 +236,13 @@ fn begin(vm: &mut Vm<'_>, a: ObjId, b: ObjId) {
         return;
     }
     link(vm, a, b);
+    for x in [a, b] {
+        if vm.db.objects.get(x).class.is_some_and(|c| vm.db.names.get(vm.db.get(c).name) == "WizardCracker") {
+            let on_ground = get(vm, x, "bOnGround").as_bool();
+            let (pa, pb) = (hp3_script::natives::object_path(vm, a), hp3_script::natives::object_path(vm, b));
+            vm.log.push(format!("touch: {pa} and {pb} (cracker bOnGround {on_ground})"));
+        }
+    }
     fire(vm, a, "Touch", &mut [Value::Object(Some(b))]);
     // The first handler may have destroyed one of them or ended the touch.
     let still = world(vm).touch.partners.get(&a).is_some_and(|p| p.contains(&b));

@@ -854,6 +854,10 @@ fn fall(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         if landing.z >= WALKABLE_Z {
             let hit = Hit { normal: landing, ..hit };
             let mut v = vec(&get(vm, a, "Velocity"));
+            if vm.db.objects.get(a).class.is_some_and(|c| vm.db.names.get(vm.db.get(c).name) == "WizardCracker") {
+                let at = vec(&get(vm, a, "Location"));
+                vm.log.push(format!("cracker landed at {at}"));
+            }
             fire(vm, a, "Landed", &mut [value(hit.normal)]);
             if get(vm, a, "Physics").as_byte() == PHYS_FALLING {
                 set(vm, a, "Physics", Value::Byte(PHYS_WALKING));
