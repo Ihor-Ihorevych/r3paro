@@ -202,7 +202,8 @@ pub fn pose_debug(vm: &mut Vm<'_>, a: ObjId) -> String {
             names.push(want.to_string());
         }
     }
-    let mut out = String::new();
+    let extra = strafe_turns(vm, a);
+    let mut out = format!(" extra turns {}:", extra.len());
     for n in names {
         if let Some(m) = bone_matrix(vm, a, &n) {
             let at = m.w_axis.truncate() - origin;
@@ -347,7 +348,7 @@ pub fn bone_headings(vm: &mut Vm<'_>, a: ObjId) -> String {
             let f = axes(m) * (rest.inverse() * glam::Vec3::X);
             f.y.atan2(f.x).to_degrees()
         };
-        let (Some(raw), Some(shown)) = (bone_matrix_in(vm, a, &n, plain), bone_matrix_in(vm, a, &n, drawn)) else { continue };
+        let (Some(raw), Some(shown)) = (bone_matrix_in(vm, a, &n, plain), bone_matrix_extra(vm, a, &n, drawn, &extra)) else { continue };
         let (r, d) = (heading(raw), heading(shown));
         if r.abs() > 8.0 || d.abs() > 8.0 {
             out += &format!(" [{n} {r:.0}/{d:.0}]");
