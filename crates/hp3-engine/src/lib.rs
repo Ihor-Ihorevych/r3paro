@@ -342,7 +342,8 @@ impl MeshCache {
             let skin = match &set {
                 Some(set) => {
                     let map = s.bone_maps.entry(Rc::as_ptr(set) as usize).or_insert_with(|| set.bone_map(&s.skeleton));
-                    let t = hp3_world::anim::turns_for(&s.skeleton, &turns);
+                    let mut t = hp3_world::anim::turns_for(&s.skeleton, &turns);
+                    t.extend(hp3_world::anim::strafe_turns(vm, actor));
                     hp3_anim::pose_blended(&s.skeleton, Some((set, map)), &base.unwrap_or_default(), &layers, &t)
                 }
                 None => hp3_anim::pose(&s.skeleton, None, None, 0.0),

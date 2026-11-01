@@ -218,7 +218,53 @@ pub fn pose_debug(vm: &mut Vm<'_>, a: ObjId) -> String {
 pub fn bone_matrix(vm: &mut Vm<'_>, a: ObjId, bone: &str) -> Option<glam::Mat4> {
     // The hang correction turns the whole actor, so the bones go with it.
     let corrected = hang_correction(vm, a) * actor_matrix(vm, a);
-    bone_matrix_in(vm, a, bone, corrected)
+    let extra = strafe_turns(vm, a);
+    bone_matrix_extra(vm, a, bone, corrected, &extra)
+}
+
+/// The controlled pawn's sideways and backward run animations twist the root bone about 45 degrees and the upper body
+/// and head keep turning the same way. The root is turned back as a whole (`hang_correction`); these are the turns
+/// that bring the spine, neck and head round to face the way the pawn does too. Empty at any other time.
+pub fn strafe_turns(vm: &mut Vm<'_>, a: ObjId) -> Vec<(usize, glam::Mat4)> {
+    if get(vm, a, "Physics").as_byte() != crate::physics::PHYS_WALKING || !crate::physics::is_player_pawn(vm, a) {
+        return Vec::new();
+    }
+    let Some(set) = set_of(vm, a) else { return Vec::new() };
+    let sideways = world(vm).anim.actors.get(&a).is_some_and(|x| {
+        x.channels.iter().any(|c| {
+            c.alpha > 0.3
+                && c.sequence.is_some_and(|s| {
+                    let n = set.sequences[s].name.to_ascii_lowercase();
+                    n.starts_with("run_left") || n.starts_with("run_right") || n.starts_with("run_back")
+                })
+        })
+    });
+    if !sideways {
+        return Vec::new();
+    }
+    let Some(mesh) = get(vm, a, "Mesh").as_obj() else { return Vec::new() };
+    let Some(skel) = skeleton_of(vm, mesh) else { return Vec::new() };
+    let plain = actor_matrix(vm, a);
+    let drawn = hang_correction(vm, a) * plain;
+    let axes = |m: glam::Mat4| glam::Mat3::from_cols(m.x_axis.truncate().normalize_or_zero(), m.y_axis.truncate().normalize_or_zero(), m.z_axis.truncate().normalize_or_zero());
+    let rest_all = hp3_anim::bones(&skel.skeleton, None, None, 0.0);
+    let mut turns: Vec<(usize, glam::Mat4)> = Vec::new();
+    for name in ["body_lowerspine", "body_midspine", "body_topspine", "body_neckbase", "body_neck"] {
+        let Some(i) = skel.skeleton.find(name) else { continue };
+        let Some(m) = bone_matrix_extra(vm, a, name, drawn, &turns) else { continue };
+        let rest = axes(plain * skel.to_actor * rest_all[i]);
+        let current = axes(m);
+        let f = current * (rest.inverse() * glam::Vec3::X);
+        let yaw = f.y.atan2(f.x);
+        if yaw.abs() < 0.01 {
+            continue;
+        }
+        // About the bone's own place: its world rotation turned back by `yaw` about the vertical, in its own axes.
+        let back = glam::Mat3::from_rotation_z(-yaw);
+        let local = current.inverse() * back * current;
+        turns.push((i, glam::Mat4::from_mat3(local)));
+    }
+    turns
 }
 
 /// While a pawn hangs from a Carpe Retractum line (or the controlled pawn is in the air), the animations tilt its whole body (the root bone swings to one
@@ -311,6 +357,10 @@ pub fn bone_headings(vm: &mut Vm<'_>, a: ObjId) -> String {
 }
 
 fn bone_matrix_in(vm: &mut Vm<'_>, a: ObjId, bone: &str, actor: glam::Mat4) -> Option<glam::Mat4> {
+    bone_matrix_extra(vm, a, bone, actor, &[])
+}
+
+fn bone_matrix_extra(vm: &mut Vm<'_>, a: ObjId, bone: &str, actor: glam::Mat4, extra: &[(usize, glam::Mat4)]) -> Option<glam::Mat4> {
     let mesh = get(vm, a, "Mesh").as_obj()?;
     let skel = skeleton_of(vm, mesh)?;
     let index = skel.skeleton.find(bone)?;
@@ -341,7 +391,8 @@ fn bone_matrix_in(vm: &mut Vm<'_>, a: ObjId, bone: &str, actor: glam::Mat4) -> O
                     m
                 }
             };
-            let turns = world(vm).anim.actors.get(&a).map(|x| turns_for(&skel.skeleton, &x.bone_turns)).unwrap_or_default();
+            let mut turns = world(vm).anim.actors.get(&a).map(|x| turns_for(&skel.skeleton, &x.bone_turns)).unwrap_or_default();
+            turns.extend_from_slice(extra);
             hp3_anim::bones_blended(&skel.skeleton, Some((set, &map)), &base.unwrap_or_default(), &layers, &turns)
         }
         None => hp3_anim::bones(&skel.skeleton, None, None, 0.0),
