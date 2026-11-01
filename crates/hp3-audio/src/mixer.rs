@@ -112,6 +112,8 @@ pub struct Mixer {
     pub music_volume: f32,
     /// The ini's `Rolloff`: how fast distance takes a sound's volume away.
     pub rolloff: f32,
+    /// How loud the level's music is while a looping sting (the menu's music) plays over it: 1 when none does.
+    duck: f32,
 }
 
 impl Default for Mixer {
@@ -125,6 +127,7 @@ impl Default for Mixer {
             ambient_volume: 1.0,
             music_volume: 0.7,
             rolloff: 1.0,
+            duck: 1.0,
         }
     }
 }
@@ -182,6 +185,13 @@ impl Mixer {
 
     pub fn stop_all(&mut self) {
         self.voices.clear();
+    }
+
+    /// Stops every voice and every piece of music at once (a level change).
+    pub fn stop_everything(&mut self) {
+        self.voices.clear();
+        self.music.clear();
+        self.duck = 1.0;
     }
 
     pub fn voice_count(&self) -> usize {
@@ -295,12 +305,20 @@ impl Mixer {
         }
         self.voices.retain(|v| v.looping || v.position < v.sound.frames() as f64);
         let music_volume = self.music_volume;
+        // The level's music goes quiet while a looping sting plays, and comes back when it ends.
+        let sting_plays = self.music.iter().any(|m| m.stab && m.looping && !m.stopping);
+        let duck_step = 1.0 / (0.3 * OUTPUT_RATE as f32);
+        let mut duck = self.duck;
         for m in &mut self.music {
             let step = m.sound.rate as f64 / OUTPUT_RATE as f64;
             let total = m.sound.frames();
             let ch = m.sound.channels.max(1);
             let mut ended = total == 0;
+            duck = self.duck;
             for f in 0..frames {
+                if !m.stab {
+                    duck = if sting_plays { (duck - duck_step).max(0.0) } else { (duck + duck_step).min(1.0) };
+                }
                 if m.level != m.target {
                     m.level = if m.level < m.target { (m.level + m.step).min(m.target) } else { (m.level - m.step).max(m.target) };
                 }
@@ -316,7 +334,7 @@ impl Mixer {
                 let frac = (m.position - i as f64) as f32;
                 let j = if i + 1 < total { i + 1 } else if m.looping { 0 } else { i };
                 let at = |frame: usize, c: usize| m.sound.samples[frame * ch + c.min(ch - 1)] as f32 / 32768.0;
-                let g = m.level * music_volume;
+                let g = m.level * music_volume * if m.stab { 1.0 } else { duck };
                 out[f * 2] += (at(i, 0) + (at(j, 0) - at(i, 0)) * frac) * g;
                 out[f * 2 + 1] += (at(i, 1) + (at(j, 1) - at(i, 1)) * frac) * g;
                 m.position += step;
@@ -328,6 +346,8 @@ impl Mixer {
             }
         }
         self.music.retain(|m| m.target >= 0.0);
+        let steps = frames as f32 * duck_step;
+        self.duck = if sting_plays { (self.duck - steps).max(0.0) } else { (self.duck + steps).min(1.0) };
         for s in out.iter_mut() {
             // Soft limiting keeps loud mixes from clipping harshly.
             *s = if s.abs() > 0.9 { s.signum() * (0.9 + 0.1 * ((s.abs() - 0.9) * 10.0).tanh()) } else { *s };
@@ -450,6 +470,29 @@ mod tests {
         m.mix(&mut out);
         m.mix(&mut out);
         assert!(!m.music_playing());
+    }
+
+    #[test]
+    fn a_looping_sting_quiets_the_level_music_and_it_returns() {
+        let mut m = Mixer::default();
+        m.music_volume = 1.0;
+        m.play_music(tone(OUTPUT_RATE as usize * 10), 1, true, 0.0, false);
+        m.play_music(tone(OUTPUT_RATE as usize * 10), 2, true, 0.0, true);
+        let mut out = vec![0.0f32; OUTPUT_RATE as usize];
+        m.mix(&mut out);
+        assert!(m.duck < 0.01, "the level music is quiet under the sting");
+        m.stop_music(2, 0.0);
+        m.mix(&mut out);
+        assert!(m.duck > 0.99, "and back once it is gone");
+    }
+
+    #[test]
+    fn stop_everything_leaves_nothing_playing() {
+        let mut m = Mixer::default();
+        m.play_music(tone(1000), 1, true, 0.0, false);
+        m.stop_everything();
+        assert!(!m.music_playing());
+        assert_eq!(m.voice_count(), 0);
     }
 
     #[test]

@@ -330,6 +330,27 @@ pub fn hang_correction(vm: &mut Vm<'_>, a: ObjId) -> glam::Mat4 {
     glam::Mat4::from_translation(at) * glam::Mat4::from_quat(turn) * glam::Mat4::from_translation(-at)
 }
 
+/// For the game log: a chest's mesh, its sequence and where each bone sits at the first and last frame.
+fn chest_probe(vm: &mut Vm<'_>, a: ObjId, set: &Rc<AnimSet>, seq: usize) {
+    let Some(mesh) = get(vm, a, "Mesh").as_obj() else { return };
+    let mesh_name = hp3_script::natives::object_path(vm, mesh);
+    let class = vm.db.objects.get(a).class.map(|c| vm.db.names.get(vm.db.get(c).name).to_string()).unwrap_or_default();
+    let Some(skel) = skeleton_of(vm, mesh) else { return };
+    let map = set.bone_map(&skel.skeleton);
+    let frames = set.sequences[seq].frames;
+    let mut text = format!("chest probe: {class} mesh {mesh_name} sequence {} ({frames} frames), {} bones", set.sequences[seq].name, skel.skeleton.len());
+    for (label, frame) in [("first", 0.0f32), ("last", (frames - 1).max(0) as f32)] {
+        let bones = hp3_anim::bones(&skel.skeleton, Some((set, &map)), Some(seq), frame);
+        let rest = hp3_anim::bones(&skel.skeleton, None, None, 0.0);
+        for (i, m) in bones.iter().enumerate() {
+            let (p, q) = (m.w_axis.truncate(), rest[i].w_axis.truncate());
+            let (x, z) = (m.x_axis.truncate().normalize_or_zero(), m.z_axis.truncate().normalize_or_zero());
+            text += &format!(" | {label} {} {} at ({:.1},{:.1},{:.1}) rest ({:.1},{:.1},{:.1}) x ({:.2},{:.2},{:.2}) z ({:.2},{:.2},{:.2}) mapped {}", i, skel.skeleton.names[i], p.x, p.y, p.z, q.x, q.y, q.z, x.x, x.y, x.z, z.x, z.y, z.z, map.get(i).copied().flatten().is_some());
+        }
+    }
+    vm.log.push(text);
+}
+
 /// For the game log: how far the root bone's heading and up have turned from the rest pose, in degrees
 /// (heading about the vertical, tilt of up), and the first bones' places, to see what an animation does to the body.
 pub fn root_twist(vm: &mut Vm<'_>, a: ObjId) -> Option<(f32, f32)> {
@@ -509,6 +530,9 @@ fn play(vm: &mut Vm<'_>, actor: ObjId, seq: Name, rate: f32, tween: f32, channel
         let list: Vec<(f32, Name)> = world(vm).anim.notifies.get(&(key, si)).cloned().unwrap_or_default();
         let registered: Vec<String> = list.iter().map(|(t, e)| format!("{:.1}->{}", t * set.sequences[si].frames as f32, vm.db.names.get(*e))).collect();
         vm.log.push(format!("anim: play {name} rate {rate} channel {channel} frames {} notifies {registered:?}", set.sequences[si].frames));
+    }
+    if std::env::var_os("HP3_NO_CHEST_PROBE").is_none() && vm.db.objects.get(actor).class.is_some_and(|c| vm.db.names.get(vm.db.get(c).name).to_ascii_lowercase().contains("chest")) {
+        chest_probe(vm, actor, &set, si);
     }
     let ch = channel_mut(vm, actor, channel);
     // Looping the sequence that already loops keeps its place.

@@ -283,11 +283,11 @@ impl AudioSystem {
         self.ambient = wanted;
     }
 
-    /// Silences everything (on a level change).
+    /// Silences everything, music included (on a level change).
     pub fn stop_all(&mut self) {
         self.ambient.clear();
         if let Ok(mut m) = self.mixer.lock() {
-            m.stop_all();
+            m.stop_everything();
         }
     }
 }
