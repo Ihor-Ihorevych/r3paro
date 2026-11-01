@@ -202,8 +202,7 @@ pub fn pose_debug(vm: &mut Vm<'_>, a: ObjId) -> String {
             names.push(want.to_string());
         }
     }
-    let extra = strafe_turns(vm, a);
-    let mut out = format!(" extra turns {}:", extra.len());
+    let mut out = String::new();
     for n in names {
         if let Some(m) = bone_matrix(vm, a, &n) {
             let at = m.w_axis.truncate() - origin;
@@ -340,7 +339,8 @@ pub fn bone_headings(vm: &mut Vm<'_>, a: ObjId) -> String {
     let names: Vec<String> = skel.skeleton.names.clone();
     let axes = |m: glam::Mat4| glam::Mat3::from_cols(m.x_axis.truncate().normalize_or_zero(), m.y_axis.truncate().normalize_or_zero(), m.z_axis.truncate().normalize_or_zero());
     let rest_all = hp3_anim::bones(&skel.skeleton, None, None, 0.0);
-    let mut out = String::new();
+    let extra = strafe_turns(vm, a);
+    let mut out = format!(" extra turns {}:", extra.len());
     for n in names {
         let Some(i) = skel.skeleton.find(&n) else { continue };
         let rest = axes(plain * skel.to_actor * rest_all[i]);
