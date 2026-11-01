@@ -222,8 +222,8 @@ pub fn bone_matrix(vm: &mut Vm<'_>, a: ObjId, bone: &str) -> Option<glam::Mat4> 
     bone_matrix_extra(vm, a, bone, corrected, &extra)
 }
 
-/// The controlled pawn's sideways and backward run animations twist the root bone about 45 degrees and the upper body
-/// and head keep turning the same way. The root is turned back as a whole (`hang_correction`); these are the turns
+/// The controlled pawn's run animations swing the root bone and the upper body from side to side (the sideways and
+/// backward ones twist it about 45 degrees and the upper body and head keep turning the same way). The root is turned back as a whole (`hang_correction`); these are the turns
 /// that bring the spine, neck and head round to face the way the pawn does too. Empty at any other time.
 pub fn strafe_turns(vm: &mut Vm<'_>, a: ObjId) -> Vec<(usize, glam::Mat4)> {
     if get(vm, a, "Physics").as_byte() != crate::physics::PHYS_WALKING || !crate::physics::is_player_pawn(vm, a) {
@@ -235,7 +235,7 @@ pub fn strafe_turns(vm: &mut Vm<'_>, a: ObjId) -> Vec<(usize, glam::Mat4)> {
             c.alpha > 0.3
                 && c.sequence.is_some_and(|s| {
                     let n = set.sequences[s].name.to_ascii_lowercase();
-                    n.starts_with("run_left") || n.starts_with("run_right") || n.starts_with("run_back")
+                    n.starts_with("run") || n.contains("walk")
                 })
         })
     });
