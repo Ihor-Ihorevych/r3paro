@@ -197,6 +197,13 @@ pub fn spawn(vm: &mut Vm<'_>, spawner: Option<ObjId>, a: &[Value]) -> Result<Val
     let instigator = spawner.map(|s| get(vm, s, "Instigator")).unwrap_or_default();
     set(vm, obj, "Instigator", instigator);
     world(vm).actors.push(obj);
+    {
+        let class_text = vm.db.names.get(class_name).to_string();
+        if class_text.contains("CombatManager") || class_text.starts_with("MonsterBook") {
+            let who = spawner.map(|s| hp3_script::natives::object_path(vm, s)).unwrap_or_default();
+            vm.log.push(format!("spawned {class_text} as {} by {who}", vm.db.names.get(name)));
+        }
+    }
     if vm.db.find("Emitter").is_some_and(|e| vm.is_child_of(class, e)) {
         crate::particles::own_emitters(vm, obj);
     }
@@ -356,6 +363,12 @@ pub fn register(vm: &mut Vm<'_>) {
         let Some(o) = this else { return Ok(Value::Empty) };
         let rate = a.first().map(Value::as_float).unwrap_or(0.0);
         let looping = a.get(1).is_some_and(Value::as_bool);
+        {
+            let class_text = vm.db.objects.get(o).class.map(|c| vm.db.names.get(vm.db.get(c).name).to_string()).unwrap_or_default();
+            if class_text.contains("CombatManager") || class_text.starts_with("MonsterBook") {
+                vm.log.push(format!("SetTimer {rate} looping {looping} on {class_text}"));
+            }
+        }
         let w = world(vm);
         if rate <= 0.0 {
             w.timers.remove(&o);
