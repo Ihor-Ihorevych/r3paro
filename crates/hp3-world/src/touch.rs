@@ -241,6 +241,18 @@ fn begin(vm: &mut Vm<'_>, a: ObjId, b: ObjId) {
             let on_ground = get(vm, x, "bOnGround").as_bool();
             let (pa, pb) = (hp3_script::natives::object_path(vm, a), hp3_script::natives::object_path(vm, b));
             vm.log.push(format!("touch: {pa} and {pb} (cracker bOnGround {on_ground})"));
+            // What PickupActor looks at, for the player's pawn touching it.
+            let other = if x == a { b } else { a };
+            if is_player(vm, other) {
+                let main = get(vm, other, "bIsMainPlayer").as_bool();
+                let can_be = get(vm, x, "bCanBePickedUp").as_bool();
+                let phys = get(vm, other, "Physics").as_byte();
+                let ctl = get(vm, other, "Controller").as_obj();
+                let ctl_state = ctl.and_then(|c| vm.state_of(c)).map(|s| vm.db.names.get(vm.db.get(s).name).to_string()).unwrap_or_default();
+                let holding = get(vm, other, "aHolding").as_obj().map(|o| (hp3_script::natives::object_path(vm, o), vm.db.objects.get(o).deleted));
+                let can_do = fire(vm, other, "CanDoPickupActor", &mut []).as_bool();
+                vm.log.push(format!("pickup check: bIsMainPlayer {main} bCanBePickedUp {can_be} physics {phys} controller state '{ctl_state}' aHolding {holding:?} CanDoPickupActor {can_do}"));
+            }
         }
     }
     fire(vm, a, "Touch", &mut [Value::Object(Some(b))]);
@@ -376,4 +388,8 @@ pub fn along(vm: &mut Vm<'_>, start: Vec3, end: Vec3, pad: f32) -> Vec<ObjId> {
         }
     }
     out
+}
+
+fn is_player(vm: &mut Vm<'_>, a: ObjId) -> bool {
+    world(vm).player.is_some_and(|pc| get(vm, pc, "Pawn").as_obj() == Some(a))
 }

@@ -290,12 +290,7 @@ pub fn bone_headings(vm: &mut Vm<'_>, a: ObjId) -> String {
     let Some(skel) = skeleton_of(vm, mesh) else { return String::new() };
     let plain = actor_matrix(vm, a);
     let drawn = hang_correction(vm, a) * plain;
-    let mut names: Vec<String> = skel.skeleton.names.iter().take(1).cloned().collect();
-    for want in ["bip01 pelvis", "bip01 spine", "bip01 spine1", "bip01 head", "bip01 l thigh", "bip01 l foot"] {
-        if skel.skeleton.find(want).is_some() {
-            names.push(want.to_string());
-        }
-    }
+    let names: Vec<String> = skel.skeleton.names.clone();
     let axes = |m: glam::Mat4| glam::Mat3::from_cols(m.x_axis.truncate().normalize_or_zero(), m.y_axis.truncate().normalize_or_zero(), m.z_axis.truncate().normalize_or_zero());
     let rest_all = hp3_anim::bones(&skel.skeleton, None, None, 0.0);
     let mut out = String::new();
@@ -307,7 +302,10 @@ pub fn bone_headings(vm: &mut Vm<'_>, a: ObjId) -> String {
             f.y.atan2(f.x).to_degrees()
         };
         let (Some(raw), Some(shown)) = (bone_matrix_in(vm, a, &n, plain), bone_matrix_in(vm, a, &n, drawn)) else { continue };
-        out += &format!(" [{n} {:.0}/{:.0}]", heading(raw), heading(shown));
+        let (r, d) = (heading(raw), heading(shown));
+        if r.abs() > 20.0 || d.abs() > 20.0 {
+            out += &format!(" [{n} {r:.0}/{d:.0}]");
+        }
     }
     out
 }
