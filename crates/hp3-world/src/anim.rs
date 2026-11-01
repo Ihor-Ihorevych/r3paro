@@ -292,13 +292,20 @@ pub fn hang_correction(vm: &mut Vm<'_>, a: ObjId) -> glam::Mat4 {
     let up_in_bone = rest.inverse() * glam::Vec3::Z;
     let up_now = (current * up_in_bone).normalize_or_zero();
     if grounded {
-        let fwd = current * (rest.inverse() * glam::Vec3::X);
+        // The run swings the whole body from side to side: it leans about its own heading with each stride. That lean
+        // is taken out (the lean forward stays), and then the root's turn.
+        let heading = plain.x_axis.truncate();
+        let heading = glam::Vec3::new(heading.x, heading.y, 0.0).normalize_or_zero();
+        let side = glam::Vec3::new(heading.y, -heading.x, 0.0);
+        let upright = (up_now - side * up_now.dot(side)).normalize_or_zero();
+        let lean = if upright == glam::Vec3::ZERO || up_now == glam::Vec3::ZERO { glam::Quat::IDENTITY } else { glam::Quat::from_rotation_arc(up_now, upright) };
+        let fwd = lean * (current * (rest.inverse() * glam::Vec3::X));
         let yaw = fwd.y.atan2(fwd.x);
-        if yaw.abs() < 0.02 {
+        if yaw.abs() < 0.02 && lean.angle_between(glam::Quat::IDENTITY) < 0.01 {
             return glam::Mat4::IDENTITY;
         }
         let at = crate::physics::vec(&get(vm, a, "Location"));
-        return glam::Mat4::from_translation(at) * glam::Mat4::from_rotation_z(-yaw) * glam::Mat4::from_translation(-at);
+        return glam::Mat4::from_translation(at) * glam::Mat4::from_rotation_z(-yaw) * glam::Mat4::from_quat(lean) * glam::Mat4::from_translation(-at);
     }
     if up_now == glam::Vec3::ZERO || up_now.dot(glam::Vec3::Z) > 0.9999 {
         return glam::Mat4::IDENTITY;
