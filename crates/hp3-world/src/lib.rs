@@ -705,7 +705,7 @@ fn start_book_fights(vm: &mut Vm<'_>) {
         let Some(companion) = get(vm, lead, "TrailingChar").as_obj() else { continue };
         let name = get(vm, companion, "Label").as_str().to_string();
         // The command a companion trigger gives: companion, boss label, controller type, manager tag.
-        let command = format!("TrailingCharFightWithHero {name} {label} HPMBookCompanionController None");
+        let command = format!("TrailingCharFightWithHero {name} {label} HGame.HPMBookCompanionController None");
         vm.log.push(format!("book fight: starting it with '{command}'"));
         fire(vm, lead, "TrailingCharFightWithHero", &mut [Value::Str(command)]);
         let manager = get(vm, book, "mbcm").as_obj().map(|m| hp3_script::natives::object_path(vm, m));
