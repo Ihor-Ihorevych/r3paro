@@ -116,6 +116,26 @@ fn pose(root: &Path, package: &str, mesh: &str, out: &Path, seq: Option<&str>, f
                 hi = hi.max(p);
             }
             println!("  bone {bone} {:20} travels x {:.1} y {:.1} z {:.1}", skel.names[bone], hi.x - lo.x, hi.y - lo.y, hi.z - lo.z);
+            if let Some(ab) = map[bone] {
+                println!("    track: {}", set.describe_track(seq, ab));
+            }
+        }
+    }
+    if std::env::var_os("HP3_PROBE_SKIN").is_some() {
+        for (i, b) in m.ref_skeleton.iter().enumerate() {
+            println!("ref bone {i} {} parent {} children {} pos ({:.1},{:.1},{:.1}) orient ({:.3},{:.3},{:.3},{:.3})", skel.names[i], b.parent, b.num_children, b.position.x, b.position.y, b.position.z, b.orientation.x, b.orientation.y, b.orientation.z, b.orientation.w);
+        }
+        for bone in 0..skel.len() {
+            let (mut lo, mut hi, mut n) = (glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN), 0);
+            for inf in m.influences.iter().filter(|i| i.bone as usize == bone && i.weight > 0.5) {
+                if let Some(p) = m.points.get(inf.vertex as usize) {
+                    let v = glam::Vec3::new(p.x, p.y, p.z);
+                    lo = lo.min(v);
+                    hi = hi.max(v);
+                    n += 1;
+                }
+            }
+            println!("skin bone {bone} {}: {n} points lo ({:.1},{:.1},{:.1}) hi ({:.1},{:.1},{:.1})", skel.names[bone], lo.x, lo.y, lo.z, hi.x, hi.y, hi.z);
         }
     }
     // The mesh's vertical extent around its origin in actor space (reference pose).

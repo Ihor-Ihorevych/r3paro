@@ -40,6 +40,8 @@ pub struct Skeleton {
     pub parents: Vec<usize>,
     pub reference: Vec<BonePose>,
     inv_reference_world: Vec<Mat4>,
+    /// The root bone's rotations are not conjugated like the other bones'.
+    plain_root: bool,
 }
 
 impl Skeleton {
@@ -51,9 +53,12 @@ impl Skeleton {
             .iter()
             .map(|b| BonePose { rotation: quat(&b.orientation), position: v3(&b.position) })
             .collect();
-        let world = world_matrices(&parents, &reference);
+        // A root bone that is turned in the reference pose (a prop's) keeps its stored rotation as it is; a root that
+        // is not (a character's) is the same either way.
+        let plain_root = reference.first().is_some_and(|r| r.rotation.w.abs() < 0.999);
+        let world = world_matrices(&parents, &reference, plain_root);
         let inv_reference_world = world.iter().map(|m| m.inverse()).collect();
-        Skeleton { names, parents, reference, inv_reference_world }
+        Skeleton { names, parents, reference, inv_reference_world, plain_root }
     }
 
     pub fn len(&self) -> usize {
@@ -66,14 +71,14 @@ impl Skeleton {
 }
 
 /// Bone-to-mesh matrices from bone-to-parent poses (parents come before children).
-fn world_matrices(parents: &[usize], poses: &[BonePose]) -> Vec<Mat4> {
-    world_matrices_with(parents, poses, &[])
+fn world_matrices(parents: &[usize], poses: &[BonePose], plain_root: bool) -> Vec<Mat4> {
+    world_matrices_with(parents, poses, &[], plain_root)
 }
 
-fn world_matrices_with(parents: &[usize], poses: &[BonePose], turns: &[(usize, Mat4)]) -> Vec<Mat4> {
+fn world_matrices_with(parents: &[usize], poses: &[BonePose], turns: &[(usize, Mat4)], plain_root: bool) -> Vec<Mat4> {
     let mut out: Vec<Mat4> = Vec::with_capacity(poses.len());
     for (i, p) in poses.iter().enumerate() {
-        let mut local = p.matrix();
+        let mut local = if i == 0 && plain_root { Mat4::from_rotation_translation(p.rotation, p.position) } else { p.matrix() };
         for (b, m) in turns {
             if *b == i {
                 local *= *m;
@@ -116,6 +121,26 @@ impl AnimSet {
 
     pub fn find(&self, name: &str) -> Option<usize> {
         self.by_name.get(&name.to_ascii_lowercase()).copied()
+    }
+
+    /// For the probe tools: what a sequence's track for one animation bone holds (key count, flags, first and last
+    /// rotation and position).
+    pub fn describe_track(&self, seq: usize, bone: usize) -> String {
+        let Some(motion) = self.sequences.get(seq).and_then(|s| self.anim.motions.get(s.motion)) else { return String::new() };
+        let Some(t) = motion.tracks.get(bone) else { return "no track".to_string() };
+        let q = |i: usize| t.rotations.get(i).map(|r| format!("({:.3},{:.3},{:.3},{:.3})", r.x, r.y, r.z, r.w)).unwrap_or_else(|| "-".into());
+        let p = |i: usize| t.positions.get(i).map(|v| format!("({:.1},{:.1},{:.1})", v.x, v.y, v.z)).unwrap_or_else(|| "-".into());
+        format!(
+            "flags {:#x} times {} rotations {} positions {} | rot first {} last {} | pos first {} last {}",
+            t.flags,
+            t.times.len(),
+            t.rotations.len(),
+            t.positions.len(),
+            q(0),
+            q(t.rotations.len().saturating_sub(1)),
+            p(0),
+            p(t.positions.len().saturating_sub(1))
+        )
     }
 
     /// For each skeleton bone, the animation bone driving it.
@@ -332,7 +357,7 @@ pub fn bones_blended(
             }
         }
     }
-    world_matrices_with(&skel.parents, &poses, turns)
+    world_matrices_with(&skel.parents, &poses, turns, skel.plain_root)
 }
 
 impl Skeleton {
