@@ -118,7 +118,8 @@ impl GameLog {
                 self.last_twist_log = self.started.elapsed().as_millis() / 300;
                 if let Some((yaw, tilt)) = hp3_world::anim::root_twist(vm, p) {
                     let rot: Vec<i32> = hp3_world::get(vm, p, "Rotation").fields().iter().map(hp3_script::Value::as_int).collect();
-                    self.line(&format!("TWIST root heading {yaw:.1} deg, up tilt {tilt:.1} deg, pawn rot {rot:?}, anims {}", names.join(" | ")));
+                    let heads = hp3_world::anim::bone_headings(vm, p);
+                    self.line(&format!("TWIST root heading {yaw:.1} deg, up tilt {tilt:.1} deg, pawn rot {rot:?}, anims {} | bones raw/drawn{heads}", names.join(" | ")));
                 }
             }
         }

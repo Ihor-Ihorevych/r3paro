@@ -283,6 +283,35 @@ pub fn root_twist(vm: &mut Vm<'_>, a: ObjId) -> Option<(f32, f32)> {
     Some((yaw, tilt))
 }
 
+/// For the game log: the heading (degrees about the vertical, from the rest pose) of several bones, as animated and
+/// as drawn (with the body correction), so a twist can be told apart from the root's.
+pub fn bone_headings(vm: &mut Vm<'_>, a: ObjId) -> String {
+    let Some(mesh) = get(vm, a, "Mesh").as_obj() else { return String::new() };
+    let Some(skel) = skeleton_of(vm, mesh) else { return String::new() };
+    let plain = actor_matrix(vm, a);
+    let drawn = hang_correction(vm, a) * plain;
+    let mut names: Vec<String> = skel.skeleton.names.iter().take(1).cloned().collect();
+    for want in ["bip01 pelvis", "bip01 spine", "bip01 spine1", "bip01 head", "bip01 l thigh", "bip01 l foot"] {
+        if skel.skeleton.find(want).is_some() {
+            names.push(want.to_string());
+        }
+    }
+    let axes = |m: glam::Mat4| glam::Mat3::from_cols(m.x_axis.truncate().normalize_or_zero(), m.y_axis.truncate().normalize_or_zero(), m.z_axis.truncate().normalize_or_zero());
+    let rest_all = hp3_anim::bones(&skel.skeleton, None, None, 0.0);
+    let mut out = String::new();
+    for n in names {
+        let Some(i) = skel.skeleton.find(&n) else { continue };
+        let rest = axes(plain * skel.to_actor * rest_all[i]);
+        let heading = |m: glam::Mat4| {
+            let f = axes(m) * (rest.inverse() * glam::Vec3::X);
+            f.y.atan2(f.x).to_degrees()
+        };
+        let (Some(raw), Some(shown)) = (bone_matrix_in(vm, a, &n, plain), bone_matrix_in(vm, a, &n, drawn)) else { continue };
+        out += &format!(" [{n} {:.0}/{:.0}]", heading(raw), heading(shown));
+    }
+    out
+}
+
 fn bone_matrix_in(vm: &mut Vm<'_>, a: ObjId, bone: &str, actor: glam::Mat4) -> Option<glam::Mat4> {
     let mesh = get(vm, a, "Mesh").as_obj()?;
     let skel = skeleton_of(vm, mesh)?;
