@@ -667,6 +667,11 @@ pub fn player_view(vm: &mut Vm<'_>) -> Option<(glam::Vec3, [i32; 3], f32)> {
 }
 
 /// Advances the level by `dt` seconds: actor ticks, timers, then state code.
+thread_local! {
+    /// How many times the fight of each Monster Book (by object id) has been started.
+    static BOOK_TRIES: std::cell::RefCell<std::collections::HashMap<u32, u32>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 /// A Monster Book that is out of its dormant state without a combat manager has started its fight with nobody to run
 /// it: the companions are sent into the fight the way a cutscene's `FightWithHero` command does, which creates the
 /// manager that spawns the pages, runs the health bar and ends the fight.
@@ -688,13 +693,23 @@ fn start_book_fights(vm: &mut Vm<'_>) {
         if label.is_empty() {
             continue;
         }
+        let tries = BOOK_TRIES.with(|t| {
+            let mut t = t.borrow_mut();
+            let n = t.entry(book.0).or_insert(0);
+            *n += 1;
+            *n
+        });
+        if tries > 3 {
+            continue;
+        }
         let Some(companion) = get(vm, lead, "TrailingChar").as_obj() else { continue };
         let name = get(vm, companion, "Label").as_str().to_string();
-        vm.log.push(format!("book fight: starting it for {label} with {name} as the companion"));
-        fire(vm, lead, "OnCutExitCommand", &mut [Value::Str(format!("FIGHTWITHHERO {name} {label}"))]);
-        if get(vm, book, "mbcm").as_obj().is_none() {
-            vm.log.push("book fight: no combat manager after the command".into());
-        }
+        // The command a companion trigger gives: companion, boss label, controller type, manager tag.
+        let command = format!("TrailingCharFightWithHero {name} {label} HPMBookCompanionController None");
+        vm.log.push(format!("book fight: starting it with '{command}'"));
+        fire(vm, lead, "TrailingCharFightWithHero", &mut [Value::Str(command)]);
+        let manager = get(vm, book, "mbcm").as_obj().map(|m| hp3_script::natives::object_path(vm, m));
+        vm.log.push(format!("book fight: combat manager after the command: {manager:?}"));
     }
 }
 
