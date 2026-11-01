@@ -1007,6 +1007,8 @@ impl<'s> Vm<'s> {
                     iter(self, iter_this, &values)?
                 };
                 if items.is_empty() {
+                    // An actor iterator that found nothing leaves its variable empty.
+                    self.clear_iter_objects(&places, &values, frame);
                     return Ok(Flow::Jump(*end));
                 }
                 let state = IterState { items, index: 0, places, body };
@@ -1022,6 +1024,11 @@ impl<'s> Vm<'s> {
                     self.write_iter(&state, frame);
                 }
                 let body = state.body;
+                if !more {
+                    // Run to the end, an actor iterator leaves its variable empty (a loop left by `break` keeps it).
+                    let item = state.items.last().cloned().unwrap_or_default();
+                    self.clear_iter_objects(&state.places, &item, frame);
+                }
                 // Kept on the stack either way: the pop after the loop removes it.
                 frame.iters.push(state);
                 if more { Flow::Jump(body) } else { Flow::Next }
@@ -1035,6 +1042,15 @@ impl<'s> Vm<'s> {
                 Flow::Next
             }
         })
+    }
+
+    /// Sets the object variables an iterator filled to none.
+    fn clear_iter_objects(&mut self, places: &[(usize, Place)], values: &[Value], frame: &mut Frame) {
+        for (i, p) in places {
+            if matches!(values.get(*i), Some(Value::Object(_))) {
+                self.write(p, frame, Value::Object(None));
+            }
+        }
     }
 
     fn write_iter(&mut self, state: &IterState, frame: &mut Frame) {
