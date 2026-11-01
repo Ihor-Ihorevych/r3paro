@@ -222,112 +222,15 @@ pub fn bone_matrix(vm: &mut Vm<'_>, a: ObjId, bone: &str) -> Option<glam::Mat4> 
     bone_matrix_extra(vm, a, bone, corrected, &extra)
 }
 
-/// How much of the run's sideways lean is taken out of the controlled pawn (1 is all of it).
-const LEAN_CANCEL: f32 = 0.4;
-
-/// The controlled pawn's run animations swing the root bone and the upper body from side to side (the sideways and
-/// backward ones twist it about 45 degrees and the upper body and head keep turning the same way). The root is turned back as a whole (`hang_correction`); these are the turns
-/// that bring the spine, neck and head round to face the way the pawn does too. Empty at any other time.
-pub fn strafe_turns(vm: &mut Vm<'_>, a: ObjId) -> Vec<(usize, glam::Mat4)> {
-    if get(vm, a, "Physics").as_byte() != crate::physics::PHYS_WALKING || !crate::physics::is_player_pawn(vm, a) {
-        return Vec::new();
-    }
-    let Some(set) = set_of(vm, a) else { return Vec::new() };
-    let sideways = world(vm).anim.actors.get(&a).is_some_and(|x| {
-        x.channels.iter().any(|c| {
-            c.alpha > 0.3
-                && c.sequence.is_some_and(|s| {
-                    let n = set.sequences[s].name.to_ascii_lowercase();
-                    n.starts_with("run") || n.contains("walk")
-                })
-        })
-    });
-    if !sideways {
-        return Vec::new();
-    }
-    let Some(mesh) = get(vm, a, "Mesh").as_obj() else { return Vec::new() };
-    let Some(skel) = skeleton_of(vm, mesh) else { return Vec::new() };
-    let plain = actor_matrix(vm, a);
-    let drawn = hang_correction(vm, a) * plain;
-    let axes = |m: glam::Mat4| glam::Mat3::from_cols(m.x_axis.truncate().normalize_or_zero(), m.y_axis.truncate().normalize_or_zero(), m.z_axis.truncate().normalize_or_zero());
-    let rest_all = hp3_anim::bones(&skel.skeleton, None, None, 0.0);
-    let mut turns: Vec<(usize, glam::Mat4)> = Vec::new();
-    for name in ["body_lowerspine", "body_midspine", "body_topspine", "body_neckbase", "body_neck"] {
-        let Some(i) = skel.skeleton.find(name) else { continue };
-        let Some(m) = bone_matrix_extra(vm, a, name, drawn, &turns) else { continue };
-        let rest = axes(plain * skel.to_actor * rest_all[i]);
-        let current = axes(m);
-        let f = current * (rest.inverse() * glam::Vec3::X);
-        let yaw = f.y.atan2(f.x);
-        // The sideways lean the stride gives this part of the spine, after the turn: its up axis loses the part that
-        // points to the pawn's side.
-        let back = glam::Mat3::from_rotation_z(-yaw);
-        let heading = plain.x_axis.truncate();
-        let heading = glam::Vec3::new(heading.x, heading.y, 0.0).normalize_or_zero();
-        let side = glam::Vec3::new(heading.y, -heading.x, 0.0);
-        let up2 = (back * current * (rest.inverse() * glam::Vec3::Z)).normalize_or_zero();
-        let flat = (up2 - side * up2.dot(side)).normalize_or_zero();
-        let lean = if up2 == glam::Vec3::ZERO || flat == glam::Vec3::ZERO { glam::Quat::IDENTITY } else { glam::Quat::IDENTITY.slerp(glam::Quat::from_rotation_arc(up2, flat), LEAN_CANCEL) };
-        if yaw.abs() < 0.01 && lean.angle_between(glam::Quat::IDENTITY) < 0.01 {
-            continue;
-        }
-        // About the bone's own place: its world rotation turned back and uprighted, in its own axes.
-        let local = current.inverse() * glam::Mat3::from_quat(lean) * back * current;
-        turns.push((i, glam::Mat4::from_mat3(local)));
-    }
-    turns
+/// Extra bone turns for the controlled pawn; none are needed now that the root rotation is right.
+pub fn strafe_turns(_vm: &mut Vm<'_>, _a: ObjId) -> Vec<(usize, glam::Mat4)> {
+    Vec::new()
 }
 
-/// While a pawn hangs from a Carpe Retractum line (or the controlled pawn is in the air), the animations tilt its whole body (the root bone swings to one
-/// side and pitches as it is pulled), so it is turned back upright about its own place: a rotation in world space,
-/// the identity at any other time.
-pub fn hang_correction(vm: &mut Vm<'_>, a: ObjId) -> glam::Mat4 {
-    // Hanging from a Carpe line, or climbing a ledge (the climb animations lean the body the same way).
-    let hanging = vm.state_of(a).is_some_and(|s| {
-        let n = vm.db.names.get(vm.db.get(s).name);
-        ["StateRetractum", "Mounting", "MountFinish", "MountHanging"].iter().any(|w| n.eq_ignore_ascii_case(w))
-    });
-    // The jump and fall animations of the controlled pawn lean the body the same way.
-    let airborne = !hanging && get(vm, a, "Physics").as_byte() == crate::physics::PHYS_FALLING && crate::physics::is_player_pawn(vm, a);
-    // On the ground the sideways and backward runs twist the root bone about 45 degrees; the body is turned back
-    // to face the way the pawn does.
-    let grounded = !hanging && !airborne && get(vm, a, "Physics").as_byte() == crate::physics::PHYS_WALKING && crate::physics::is_player_pawn(vm, a);
-    if !hanging && !airborne && !grounded {
-        return glam::Mat4::IDENTITY;
-    }
-    let Some(mesh) = get(vm, a, "Mesh").as_obj() else { return glam::Mat4::IDENTITY };
-    let Some(skel) = skeleton_of(vm, mesh) else { return glam::Mat4::IDENTITY };
-    let Some(root_name) = skel.skeleton.names.first().cloned() else { return glam::Mat4::IDENTITY };
-    let plain = actor_matrix(vm, a);
-    let Some(current) = bone_matrix_in(vm, a, &root_name, plain) else { return glam::Mat4::IDENTITY };
-    let rest = plain * skel.to_actor * hp3_anim::bones(&skel.skeleton, None, None, 0.0)[0];
-    let axes = |m: glam::Mat4| glam::Mat3::from_cols(m.x_axis.truncate().normalize_or_zero(), m.y_axis.truncate().normalize_or_zero(), m.z_axis.truncate().normalize_or_zero());
-    let (current, rest) = (axes(current), axes(rest));
-    // Which way the body's up points now, given that it pointed straight up at rest.
-    let up_in_bone = rest.inverse() * glam::Vec3::Z;
-    let up_now = (current * up_in_bone).normalize_or_zero();
-    if grounded {
-        // The run swings the whole body from side to side: it leans about its own heading with each stride. That lean
-        // is taken out (the lean forward stays), and then the root's turn.
-        let heading = plain.x_axis.truncate();
-        let heading = glam::Vec3::new(heading.x, heading.y, 0.0).normalize_or_zero();
-        let side = glam::Vec3::new(heading.y, -heading.x, 0.0);
-        let upright = (up_now - side * up_now.dot(side)).normalize_or_zero();
-        let lean = if upright == glam::Vec3::ZERO || up_now == glam::Vec3::ZERO { glam::Quat::IDENTITY } else { glam::Quat::IDENTITY.slerp(glam::Quat::from_rotation_arc(up_now, upright), LEAN_CANCEL) };
-        let fwd = lean * (current * (rest.inverse() * glam::Vec3::X));
-        let yaw = fwd.y.atan2(fwd.x);
-        if yaw.abs() < 0.02 && lean.angle_between(glam::Quat::IDENTITY) < 0.01 {
-            return glam::Mat4::IDENTITY;
-        }
-        let at = crate::physics::vec(&get(vm, a, "Location"));
-        return glam::Mat4::from_translation(at) * glam::Mat4::from_rotation_z(-yaw) * glam::Mat4::from_quat(lean) * glam::Mat4::from_translation(-at);
-    }
-    if up_now == glam::Vec3::ZERO || up_now.dot(glam::Vec3::Z) > 0.9999 {
-        return glam::Mat4::IDENTITY;
-    }
-    let turn = glam::Quat::from_rotation_arc(up_now, glam::Vec3::Z);
-    let at = crate::physics::vec(&get(vm, a, "Location"));
-    glam::Mat4::from_translation(at) * glam::Mat4::from_quat(turn) * glam::Mat4::from_translation(-at)
+/// A whole-body turn for the drawn actor. None is needed now that the root bone's rotation is read as the animations
+/// store it; the identity stays so callers need no change.
+pub fn hang_correction(_vm: &mut Vm<'_>, _a: ObjId) -> glam::Mat4 {
+    glam::Mat4::IDENTITY
 }
 
 /// For the game log: a chest's mesh, its sequence and where each bone sits at the first and last frame.

@@ -666,7 +666,6 @@ pub fn player_view(vm: &mut Vm<'_>) -> Option<(glam::Vec3, [i32; 3], f32)> {
     ))
 }
 
-/// Advances the level by `dt` seconds: actor ticks, timers, then state code.
 thread_local! {
     /// How many times the fight of each Monster Book (by object id) has been started.
     static BOOK_TRIES: std::cell::RefCell<std::collections::HashMap<u32, u32>> = std::cell::RefCell::new(std::collections::HashMap::new());
@@ -713,6 +712,7 @@ fn start_book_fights(vm: &mut Vm<'_>) {
     }
 }
 
+/// Advances the level by `dt` seconds: actor ticks, timers, then state code.
 pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     // The step is scaled by the level's time dilation; while someone has paused the game only the menus run.
     let dilation = world(vm).level_info.map(|li| get(vm, li, "TimeDilation").as_float()).filter(|d| *d > 0.0).unwrap_or(1.0);

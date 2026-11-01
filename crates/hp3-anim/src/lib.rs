@@ -53,9 +53,8 @@ impl Skeleton {
             .iter()
             .map(|b| BonePose { rotation: quat(&b.orientation), position: v3(&b.position) })
             .collect();
-        // A root bone that is turned in the reference pose (a prop's) keeps its stored rotation as it is; a root that
-        // is not (a character's) is the same either way.
-        let plain_root = reference.first().is_some_and(|r| r.rotation.w.abs() < 0.999);
+        // The root bone's stored rotations (reference and animation) are not conjugated like the other bones'.
+        let plain_root = true;
         let world = world_matrices(&parents, &reference, plain_root);
         let inv_reference_world = world.iter().map(|m| m.inverse()).collect();
         Skeleton { names, parents, reference, inv_reference_world, plain_root }
