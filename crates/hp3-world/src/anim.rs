@@ -184,7 +184,9 @@ pub fn actor_matrix(vm: &mut Vm<'_>, a: ObjId) -> glam::Mat4 {
         _ => glam::Vec3::ONE,
     };
     let s3 = if s3 == glam::Vec3::ZERO { glam::Vec3::ONE } else { s3 };
-    let prepivot = crate::physics::vec(&get(vm, a, "PrePivot"));
+    // Bones, and what is attached to them (a student's hair on a head), follow the placement the mesh is drawn with:
+    // its saved pivot and the drop of a bottom-aligned mesh, not the bare PrePivot.
+    let prepivot = crate::mesh_offset(vm, a);
     glam::Mat4::from_translation(loc + prepivot) * hp3_anim::rotator_matrix(rot) * glam::Mat4::from_scale(s3 * scale)
 }
 
@@ -226,7 +228,10 @@ pub fn hang_correction(vm: &mut Vm<'_>, a: ObjId) -> glam::Mat4 {
     let hanging = vm.state_of(a).is_some_and(|s| vm.db.names.get(vm.db.get(s).name).eq_ignore_ascii_case("StateRetractum"));
     // The jump and fall animations of the controlled pawn lean the body the same way.
     let airborne = !hanging && get(vm, a, "Physics").as_byte() == crate::physics::PHYS_FALLING && crate::physics::is_player_pawn(vm, a);
-    if !hanging && !airborne {
+    // On the ground the sideways and backward runs twist the root bone about 45 degrees; the body is turned back
+    // to face the way the pawn does.
+    let grounded = !hanging && !airborne && get(vm, a, "Physics").as_byte() == crate::physics::PHYS_WALKING && crate::physics::is_player_pawn(vm, a);
+    if !hanging && !airborne && !grounded {
         return glam::Mat4::IDENTITY;
     }
     let Some(mesh) = get(vm, a, "Mesh").as_obj() else { return glam::Mat4::IDENTITY };
@@ -240,6 +245,15 @@ pub fn hang_correction(vm: &mut Vm<'_>, a: ObjId) -> glam::Mat4 {
     // Which way the body's up points now, given that it pointed straight up at rest.
     let up_in_bone = rest.inverse() * glam::Vec3::Z;
     let up_now = (current * up_in_bone).normalize_or_zero();
+    if grounded {
+        let fwd = current * (rest.inverse() * glam::Vec3::X);
+        let yaw = fwd.y.atan2(fwd.x);
+        if yaw.abs() < 0.02 {
+            return glam::Mat4::IDENTITY;
+        }
+        let at = crate::physics::vec(&get(vm, a, "Location"));
+        return glam::Mat4::from_translation(at) * glam::Mat4::from_rotation_z(-yaw) * glam::Mat4::from_translation(-at);
+    }
     if up_now == glam::Vec3::ZERO || up_now.dot(glam::Vec3::Z) > 0.9999 {
         return glam::Mat4::IDENTITY;
     }
