@@ -695,22 +695,54 @@ fn try_mount(vm: &mut Vm<'_>, a: ObjId, up: Vec3, hit: &Hit) -> bool {
     let Some(destination) = mount_destination(vm, a, up, hit) else { return false };
     let loc = vec(&get(vm, a, "Location"));
     let wall = hit.actor.or(world(vm).level_info);
-    fire(vm, a, "Mount", &mut [value(destination - loc), Value::Object(wall)]).as_bool()
+    let taken = fire(vm, a, "Mount", &mut [value(destination - loc), Value::Object(wall)]).as_bool();
+    if is_player_pawn(vm, a) {
+        let name = wall.map(|w| hp3_script::natives::object_path(vm, w)).unwrap_or_default();
+        let mountable = wall.map(|w| get(vm, w, "bIsMountable").as_bool()).unwrap_or(false);
+        mount_note(vm, format!("mount: ledge {:.0} up on {name} (bIsMountable {mountable}) -> script {}", destination.z - loc.z, if taken { "took it" } else { "refused" }));
+    }
+    taken
+}
+
+/// Writes a line about a mount attempt to the log once (the same line again and again is dropped).
+fn mount_note(vm: &mut Vm<'_>, line: String) {
+    thread_local! {
+        static LAST: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    }
+    let fresh = LAST.with(|l| {
+        let mut l = l.borrow_mut();
+        if *l == line {
+            false
+        } else {
+            *l = line.clone();
+            true
+        }
+    });
+    if fresh {
+        vm.log.push(line);
+    }
 }
 
 /// Where a pawn that met a wall at `hit` would climb to, if the wall is a ledge it can mount (see `try_mount`).
 pub fn mount_destination(vm: &mut Vm<'_>, a: ObjId, up: Vec3, hit: &Hit) -> Option<Vec3> {
     let max_height = get(vm, a, "MaxMountHeight").as_float();
     let debug = std::env::var_os("HP3_MOUNT_DEBUG").is_some() && is_player_pawn(vm, a);
+    let player = is_player_pawn(vm, a);
     if max_height <= 0.0 || hit.normal.z <= -0.1 || hit.normal.z >= 0.17 {
         if debug {
             eprintln!("mount: not a wall (normal {}, max height {max_height})", hit.normal);
+        }
+        if player && hit.normal.z.abs() < 0.9 {
+            mount_note(vm, format!("mount: not an upright wall (normal {:.2},{:.2},{:.2}, MaxMountHeight {max_height})", hit.normal.x, hit.normal.y, hit.normal.z));
         }
         return None;
     }
     if rotator_direction(&get(vm, a, "Rotation")).dot(hit.normal) >= 0.0 {
         if debug {
             eprintln!("mount: wall {} does not face the pawn", hit.normal);
+        }
+        if player {
+            mount_note(vm, format!("mount: wall ({:.2},{:.2},{:.2}) does not face the pawn", hit.normal.x, hit.normal.y, hit.normal.z));
         }
         return None;
     }
@@ -733,7 +765,12 @@ pub fn mount_destination(vm: &mut Vm<'_>, a: ObjId, up: Vec3, hit: &Hit) -> Opti
         }
     };
     let ledge = Ledge { loc, up, normal: hit.normal, radius, reach, min_rise, ext, ignore: a };
-    find_ledge(&world(vm).collision, &ledge)
+    let found = find_ledge(&world(vm).collision, &ledge);
+    if found.is_none() && player {
+        let name = hit.actor.map(|w| hp3_script::natives::object_path(vm, w)).unwrap_or_else(|| "the level".to_string());
+        mount_note(vm, format!("mount: no ledge found on {name} (reach {reach:.0}, min rise {min_rise:.0})"));
+    }
+    found
 }
 
 /// What `find_ledge` needs to know about the pawn and the wall it met.

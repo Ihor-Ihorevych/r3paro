@@ -30,6 +30,8 @@ struct Shape {
     location: Vec3,
     radius: f32,
     height: f32,
+    /// A volume is its brush: half the size of the box around it (`location` is then that box's middle).
+    half: Option<Vec3>,
 }
 
 /// Property slots read for every actor, resolved once.
@@ -57,6 +59,8 @@ pub struct Touch {
     cell_of: HashMap<ObjId, (i32, i32)>,
     big: Vec<ObjId>,
     max_radius: f32,
+    /// The box around each volume's brush in the world (None: not a volume, or no brush).
+    bounds: HashMap<ObjId, Option<(Vec3, Vec3)>>,
     /// Everything each actor currently touches.
     partners: HashMap<ObjId, Vec<ObjId>>,
     depth: u32,
@@ -80,13 +84,21 @@ fn slots(vm: &mut Vm<'_>) -> Slots {
     s
 }
 
-fn shape_of(vm: &Vm<'_>, a: ObjId, s: &Slots) -> Shape {
-    Shape {
-        collide: read(vm, a, s.collide).as_bool(),
-        location: read_vec(vm, a, s.location),
-        radius: read(vm, a, s.radius).as_float(),
-        height: read(vm, a, s.height).as_float(),
+fn shape_of(vm: &mut Vm<'_>, a: ObjId, s: &Slots) -> Shape {
+    let bounds = match world(vm).touch.bounds.get(&a) {
+        Some(b) => *b,
+        None => {
+            let b = crate::volume_bounds(vm, a);
+            world(vm).touch.bounds.insert(a, b);
+            b
+        }
+    };
+    let collide = read(vm, a, s.collide).as_bool();
+    if let Some((lo, hi)) = bounds {
+        let half = (hi - lo) * 0.5;
+        return Shape { collide, location: (lo + hi) * 0.5, radius: half.truncate().length(), height: half.z, half: Some(half) };
     }
+    Shape { collide, location: read_vec(vm, a, s.location), radius: read(vm, a, s.radius).as_float(), height: read(vm, a, s.height).as_float(), half: None }
 }
 
 fn cell(p: Vec3) -> (i32, i32) {
@@ -95,6 +107,12 @@ fn cell(p: Vec3) -> (i32, i32) {
 
 fn overlaps(a: &Shape, b: &Shape) -> bool {
     let d = a.location - b.location;
+    // A volume's brush box against a cylinder (taken as its box) or another brush box.
+    if a.half.is_some() || b.half.is_some() {
+        let ha = a.half.unwrap_or(Vec3::new(a.radius, a.radius, a.height));
+        let hb = b.half.unwrap_or(Vec3::new(b.radius, b.radius, b.height));
+        return d.x.abs() < ha.x + hb.x && d.y.abs() < ha.y + hb.y && d.z.abs() < ha.z + hb.z;
+    }
     (d.x * d.x + d.y * d.y).sqrt() < a.radius + b.radius && d.z.abs() < a.height + b.height
 }
 

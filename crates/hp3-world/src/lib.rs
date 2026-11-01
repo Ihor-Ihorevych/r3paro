@@ -944,21 +944,8 @@ fn mover_shape(vm: &mut Vm<'_>, a: ObjId) -> Option<collision::MoverShape> {
                 tris.push([t[0], t[1], t[2]].map(|i| pos.get(i as usize).copied().unwrap_or(Vec3::ZERO)));
             }
         }
-    } else if let Some(brush) = get(vm, a, "Brush").as_obj() {
-        let (pkg, index) = vm.db.objects.get(brush).key.clone()?;
-        let p = vm.db.set.get(&pkg).ok()?;
-        let chain = vm.db.set.export_chain(&p, index);
-        let Some(Asset::Model(model)) = native_asset(&p, index, &chain) else { return None };
-        let (pp, pi) = vm.db.set.resolve(&p, model.polys)?;
-        let chain = vm.db.set.export_chain(&pp, pi);
-        let Some(Asset::Polys(polys)) = native_asset(&pp, pi, &chain) else { return None };
-        let prepivot = vec_of(&get(vm, a, "PrePivot"));
-        for poly in &polys.polys {
-            let v: Vec<Vec3> = poly.vertices.iter().map(|v| (Vec3::new(v.x, v.y, v.z) - prepivot) * s3 * scale).collect();
-            for k in 1..v.len().saturating_sub(1) {
-                tris.push([v[0], v[k], v[k + 1]]);
-            }
-        }
+    } else if get(vm, a, "Brush").as_obj().is_some() {
+        tris = brush_triangles(vm, a, s3, scale)?;
     }
     if tris.is_empty() {
         return None;
@@ -966,6 +953,64 @@ fn mover_shape(vm: &mut Vm<'_>, a: ObjId) -> Option<collision::MoverShape> {
     let mut shape = collision::MoverShape::new(a, &tris);
     shape.place(mover_transform(vm, a));
     Some(shape)
+}
+
+/// The triangles of an actor's brush (a mover's, or a volume's) in its own space: scaled, around its pivot.
+fn brush_triangles(vm: &mut Vm<'_>, a: ObjId, s3: glam::Vec3, scale: f32) -> Option<Vec<[glam::Vec3; 3]>> {
+    use glam::Vec3;
+    let brush = get(vm, a, "Brush").as_obj()?;
+    let (pkg, index) = vm.db.objects.get(brush).key.clone()?;
+    let p = vm.db.set.get(&pkg).ok()?;
+    let chain = vm.db.set.export_chain(&p, index);
+    let Some(Asset::Model(model)) = native_asset(&p, index, &chain) else { return None };
+    let (pp, pi) = vm.db.set.resolve(&p, model.polys)?;
+    let chain = vm.db.set.export_chain(&pp, pi);
+    let Some(Asset::Polys(polys)) = native_asset(&pp, pi, &chain) else { return None };
+    let prepivot = vec_of(&get(vm, a, "PrePivot"));
+    let mut tris = Vec::new();
+    for poly in &polys.polys {
+        let v: Vec<Vec3> = poly.vertices.iter().map(|v| (Vec3::new(v.x, v.y, v.z) - prepivot) * s3 * scale).collect();
+        for k in 1..v.len().saturating_sub(1) {
+            tris.push([v[0], v[k], v[k + 1]]);
+        }
+    }
+    Some(tris)
+}
+
+/// The box around a volume's brush in the world (None for anything that is not a volume with a brush, and for
+/// volumes that move: a mover's shape is handled apart).
+pub(crate) fn volume_bounds(vm: &mut Vm<'_>, a: ObjId) -> Option<(glam::Vec3, glam::Vec3)> {
+    use glam::{Mat3, Vec3};
+    let volume = vm.db.find("Volume")?;
+    if !vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, volume)) || !get(vm, a, "bStatic").as_bool() {
+        return None;
+    }
+    let scale = match get(vm, a, "DrawScale").as_float() {
+        0.0 => 1.0,
+        s => s,
+    };
+    let s3 = match get(vm, a, "DrawScale3D") {
+        Value::Struct(f) if f.len() == 3 => vec_of(&Value::Struct(f)),
+        _ => Vec3::ONE,
+    };
+    let s3 = if s3 == Vec3::ZERO { Vec3::ONE } else { s3 };
+    let tris = brush_triangles(vm, a, s3, scale)?;
+    if tris.is_empty() {
+        return None;
+    }
+    let loc = vec_of(&get(vm, a, "Location"));
+    let r: Vec<i32> = get(vm, a, "Rotation").fields().iter().map(Value::as_int).collect();
+    let axes = hp3_script::natives::rot_axes([r.first().copied().unwrap_or(0), r.get(1).copied().unwrap_or(0), r.get(2).copied().unwrap_or(0)]);
+    let basis = Mat3::from_cols(Vec3::from(axes[0]), Vec3::from(axes[1]), Vec3::from(axes[2]));
+    let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for t in tris {
+        for p in t {
+            let w = loc + basis * p;
+            lo = lo.min(w);
+            hi = hi.max(w);
+        }
+    }
+    Some((lo, hi))
 }
 
 /// A mover's placement: its location and rotation.
@@ -1063,6 +1108,7 @@ fn build_collision(vm: &mut Vm<'_>, map: &Rc<Package>, model: Option<ObjRef>, ac
     });
     let mut col = collision::Collision::new(model);
     let mover_class = vm.db.find("Mover");
+    let volume_class = vm.db.find("Volume");
     for &a in actors {
         // Movers collide as moving shapes, not as part of the fixed level.
         if mover_class.is_some_and(|m| vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, m))) {
@@ -1078,6 +1124,31 @@ fn build_collision(vm: &mut Vm<'_>, map: &Rc<Package>, model: Option<ObjRef>, ac
         let mesh = get(vm, a, "StaticMesh").as_obj();
         let blocks = get(vm, a, "bCollideActors").as_bool()
             && (get(vm, a, "bBlockActors").as_bool() || get(vm, a, "bBlockPlayers").as_bool());
+        // A volume that blocks (a BlockingVolume, mountable or not) is its brush: invisible walls and ledges.
+        if blocks && mesh.is_none() && volume_class.is_some_and(|v| vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, v))) {
+            let loc = vec_of(&get(vm, a, "Location"));
+            let r: Vec<i32> = get(vm, a, "Rotation").fields().iter().map(Value::as_int).collect();
+            let axes = hp3_script::natives::rot_axes([r.first().copied().unwrap_or(0), r.get(1).copied().unwrap_or(0), r.get(2).copied().unwrap_or(0)]);
+            let basis = Mat3::from_cols(Vec3::from(axes[0]), Vec3::from(axes[1]), Vec3::from(axes[2]));
+            let scale = match get(vm, a, "DrawScale").as_float() {
+                0.0 => 1.0,
+                s => s,
+            };
+            let s3 = match get(vm, a, "DrawScale3D") {
+                Value::Struct(f) if f.len() == 3 => vec_of(&Value::Struct(f)),
+                _ => Vec3::ONE,
+            };
+            let s3 = if s3 == Vec3::ZERO { Vec3::ONE } else { s3 };
+            if let Some(tris) = brush_triangles(vm, a, s3, scale) {
+                if std::env::var_os("HP3_COLLISION_STATS").is_some() {
+                    eprintln!("volume {} collision: {} triangles", hp3_script::natives::object_path(vm, a), tris.len());
+                }
+                for t in tris {
+                    col.add_triangle(t.map(|p| loc + basis * p), Some(a));
+                }
+            }
+            continue;
+        }
         if let Some(mesh) = mesh.filter(|_| blocks) {
             let Some((mkey_pkg, mkey_idx)) = vm.db.objects.get(mesh).key.clone() else { continue };
             let Ok(mp) = vm.db.set.get(&mkey_pkg) else { continue };
