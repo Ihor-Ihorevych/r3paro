@@ -80,6 +80,8 @@ pub fn turns_for(skel: &hp3_anim::Skeleton, turns: &[(String, [i32; 3], f32)]) -
 pub struct MeshSkeleton {
     pub skeleton: hp3_anim::Skeleton,
     pub to_actor: glam::Mat4,
+    /// The height of the mesh's lowest point in actor space (about 0 when its origin is at its feet).
+    pub bottom: f32,
 }
 
 #[derive(Default)]
@@ -88,7 +90,6 @@ pub struct Animation {
     sets: HashMap<ObjId, Option<Rc<AnimSet>>>,
     skeletons: HashMap<ObjId, Option<Rc<MeshSkeleton>>>,
     bone_maps: HashMap<(ObjId, usize), Rc<Vec<Option<usize>>>>,
-    rest_bottoms: HashMap<ObjId, f32>,
     /// Actors attached to another actor's bone (lower-case bone name).
     pub attachments: HashMap<ObjId, (ObjId, String)>,
     /// `FinishAnim` waits: (who waits, whose channel, which channel).
@@ -161,7 +162,10 @@ pub fn skeleton_of(vm: &mut Vm<'_>, mesh: ObjId) -> Option<Rc<MeshSkeleton>> {
         let p = vm.db.set.get(&pkg).ok()?;
         let chain = vm.db.set.export_chain(&p, index);
         let Some(Asset::SkeletalMesh(m)) = crate::native_asset(&p, index, &chain) else { return None };
-        Some(Rc::new(MeshSkeleton { skeleton: hp3_anim::Skeleton::from_mesh(&m, &p), to_actor: hp3_anim::mesh_to_actor(&m) }))
+        let to_actor = hp3_anim::mesh_to_actor(&m);
+        let bottom = m.points.iter().map(|q| to_actor.transform_point3(glam::Vec3::new(q.x, q.y, q.z)).z).fold(f32::MAX, f32::min);
+        let bottom = if bottom.is_finite() && bottom != f32::MAX { bottom } else { 0.0 };
+        Some(Rc::new(MeshSkeleton { skeleton: hp3_anim::Skeleton::from_mesh(&m, &p), to_actor, bottom }))
     })();
     world(vm).anim.skeletons.insert(mesh, s.clone());
     s
@@ -172,19 +176,9 @@ fn rotator_of(v: &Value) -> [i32; 3] {
     [r.first().copied().unwrap_or(0), r.get(1).copied().unwrap_or(0), r.get(2).copied().unwrap_or(0)]
 }
 
-/// The height of the lowest bone of a mesh's rest pose, in the mesh's own space (about 0 when the mesh's origin is at its feet).
+/// The height of the lowest point of a mesh's rest pose, in the mesh's own space (about 0 when its origin is at its feet).
 pub fn rest_bottom(vm: &mut Vm<'_>, mesh: ObjId) -> f32 {
-    if let Some(&b) = world(vm).anim.rest_bottoms.get(&mesh) {
-        return b;
-    }
-    let bottom = skeleton_of(vm, mesh)
-        .map(|skel| {
-            hp3_anim::bones(&skel.skeleton, None, None, 0.0).iter().map(|m| (skel.to_actor * *m).w_axis.z).fold(f32::MAX, f32::min)
-        })
-        .filter(|b| b.is_finite() && *b != f32::MAX)
-        .unwrap_or(0.0);
-    world(vm).anim.rest_bottoms.insert(mesh, bottom);
-    bottom
+    skeleton_of(vm, mesh).map_or(0.0, |s| s.bottom)
 }
 
 /// An actor's transform: actor space to world.
