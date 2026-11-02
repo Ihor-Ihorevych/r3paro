@@ -119,6 +119,42 @@ fn mouse_name(b: MouseButton) -> Option<&'static str> {
 const CAMERA_PULL_BACK: f32 = 24.0;
 
 /// The game's view: the player controller's `PlayerCalcView`.
+/// Per-second frame timing: for each stage of a frame, its average and its worst time over the second.
+#[derive(Default)]
+struct PerfStats {
+    names: Vec<&'static str>,
+    sum: Vec<f32>,
+    worst: Vec<f32>,
+    frames: u32,
+    slowest_frame: f32,
+}
+
+impl PerfStats {
+    /// A frame's stages (name, cumulative ms) and its total time.
+    fn add(&mut self, stages: &[(&'static str, f32)], total: f32) {
+        if self.names.is_empty() {
+            self.names = stages.iter().map(|s| s.0).collect();
+            self.sum = vec![0.0; stages.len()];
+            self.worst = vec![0.0; stages.len()];
+        }
+        let mut before = 0.0;
+        for (i, (_, at)) in stages.iter().enumerate().take(self.sum.len()) {
+            let took = at - before;
+            before = *at;
+            self.sum[i] += took;
+            self.worst[i] = self.worst[i].max(took);
+        }
+        self.frames += 1;
+        self.slowest_frame = self.slowest_frame.max(total);
+    }
+
+    fn report(&self) -> String {
+        let n = self.frames.max(1) as f32;
+        let stages: Vec<String> = (0..self.sum.len()).map(|i| format!("{} {:.1}/{:.0}", self.names[i], self.sum[i] / n, self.worst[i])).collect();
+        format!("slowest {:.0} ms; stage avg/worst ms: {}", self.slowest_frame, stages.join(" "))
+    }
+}
+
 /// Whether something other than the player's own controller holds the player's pawn (a cutscene's controller).
 fn player_in_cutscene(vm: &mut Vm<'_>) -> bool {
     let Some(pc) = hp3_world::world(vm).player else { return false };
@@ -251,6 +287,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
     let mut accumulator = 0.0f32;
     let fixed_step = std::env::var_os("HP3_FIXED_STEP").is_some();
     let mut frames = 0u32;
+    let mut perf = PerfStats::default();
     let mut fps_timer = Instant::now();
     let mut free_camera = false;
     let mut in_menu = false;
@@ -521,8 +558,13 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         }
 
         frames += 1;
+        perf.add(&stages, frame_start.elapsed().as_secs_f32() * 1000.0);
         if fps_timer.elapsed().as_secs_f32() >= 1.0 {
             let fps = frames as f32 / fps_timer.elapsed().as_secs_f32();
+            if std::env::var_os("HP3_PERF").is_some() || cfg!(target_os = "android") {
+                eprintln!("perf: {fps:.0} fps, {}", perf.report());
+            }
+            perf = PerfStats::default();
             let _ = window.set_title(&format!("hp3 - {current_map} - {fps:.0} fps"));
             frames = 0;
             fps_timer = Instant::now();
