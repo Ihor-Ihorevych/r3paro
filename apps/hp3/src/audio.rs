@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use hp3_audio::mixer::{self, Category, Mixer, Placement, PlayRequest, Sound};
@@ -45,10 +46,62 @@ impl AudioCallback<f32> for Callback {
     }
 }
 
+/// Work for the decoder thread: decoding a sound or a song can take longer than a frame.
+enum Job {
+    Sound { key: SoundKey, ty: String, data: Vec<u8> },
+    Music { song: String, dir: PathBuf },
+}
+
+/// A decoded sound or song coming back from the decoder thread.
+enum Done {
+    Sound(SoundKey, Option<Arc<Sound>>),
+    Music(String, Option<Arc<Sound>>),
+}
+
+fn decode_worker(jobs: Receiver<Job>, done: Sender<Done>) {
+    for job in jobs {
+        let result = match job {
+            Job::Sound { key, ty, data } => {
+                let decoded = match ty.as_str() {
+                    "bik" => hp3_audio::bink::decode(&data).ok().map(Sound::from),
+                    "wav" => hp3_audio::wav::decode(&data).map(Sound::from),
+                    _ => None,
+                };
+                Done::Sound(key, decoded.map(Arc::new))
+            }
+            Job::Music { song, dir } => {
+                let track = hp3_audio::music::find_song(&dir, &song).and_then(|path| {
+                    let data = std::fs::read(&path).ok()?;
+                    match hp3_audio::music::decode_ogg(&data) {
+                        Ok(s) => Some(Arc::new(s)),
+                        Err(e) => {
+                            eprintln!("music {}: {e}", path.display());
+                            None
+                        }
+                    }
+                });
+                Done::Music(song, track)
+            }
+        };
+        if done.send(result).is_err() {
+            break;
+        }
+    }
+}
+
 pub struct AudioSystem {
     mixer: Arc<Mutex<Mixer>>,
     _stream: AudioStreamWithCallback<Callback>,
+    /// Decoded sounds (`None`: one that cannot be decoded).
     cache: HashMap<SoundKey, Option<Arc<Sound>>>,
+    /// Sounds handed to the decoder thread and not back yet.
+    decoding: std::collections::HashSet<SoundKey>,
+    songs: HashMap<String, Option<Arc<Sound>>>,
+    decoding_songs: std::collections::HashSet<String>,
+    jobs: Sender<Job>,
+    done: Receiver<Done>,
+    /// Requests that wait for a decode; they are played as soon as it is done.
+    waiting: Vec<(std::time::Instant, Event)>,
     music_dir: PathBuf,
     /// Ambient sounds playing: the actor's owner id and the sound's tag.
     ambient: HashMap<u64, u64>,
@@ -96,7 +149,11 @@ impl AudioSystem {
         let stream = audio.open_playback_stream(&spec, Callback { mixer: mixer.clone(), buffer: Vec::new(), meter: std::env::var_os("HP3_AUDIO_DEBUG").map(|_| (0.0, 0)) }).ok()?;
         stream.resume().ok()?;
         let music_dir = ["Music", "music"].iter().map(|d| root.join(d)).find(|p| p.is_dir()).unwrap_or_else(|| root.join("Music"));
-        Some(AudioSystem { mixer, _stream: stream, cache: HashMap::new(), music_dir, ambient: HashMap::new(),
+        let (jobs, job_rx) = std::sync::mpsc::channel();
+        let (done_tx, done) = std::sync::mpsc::channel();
+        std::thread::Builder::new().name("hp3-audio-decode".into()).spawn(move || decode_worker(job_rx, done_tx)).ok()?;
+        Some(AudioSystem { mixer, _stream: stream, cache: HashMap::new(), decoding: Default::default(), songs: HashMap::new(),
+            decoding_songs: Default::default(), jobs, done, waiting: Vec::new(), music_dir, ambient: HashMap::new(),
             frame: 0,
             ambient_setting: setting("AmbientVolume", 1.0),
             sound_setting: setting("SoundVolume", 1.0),
@@ -109,28 +166,61 @@ impl AudioSystem {
         })
     }
 
-    fn sound(&mut self, vm: &mut Vm<'_>, key: &SoundKey) -> Option<Arc<Sound>> {
+    /// The decoded sound if it is ready. A sound met for the first time goes to the decoder thread and this is `Err(())`
+    /// until it is back; `Ok(None)` is a sound that cannot be decoded.
+    fn sound(&mut self, vm: &mut Vm<'_>, key: &SoundKey) -> Result<Option<Arc<Sound>>, ()> {
         if let Some(s) = self.cache.get(key) {
-            return s.clone();
+            return Ok(s.clone());
         }
-        let decoded = hp3_world::audio::sound_file(vm, key).and_then(|(ty, data)| match ty.as_str() {
-            "bik" => hp3_audio::bink::decode(&data).ok().map(Sound::from),
-            "wav" => hp3_audio::wav::decode(&data).map(Sound::from),
-            _ => None,
-        });
-        let decoded = decoded.map(Arc::new);
-        self.cache.insert(key.clone(), decoded.clone());
-        decoded
+        if self.decoding.contains(key) {
+            return Err(());
+        }
+        match hp3_world::audio::sound_file(vm, key) {
+            Some((ty, data)) => {
+                self.decoding.insert(key.clone());
+                if self.jobs.send(Job::Sound { key: key.clone(), ty, data }).is_err() {
+                    self.decoding.remove(key);
+                    self.cache.insert(key.clone(), None);
+                    return Ok(None);
+                }
+                Err(())
+            }
+            None => {
+                self.cache.insert(key.clone(), None);
+                Ok(None)
+            }
+        }
     }
 
-    fn music(&mut self, song: &str) -> Option<Arc<Sound>> {
-        let path = hp3_audio::music::find_song(&self.music_dir, song)?;
-        let data = std::fs::read(&path).ok()?;
-        match hp3_audio::music::decode_ogg(&data) {
-            Ok(s) => Some(Arc::new(s)),
-            Err(e) => {
-                eprintln!("music {}: {e}", path.display());
-                None
+    /// Like `sound`, for a song.
+    fn music(&mut self, song: &str) -> Result<Option<Arc<Sound>>, ()> {
+        if let Some(t) = self.songs.get(song) {
+            return Ok(t.clone());
+        }
+        if self.decoding_songs.contains(song) {
+            return Err(());
+        }
+        self.decoding_songs.insert(song.to_string());
+        if self.jobs.send(Job::Music { song: song.to_string(), dir: self.music_dir.clone() }).is_err() {
+            self.decoding_songs.remove(song);
+            self.songs.insert(song.to_string(), None);
+            return Ok(None);
+        }
+        Err(())
+    }
+
+    /// Takes in what the decoder thread has finished.
+    fn collect_decoded(&mut self) {
+        while let Ok(d) = self.done.try_recv() {
+            match d {
+                Done::Sound(key, s) => {
+                    self.decoding.remove(&key);
+                    self.cache.insert(key, s);
+                }
+                Done::Music(song, t) => {
+                    self.decoding_songs.remove(&song);
+                    self.songs.insert(song, t);
+                }
             }
         }
     }
@@ -145,12 +235,21 @@ impl AudioSystem {
 
     /// Applies what the world asked to hear since the last call, and places the listener.
     pub fn update(&mut self, vm: &mut Vm<'_>, position: glam::Vec3, yaw: i32) {
-        let events = hp3_world::audio::drain(vm);
+        self.collect_decoded();
+        // Requests that waited for a decode go first; one that waited too long is stale and dropped.
+        let mut events: Vec<Event> = std::mem::take(&mut self.waiting).into_iter().filter(|(t, _)| t.elapsed().as_secs_f32() < 3.0).map(|(_, e)| e).collect();
+        events.extend(hp3_world::audio::drain(vm));
         for e in events {
             match e {
                 Event::Play { sound, emitter, location, slot, volume, pitch, radius, no_override, attenuate, no_3d, who } => {
+                    let loaded = match self.sound(vm, &sound) {
+                        Ok(l) => l,
+                        Err(()) => {
+                            self.waiting.push((std::time::Instant::now(), Event::Play { sound, emitter, location, slot, volume, pitch, radius, no_override, attenuate, no_3d, who }));
+                            continue;
+                        }
+                    };
                     let name = hp3_world::audio::sound_name(vm, &sound);
-                    let loaded = self.sound(vm, &sound);
                     let length = match &loaded {
                         Some(s) => format!(" ({:.2}s)", s.frames() as f32 / s.rate as f32),
                         None => " (not decoded)".to_string(),
@@ -190,8 +289,15 @@ impl AudioSystem {
                     }
                 }
                 Event::Music { song, handle, fade_in, looping, stab } => {
+                    let track = match self.music(&song) {
+                        Ok(t) => t,
+                        Err(()) => {
+                            self.waiting.push((std::time::Instant::now(), Event::Music { song, handle, fade_in, looping, stab }));
+                            continue;
+                        }
+                    };
                     self.note(format!("MUSIC {song} handle {handle} fade {fade_in} loop {looping} stab {stab}"));
-                    if let Some(track) = self.music(&song)
+                    if let Some(track) = track
                         && let Ok(mut m) = self.mixer.lock()
                     {
                         m.play_music(track, handle, looping, fade_in, stab);
@@ -245,7 +351,7 @@ impl AudioSystem {
             if self.ambient.get(&owner) == Some(&tag) {
                 continue;
             }
-            let Some(s) = self.sound(vm, &a.sound) else { continue };
+            let Ok(Some(s)) = self.sound(vm, &a.sound) else { continue };
             let line = format!(
                 "AMBIENT start {} on {} radius {} volume {:.2} at {}",
                 hp3_world::audio::sound_name(vm, &a.sound),
