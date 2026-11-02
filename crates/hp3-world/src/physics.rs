@@ -315,7 +315,9 @@ pub fn debug_floor(vm: &mut Vm<'_>, a: ObjId) -> String {
         .filter(|(_, lo, hi)| loc.x > lo.x - 120.0 && loc.x < hi.x + 120.0 && loc.y > lo.y - 120.0 && loc.y < hi.y + 120.0 && loc.z > lo.z - 200.0 && loc.z < hi.z + 200.0)
         .map(|(o, lo, hi)| format!("{} box [{:.0},{:.0},{:.0}]-[{:.0},{:.0},{:.0}]", hp3_script::natives::object_path(vm, o), lo.x, lo.y, lo.z, hi.x, hi.y, hi.z))
         .collect();
-    format!("movers {near:?} at {loc} phys {phys} base {base:?} floor {floor:?} raw {raw:?} inside-mesh {inside} collide(world,actors,block) {flags:?} touching {touching:?}")
+    let heading = rotator_direction(&get(vm, a, "Rotation"));
+    let ahead = world(vm).collision.trace_as(true, loc, loc + Vec3::new(heading.x, heading.y, 0.0).normalize_or_zero() * 24.0, ext, Some(a)).map(|h| (h.time, h.normal, h.actor.map(|o| hp3_script::natives::object_path(vm, o))));
+    format!("ahead {ahead:?} movers {near:?} at {loc} phys {phys} base {base:?} floor {floor:?} raw {raw:?} inside-mesh {inside} collide(world,actors,block) {flags:?} touching {touching:?}")
 }
 
 fn floor_below(vm: &mut Vm<'_>, a: ObjId, depth: f32) -> Option<Hit> {

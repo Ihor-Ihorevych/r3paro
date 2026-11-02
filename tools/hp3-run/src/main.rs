@@ -223,6 +223,21 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             }
         }
     }
+    // HP3_PROBE_Y=x,z0,z1,step,y0,y1: like HP3_PROBE_X, along +y.
+    if let Ok(spec) = std::env::var("HP3_PROBE_Y") {
+        let v: Vec<f32> = spec.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        if v.len() == 6 {
+            let mut z = v[1];
+            while z <= v[2] {
+                let hit = hp3_world::world(&mut vm).collision.trace_as(true, glam::Vec3::new(v[0], v[4], z), glam::Vec3::new(v[0], v[5], z), glam::Vec3::new(15.0, 15.0, 38.0), None);
+                match hit {
+                    Some(h) => println!("z {z:7.1}: stops at y {:8.1} normal ({:.2},{:.2},{:.2}) actor {:?}", h.location.y, h.normal.x, h.normal.y, h.normal.z, h.actor.map(|o| hp3_script::natives::object_path(&vm, o))),
+                    None => println!("z {z:7.1}: free"),
+                }
+                z += v[3];
+            }
+        }
+    }
     // HP3_PROBE_X=y,z0,z1,step,x0,x1: traces a pawn-sized box along +x at each height, printing where it stops.
     if let Ok(spec) = std::env::var("HP3_PROBE_X") {
         let v: Vec<f32> = spec.split(',').filter_map(|p| p.trim().parse().ok()).collect();
