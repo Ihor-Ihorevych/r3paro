@@ -689,6 +689,10 @@ pub fn register(vm: &mut Vm<'_>) {
             }
         }
         let level = world(vm).level_info;
+        if crate::physics::is_player_pawn(vm, source) && (end - start).truncate().length_squared() < 1.0 && (start.z - end.z) > 50.0 {
+            let who = best.and_then(|h| h.actor).map(|o| hp3_script::natives::object_path(vm, o));
+            vm.log.push(format!("trace down from {start} (actors {trace_actors}, extent {extent}): hit {:?} at {:?} normal {:?}", who, best.map(|h| h.location), best.map(|h| h.normal)));
+        }
         match best {
             Some(h) => {
                 a[0] = crate::physics::value(h.location);

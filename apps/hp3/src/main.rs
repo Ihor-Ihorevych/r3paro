@@ -85,11 +85,22 @@ fn mouse_name(b: MouseButton) -> Option<&'static str> {
     }
 }
 
+/// How far (in units) the camera is moved back from the view the game computes while the player is in control.
+const CAMERA_PULL_BACK: f32 = 24.0;
+
 /// The game's view: the player controller's `PlayerCalcView`.
 fn game_camera(vm: &mut Vm<'_>) -> Option<Camera> {
     if let Some((mut position, rotation, fov)) = hp3_world::player_view(vm) {
         if let Some(pawn) = hp3_world::world(vm).player.and_then(|pc| hp3_world::get(vm, pc, "Pawn").as_obj()) {
             position.z += hp3_world::physics::view_offset(vm, pawn);
+        }
+        // In play (not in a cutscene) the camera stands a little further back from the character.
+        let playing = hp3_world::world(vm).player.is_some_and(|pc| vm.state_of(pc).is_some_and(|st| vm.db.names.get(vm.db.get(st).name).starts_with("Player")));
+        if playing {
+            let k = std::f32::consts::TAU / 65536.0;
+            let (pitch, yaw) = (rotation[0] as f32 * k, rotation[1] as f32 * k);
+            let forward = Vec3::new(pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), pitch.sin());
+            position -= forward * CAMERA_PULL_BACK;
         }
         return Some(Camera { position, rotation, fov_degrees: fov });
     }
