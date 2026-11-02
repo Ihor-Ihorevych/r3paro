@@ -314,7 +314,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                     println!(
                         "watch {frame} {path} label {:?} coll {} at {at} rot {rot:?} state {state} phys {:?} hidden {:?} draw {:?} mesh {:?} vel {:?} accel {:?}",
                         { let t = hp3_world::get(&mut vm, a, "Tag").as_name(); format!("{:?} tag {}", hp3_world::get(&mut vm, a, "Label"), vm.db.names.get(t)) },
-                        format!("r{} h{} scale{}", hp3_world::get(&mut vm, a, "CollisionRadius").as_float(), hp3_world::get(&mut vm, a, "CollisionHeight").as_float(), hp3_world::get(&mut vm, a, "DrawScale").as_float()),
+                        { let e = hp3_world::get(&mut vm, a, "Event").as_name(); format!("r{} h{} scale{} event {}", hp3_world::get(&mut vm, a, "CollisionRadius").as_float(), hp3_world::get(&mut vm, a, "CollisionHeight").as_float(), hp3_world::get(&mut vm, a, "DrawScale").as_float(), vm.db.names.get(e)) },
                         hp3_world::get(&mut vm, a, "Physics"),
                         hp3_world::get(&mut vm, a, "bHidden"),
                         hp3_world::get(&mut vm, a, "DrawType"),

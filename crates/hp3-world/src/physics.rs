@@ -1641,7 +1641,7 @@ mod mount_tests {
 fn overlaps_world(col: &crate::collision::Collision, at: Vec3, extent: Vec3) -> bool {
     // A box that has sunk into a surface is behind its face, where a sweep finds nothing: the triangles are tested for
     // overlap as well.
-    col.trace_static(at + Vec3::Z * 0.1, at, extent).is_some_and(|h| h.time <= 0.0) || col.box_overlaps_triangles(at, extent, None)
+    col.trace_static(at + Vec3::Z * 0.1, at, extent).is_some_and(|h| h.time <= 0.0) || (std::env::var_os("HP3_NO_OVERLAP_TRI").is_none() && col.box_overlaps_triangles(at, extent, None))
 }
 
 /// A place close to `want` where a box of `extent` fits in the level: `want` itself, or a nudge out of the floor,

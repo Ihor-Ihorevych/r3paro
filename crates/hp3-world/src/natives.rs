@@ -196,6 +196,12 @@ pub fn spawn(vm: &mut Vm<'_>, spawner: Option<ObjId>, a: &[Value]) -> Result<Val
     set(vm, obj, "Level", Value::Object(level));
     let instigator = spawner.map(|s| get(vm, s, "Instigator")).unwrap_or_default();
     set(vm, obj, "Instigator", instigator);
+    // An actor that collides with the world is fitted to a free place near where it was asked for, as the original does when
+    // it spawns one: a creature born with its feet in the floor is lifted out of it, not left to fall through.
+    if get(vm, obj, "bCollideWorld").as_bool() {
+        let at = crate::physics::vec(&get(vm, obj, "Location"));
+        crate::physics::far_move(vm, obj, at, false, false);
+    }
     world(vm).actors.push(obj);
     {
         let class_text = vm.db.names.get(class_name).to_string();
