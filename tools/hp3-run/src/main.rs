@@ -304,9 +304,10 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             && every.parse::<u32>().is_ok_and(|e| e > 0 && frame % e == 0)
         {
             let actors = hp3_world::world(&mut vm).actors.clone();
+            let player_pawn = hp3_world::world(&mut vm).player.and_then(|pc| hp3_world::get(&mut vm, pc, "Pawn").as_obj());
             for a in actors {
                 let path = hp3_script::natives::object_path(&mut vm, a);
-                if names.split(',').any(|n| path.ends_with(&format!(".{n}")) || n.strip_prefix('~').is_some_and(|w| path.contains(w))) {
+                if names.split(',').any(|n| (n == "!player" && Some(a) == player_pawn) || path.ends_with(&format!(".{n}")) || n.strip_prefix('~').is_some_and(|w| path.contains(w))) {
                     let state = vm.state_of(a).map(|s| vm.db.names.get(vm.db.get(s).name).to_string()).unwrap_or_default();
                     let at = hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "Location"));
                     let rot: Vec<i32> = hp3_world::get(&mut vm, a, "Rotation").fields().iter().map(hp3_script::Value::as_int).collect();
@@ -356,7 +357,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                     .filter(|(_, c)| c.sequence.is_some() && c.alpha > 0.001 || *(&c.playing) && c.alpha > 0.001)
                     .map(|(i, c)| {
                         let n = c.sequence.and_then(|s| set.as_ref().map(|set| set.sequences[s].name.clone())).unwrap_or_default();
-                        format!("ch{i} {n} a{:.2} f{:.1} r{:.2}", c.alpha, c.frame, c.rate)
+                        format!("ch{i} {n} a{:.2} f{:.1} r{:.2} bone {:?}", c.alpha, c.frame, c.rate, c.bone)
                     })
                     .collect();
                 let vel = hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "Velocity"));

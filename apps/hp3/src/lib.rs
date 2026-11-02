@@ -67,6 +67,9 @@ fn key_name(sc: Scancode) -> Option<String> {
         Scancode::LAlt | Scancode::RAlt => "Alt".into(),
         Scancode::Up => "Up".into(),
         Scancode::Down => "Down".into(),
+        // On the phone the movement stick sends the arrow keys: left and right strafe (A and D) instead of turning.
+        Scancode::Left if cfg!(target_os = "android") => "A".into(),
+        Scancode::Right if cfg!(target_os = "android") => "D".into(),
         Scancode::Left => "Left".into(),
         Scancode::Right => "Right".into(),
         Scancode::PageUp => "PageUp".into(),
