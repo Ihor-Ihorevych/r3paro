@@ -49,6 +49,7 @@ fn list_class(vm: &mut hp3_script::Vm<'_>) {
                 let v = match v {
                     hp3_script::Value::Empty => continue,
                     hp3_script::Value::Name(x) => vm.db.names.get(x).to_string(),
+                    hp3_script::Value::Object(Some(x)) => hp3_script::natives::object_path(vm, x),
                     other => format!("{other:?}"),
                 };
                 info.push_str(&format!(" {n}={v}"));
@@ -395,6 +396,20 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                     .collect();
                 let vel = hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "Velocity"));
                 println!("channels {frame} speed {:.0}: {}", vel.truncate().length(), line.join(" | "));
+            }
+        }
+        // HP3_SET=<actor name>.<bool property>=<true|false>@<tick>: sets a flag on an actor.
+        if let Ok(spec) = std::env::var("HP3_SET")
+            && let Some((what, tick)) = spec.split_once('@')
+            && tick.parse::<u32>() == Ok(frame)
+            && let Some((target, value)) = what.split_once('=')
+            && let Some((name, prop)) = target.split_once('.')
+        {
+            let actors = hp3_world::world(&mut vm).actors.clone();
+            for a in actors {
+                if hp3_script::natives::object_path(&vm, a).ends_with(&format!(".{name}")) {
+                    hp3_world::set(&mut vm, a, prop, hp3_script::Value::Bool(value == "true"));
+                }
             }
         }
         // HP3_UNCOLLIDE=<actor name>[,<actor name>]@<tick>: those actors stop colliding (as SetCollision(false) does).

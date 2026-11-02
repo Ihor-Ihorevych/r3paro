@@ -1047,6 +1047,12 @@ fn fall(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         if std::env::var_os("HP3_FALL_DEBUG").is_some() {
             eprintln!("fall: landing normal {landing} at {}", vec(&get(vm, a, "Location")));
         }
+        // A bouncing actor (a bean tossed out of a chest) does not land: it hears `HitWall`, turns its velocity round
+        // there and keeps falling, until its script settles it.
+        if get(vm, a, "bBounce").as_bool() {
+            fire(vm, a, "HitWall", &mut [value(landing), Value::Object(hit.actor)]);
+            continue;
+        }
         if landing.z >= WALKABLE_Z {
             let hit = Hit { normal: landing, ..hit };
             let mut v = vec(&get(vm, a, "Velocity"));
