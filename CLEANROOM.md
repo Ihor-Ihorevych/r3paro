@@ -1,6 +1,6 @@
 # Clean-room rules
 
-hp3-engine is an independent implementation of the engine that *Harry Potter and the Prisoner of Azkaban*
+R3paro is an independent implementation of the engine that *Harry Potter and the Prisoner of Azkaban*
 (KnowWonder, 2004) needs. It contains no code from Epic Games, EA or KnowWonder, and it is not derived from
 any Unreal Engine source release.
 

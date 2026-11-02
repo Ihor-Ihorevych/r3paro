@@ -1,10 +1,10 @@
-# hp3-engine
+# R3paro
 
 A clean-room reimplementation of the engine of *Harry Potter and the Prisoner of Azkaban* (PC, 2004) in Rust.
 It is a new, open-source engine that runs the game's own compiled UnrealScript, so the levels, characters, spells,
 puzzles, cutscenes, voices and music are the retail game's, not a remake.
 
-**It ships no game data.** You need your own retail copy of the PC game. hp3-engine is written clean-room
+**It ships no game data.** You need your own retail copy of the PC game. R3paro is written clean-room
 (`CLEANROOM.md`) and licensed GPLv3. It supports Harry Potter 3 only.
 
 Version **0.5.1**. It is the engine behind Harry Potter 3 in
@@ -44,7 +44,7 @@ writable. The Windows programs of the game (`.exe`, `.dll`) are not used and can
 
 **Easiest: the release zip.**
 
-1. Download `hp3-engine-<version>-windows.zip` from the [Releases](../../releases) page and unpack it anywhere.
+1. Download `r3paro-<version>-windows.zip` from the [Releases](../../releases) page and unpack it anywhere.
 2. Open a terminal (PowerShell or cmd) in that folder and start the game, giving it the path of the game folder:
 
    ```
@@ -62,8 +62,8 @@ The first start takes a few seconds while the scripts and the level load; a log 
 CMake (Visual Studio Build Tools ships one; it must be on the `PATH`, SDL3 is built from source), then:
 
 ```sh
-git clone https://github.com/Ihor-Ihorevych/hp3-engine
-cd hp3-engine
+git clone https://github.com/Ihor-Ihorevych/r3paro
+cd r3paro
 cargo build --release -p hp3
 target
 elease\hp3.exe "C:\Games\HP3"
@@ -147,6 +147,6 @@ The engine is written from observing the retail game's data and scripts, not fro
 
 ## Legal
 
-hp3-engine is free software under the GNU General Public License, version 3 or later (`LICENSE`). It is an independent
+R3paro is free software under the GNU General Public License, version 3 or later (`LICENSE`). It is an independent
 fan project, not affiliated with or endorsed by Warner Bros., Electronic Arts or the game's developers. Harry Potter is a
 trademark of Warner Bros. Entertainment. The game data is not included and not free: you need your own copy.
