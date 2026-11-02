@@ -302,6 +302,9 @@ impl Collision {
     /// Whether a trace with this extent uses `actor`'s collision model instead of its triangles: boxes when the
     /// extent is not zero, lines when it is.
     fn uses_model(&self, actor: ObjId, extent: Vec3) -> bool {
+        if std::env::var_os("HP3_NO_MODELS").is_some() {
+            return false;
+        }
         self.modeled.get(&actor).is_some_and(|&(boxes, lines)| if extent == Vec3::ZERO { lines } else { boxes })
     }
 
@@ -578,7 +581,7 @@ fn bsp_trace(
         return;
     }
     let (n, w) = plane_of(model, node);
-    let offset = n.x.abs() * extent.x + n.y.abs() * extent.y + n.z.abs() * extent.z;
+    let offset = plane_offset(n, extent);
     let d0 = n.dot(p0) - w;
     let d1 = n.dot(p1) - w;
     let nd = &model.nodes[node];
@@ -629,6 +632,12 @@ fn bsp_trace(
 
 /// Swept box against one triangle, approximated as the triangle's plane pushed out by the box, limited to the
 /// triangle grown by the box's horizontal radius.
+/// How far the moving thing reaches toward a plane with normal `n`: it is an upright cylinder (its larger half width is
+/// the radius), so a wall at an angle is no closer to it than a wall square on.
+fn plane_offset(n: Vec3, extent: Vec3) -> f32 {
+    (n.x * n.x + n.y * n.y).sqrt() * extent.x.max(extent.y) + n.z.abs() * extent.z
+}
+
 fn tri_trace(t: &Tri, start: Vec3, end: Vec3, extent: Vec3) -> Option<Hit> {
     let mut n = t.normal;
     let mut d0 = n.dot(start - t.v[0]);
@@ -638,7 +647,7 @@ fn tri_trace(t: &Tri, start: Vec3, end: Vec3, extent: Vec3) -> Option<Hit> {
         d0 = -d0;
     }
     let d1 = n.dot(end - t.v[0]);
-    let offset = n.x.abs() * extent.x + n.y.abs() * extent.y + n.z.abs() * extent.z;
+    let offset = plane_offset(n, extent);
     if d1 >= offset || d0 < offset - 1.0 || d0 <= d1 {
         return None;
     }

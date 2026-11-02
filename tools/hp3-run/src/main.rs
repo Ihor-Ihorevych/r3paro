@@ -275,6 +275,31 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             println!("mesh offset {:?}", hp3_world::mesh_offset(&mut vm, a));
         }
     }
+    // HP3_PROBE_GATE=cx,cy,dirx,diry,reach,lat0,lat1,latstep,z0,z1,zstep: lines (a pawn's box, HP3_PROBE_EXT) are driven through
+    // a wall opening centred at cx,cy along the direction (dirx,diry); a '#' is a line stopped within the reach, '.' one
+    // that passes. Rows are heights (top first), columns are sideways offsets.
+    if let Ok(spec) = std::env::var("HP3_PROBE_GATE") {
+        let v: Vec<f32> = spec.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        if v.len() == 11 {
+            let dir = glam::Vec2::new(v[2], v[3]).normalize();
+            let side = glam::Vec2::new(-dir.y, dir.x);
+            let mut z = v[9];
+            while z >= v[8] {
+                let mut row = String::new();
+                let mut lat = v[5];
+                while lat <= v[6] {
+                    let c = glam::Vec2::new(v[0], v[1]) + side * lat;
+                    let a = c - dir * v[4];
+                    let b = c + dir * v[4];
+                    let hit = hp3_world::world(&mut vm).collision.trace_as(true, glam::Vec3::new(a.x, a.y, z), glam::Vec3::new(b.x, b.y, z), probe_ext(), None);
+                    row.push(if hit.is_some_and(|h| h.time < 1.0) { '#' } else { '.' });
+                    lat += v[7];
+                }
+                println!("z {z:6.0} {row}");
+                z -= v[10];
+            }
+        }
+    }
     // HP3_PROBE_Z=x,y,z_top,z_bottom: drops a line from the top to the bottom there, printing each surface it meets.
     if let Ok(spec) = std::env::var("HP3_PROBE_Z") {
         let v: Vec<f32> = spec.split(',').filter_map(|p| p.trim().parse().ok()).collect();
