@@ -20,6 +20,8 @@ pub struct GameLog {
     last_emitter_log: u128,
     last_pose_log: u128,
     last_twist_log: u128,
+    climb_until: u128,
+    last_climb_log: u128,
     blocked_frames: u32,
     anchor: glam::Vec3,
 }
@@ -30,7 +32,7 @@ impl GameLog {
             .ok()
             .and_then(|_| std::fs::File::create(root.join("logs").join("game.log")).ok())
             .map(std::io::BufWriter::new);
-        GameLog { file, started: Instant::now(), last_second: 0, written: 0, last_pawn: String::new(), cursor: None, last_cursor: String::new(), last_emitter_log: 0, last_pose_log: 0, last_twist_log: 0, blocked_frames: 0, anchor: Default::default() }
+        GameLog { file, started: Instant::now(), last_second: 0, written: 0, last_pawn: String::new(), cursor: None, last_cursor: String::new(), last_emitter_log: 0, last_pose_log: 0, last_twist_log: 0, climb_until: 0, last_climb_log: 0, blocked_frames: 0, anchor: Default::default() }
     }
 
     fn line(&mut self, text: &str) {
@@ -123,6 +125,21 @@ impl GameLog {
                     let heads = hp3_world::anim::bone_headings(vm, p);
                     self.line(&format!("TWIST root heading {yaw:.1} deg, up tilt {tilt:.1} deg, pawn rot {rot:?}, anims {} | bones raw/drawn{heads}", names.join(" | ")));
                 }
+            }
+        }
+        // During and just after a ledge climb: where the pawn is, what it stands on and what it touches.
+        if let Some(p) = pawn {
+            let state = vm.state_of(p).map(|s| vm.db.names.get(vm.db.get(s).name).to_string()).unwrap_or_default();
+            let ctl_state = hp3_world::get(vm, pc, "Pawn").as_obj().and_then(|_| vm.state_of(pc)).map(|s| vm.db.names.get(vm.db.get(s).name).to_string()).unwrap_or_default();
+            let climbing = state.to_ascii_lowercase().contains("mount") || ctl_state.to_ascii_lowercase().contains("mount");
+            let now = self.started.elapsed().as_millis();
+            if climbing {
+                self.climb_until = now + 3000;
+            }
+            if now < self.climb_until && now / 100 != self.last_climb_log {
+                self.last_climb_log = now / 100;
+                let d = hp3_world::physics::debug_floor(vm, p);
+                self.line(&format!("CLIMB state '{state}' controller '{ctl_state}' {d}"));
             }
         }
         // A pawn that pushes and gets nowhere in the direction it pushes (under 15 units in half a second): what is

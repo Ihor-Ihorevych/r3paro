@@ -294,6 +294,23 @@ pub fn debug_blocked(vm: &mut Vm<'_>, a: ObjId) -> String {
     format!("box {ext} | ahead: {forward} | up: {up} | over: {over} | down: {down} | under middle: {middle}")
 }
 
+/// For the game log: what is under a pawn and around it (after a ledge climb), to see why it stands or falls.
+pub fn debug_floor(vm: &mut Vm<'_>, a: ObjId) -> String {
+    let loc = vec(&get(vm, a, "Location"));
+    let ext = extent(vm, a);
+    let phys = get(vm, a, "Physics").as_byte();
+    let base = get(vm, a, "Base").as_obj().map(|b| hp3_script::natives::object_path(vm, b));
+    let floor = floor_below(vm, a, MAX_STEP_HEIGHT + 2.0).map(|f| (f.time, f.normal.z, f.actor.map(|o| hp3_script::natives::object_path(vm, o))));
+    let raw = world(vm).collision.trace_as(true, loc, loc - Vec3::Z * 60.0, ext, Some(a)).map(|h| (h.time, h.normal, h.actor.map(|o| hp3_script::natives::object_path(vm, o))));
+    let inside = world(vm).collision.box_overlaps_triangles(loc, ext - Vec3::splat(0.5), Some(a));
+    let touching: Vec<String> = match get(vm, a, "Touching") {
+        Value::Array(v) => v.iter().filter_map(Value::as_obj).map(|o| hp3_script::natives::object_path(vm, o)).collect(),
+        _ => Vec::new(),
+    };
+    let flags = (get(vm, a, "bCollideWorld").as_bool(), get(vm, a, "bCollideActors").as_bool(), get(vm, a, "bBlockActors").as_bool());
+    format!("at {loc} phys {phys} base {base:?} floor {floor:?} raw {raw:?} inside-mesh {inside} collide(world,actors,block) {flags:?} touching {touching:?}")
+}
+
 fn floor_below(vm: &mut Vm<'_>, a: ObjId, depth: f32) -> Option<Hit> {
     let loc = vec(&get(vm, a, "Location"));
     let ext = extent(vm, a);
@@ -519,7 +536,14 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
                 }
             }
         }
-        match floor_below(vm, a, MAX_STEP_HEIGHT + 2.0) {
+        let floor_found = floor_below(vm, a, MAX_STEP_HEIGHT + 2.0);
+        if std::env::var("HP3_FLOOR_DEBUG").is_ok_and(|n| hp3_script::natives::object_path(vm, a).ends_with(&n)) {
+            let at = vec(&get(vm, a, "Location"));
+            let ext = extent(vm, a);
+            let raw = world(vm).collision.trace_as(false, at, at - Vec3::Z * (MAX_STEP_HEIGHT + 2.0), ext, Some(a));
+            eprintln!("floor: at {at} ext {ext} floor {:?} raw {:?}", floor_found.map(|f| (f.time, f.normal)), raw.map(|f| (f.time, f.normal)));
+        }
+        match floor_found {
             Some(floor) => {
                 let loc = vec(&get(vm, a, "Location"));
                 let drop = (MAX_STEP_HEIGHT + 2.0) * floor.time;
@@ -832,6 +856,17 @@ fn find_ledge(col: &crate::collision::Collision, l: &Ledge) -> Option<Vec3> {
 }
 
 fn fall(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
+    // A pawn nobody controls that is placed with its box sunk into a static mesh (a statue a few units into its
+    // pedestal) stays where the level put it: sweeping out of it would drop it through.
+    if !is_player_pawn(vm, a) && get(vm, a, "Controller").as_obj().is_none() {
+        let loc = vec(&get(vm, a, "Location"));
+        let ext = extent(vm, a) - Vec3::splat(0.5);
+        let vel = vec(&get(vm, a, "Velocity"));
+        if vel.truncate().length_squared() < 1.0 && world(vm).collision.box_overlaps_triangles(loc, ext, Some(a)) {
+            set(vm, a, "Velocity", value(Vec3::ZERO));
+            return;
+        }
+    }
     // What the pawn can steer by in the air: a part of its ground acceleration, none when the way ahead is a
     // wall (so air control cannot be used to climb it), and only enough to keep its sideways speed once that
     // is at the ground speed.
@@ -888,6 +923,9 @@ fn fall(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         }
         // Coming down on the edge of a step counts as landing on the step when its top lies under the middle.
         let landing = surface_normal(vm, a, &hit, hit.location, 24.0);
+        if std::env::var_os("HP3_FALL_DEBUG").is_some() {
+            eprintln!("fall: landing normal {landing} at {}", vec(&get(vm, a, "Location")));
+        }
         if landing.z >= WALKABLE_Z {
             let hit = Hit { normal: landing, ..hit };
             let mut v = vec(&get(vm, a, "Velocity"));
@@ -1226,6 +1264,13 @@ pub fn step_actor(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     if crate::read(vm, a, s.physics).as_byte() == PHYS_NONE || crate::read(vm, a, s.is_static).as_bool() {
         return;
     }
+    if std::env::var("HP3_STEP_DEBUG").is_ok_and(|n| hp3_script::natives::object_path(vm, a).ends_with(&n)) {
+        let at = vec(&get(vm, a, "Location"));
+        let ext = extent(vm, a);
+        let down = world(vm).collision.trace_as(false, at, at - Vec3::Z * 30.0, ext, Some(a));
+        let thin = world(vm).collision.trace_as(false, at, at - Vec3::Z * 30.0, Vec3::new(1.0, 1.0, ext.z), Some(a));
+        eprintln!("step: {} phys {} at {} ext {ext} vel {} down {:?} thin {:?}", hp3_script::natives::object_path(vm, a), crate::read(vm, a, s.physics).as_byte(), at, vec(&get(vm, a, "Velocity")), down.map(|h| (h.time, h.normal)), thin.map(|h| (h.time, h.normal)));
+    }
     match crate::read(vm, a, s.physics).as_byte() {
         PHYS_MOVING_BRUSH => {
             moving_brush(vm, a, dt);
@@ -1244,6 +1289,7 @@ pub fn step_actor(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     }
     if is_pawn(vm, a) {
         pawn_rotation(vm, a, dt);
+        crate::update_physics_volume(vm, a);
     } else {
         turn_to_desired(vm, a, dt);
     }

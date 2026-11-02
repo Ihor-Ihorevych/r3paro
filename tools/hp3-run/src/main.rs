@@ -201,6 +201,43 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             println!("  box {ext} trace {what}: {:?}", hit.map(|h| (h.time * d.length(), h.normal, h.actor.is_some())));
         }
     }
+    // HP3_PROBE_GRID=x0,y0,x1,y1,step,z_top,z_bottom: where a thin box dropped from z_top lands, over a grid.
+    if let Ok(spec) = std::env::var("HP3_PROBE_GRID") {
+        let v: Vec<f32> = spec.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        if v.len() == 7 {
+            let mut y = v[1];
+            while y <= v[3] {
+                let mut line = String::new();
+                let mut x = v[0];
+                while x <= v[2] {
+                    let from = glam::Vec3::new(x, y, v[5]);
+                    let hit = hp3_world::world(&mut vm).collision.trace_as(true, from, glam::Vec3::new(x, y, v[6]), glam::Vec3::new(2.0, 2.0, 2.0), None);
+                    match hit {
+                        Some(h) => line += &format!(" {:6.1}{}", h.location.z, if h.actor.is_some() { "m" } else { " " }),
+                        None => line += "   --   ",
+                    }
+                    x += v[4];
+                }
+                println!("y {y:8.1}:{line}");
+                y += v[4];
+            }
+        }
+    }
+    // HP3_PROBE_X=y,z0,z1,step,x0,x1: traces a pawn-sized box along +x at each height, printing where it stops.
+    if let Ok(spec) = std::env::var("HP3_PROBE_X") {
+        let v: Vec<f32> = spec.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        if v.len() == 6 {
+            let mut z = v[1];
+            while z <= v[2] {
+                let hit = hp3_world::world(&mut vm).collision.trace_as(true, glam::Vec3::new(v[4], v[0], z), glam::Vec3::new(v[5], v[0], z), glam::Vec3::new(15.0, 15.0, 38.0), None);
+                match hit {
+                    Some(h) => println!("z {z:7.1}: stops at x {:8.1} normal ({:.2},{:.2},{:.2}) actor {:?}", h.location.x, h.normal.x, h.normal.y, h.normal.z, h.actor.map(|o| hp3_script::natives::object_path(&vm, o))),
+                    None => println!("z {z:7.1}: free"),
+                }
+                z += v[3];
+            }
+        }
+    }
     let steps_after_load = vm.steps;
     // Keys held for the whole run, e.g. HP3_HOLD=W,D.
     if let Ok(keys) = std::env::var("HP3_HOLD") {
@@ -307,8 +344,13 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             if let (&[x, y, z], Some(pc)) = (c.as_slice(), hp3_world::world(&mut vm).player)
                 && let Some(pawn) = hp3_world::get(&mut vm, pc, "Pawn").as_obj()
             {
-                let at = hp3_world::physics::value(glam::Vec3::new(x, y, z));
-                hp3_world::fire(&mut vm, pawn, "SetLocation", &mut [at]);
+                hp3_world::physics::far_move(&mut vm, pawn, glam::Vec3::new(x, y, z), false, false);
+                if let Ok(yaw) = std::env::var("HP3_TELEPORT_YAW").map(|v| v.parse::<i32>().unwrap_or(0)) {
+                    let r = hp3_script::Value::Struct(vec![hp3_script::Value::Int(0), hp3_script::Value::Int(yaw), hp3_script::Value::Int(0)].into());
+                    hp3_world::set(&mut vm, pawn, "Rotation", r.clone());
+                    hp3_world::set(&mut vm, pawn, "DesiredRotation", r.clone());
+                    hp3_world::set(&mut vm, pc, "Rotation", r);
+                }
             }
         }
         // HP3_TRAVEL=<url>@<tick>: asks the level to switch to <url> with the player's items, as a ServerTravel does.

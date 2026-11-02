@@ -87,6 +87,8 @@ pub struct World {
     pub pending_travel: Option<String>,
     /// Walking pawns' view offsets while they ease onto a step (drawing only).
     pub step_smooth: std::collections::HashMap<ObjId, f32>,
+    /// The physics volumes of the level with their brush planes (built the first time a pawn is checked).
+    pub volume_hulls: Option<Vec<VolumeHull>>,
     /// What travelled in with the player (the level keeps it for a restart).
     pub travel_info: TravelInfo,
     actor_slots: HashMap<&'static str, Option<usize>>,
@@ -460,6 +462,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         native_fonts: Default::default(),
         pending_travel: None,
         step_smooth: Default::default(),
+        volume_hulls: None,
         travel_info: travel.clone().unwrap_or_default(),
         url_options: String::new(),
         world_info: None,
@@ -1017,6 +1020,17 @@ fn brush_triangles(vm: &mut Vm<'_>, a: ObjId, s3: glam::Vec3, scale: f32) -> Opt
     let Some(Asset::Polys(polys)) = native_asset(&pp, pi, &chain) else { return None };
     let prepivot = vec_of(&get(vm, a, "PrePivot"));
     let mut tris = Vec::new();
+    if std::env::var("HP3_BRUSH_POLYS").is_ok_and(|n| hp3_script::natives::object_path(vm, a).ends_with(&n)) {
+        for (i, poly) in polys.polys.iter().enumerate() {
+            let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+            for v in &poly.vertices {
+                let w = Vec3::new(v.x, v.y, v.z);
+                lo = lo.min(w);
+                hi = hi.max(w);
+            }
+            eprintln!("brush poly {i}: {} verts normal ({:.2},{:.2},{:.2}) flags {:#x} lo {lo} hi {hi}", poly.vertices.len(), poly.normal.x, poly.normal.y, poly.normal.z, poly.poly_flags);
+        }
+    }
     for poly in &polys.polys {
         let v: Vec<Vec3> = poly.vertices.iter().map(|v| (Vec3::new(v.x, v.y, v.z) - prepivot) * s3 * scale).collect();
         for k in 1..v.len().saturating_sub(1) {
@@ -1060,6 +1074,123 @@ pub(crate) fn volume_bounds(vm: &mut Vm<'_>, a: ObjId) -> Option<(glam::Vec3, gl
         }
     }
     Some((lo, hi))
+}
+
+/// A physics volume's brush as planes (a point is inside when it is behind all of them).
+pub struct VolumeHull {
+    pub actor: ObjId,
+    pub priority: i32,
+    planes: Vec<(glam::Vec3, f32)>,
+    lo: glam::Vec3,
+    hi: glam::Vec3,
+}
+
+fn build_volume_hulls(vm: &mut Vm<'_>) -> Vec<VolumeHull> {
+    use glam::{Mat3, Vec3};
+    let Some(class) = vm.db.find("PhysicsVolume") else { return Vec::new() };
+    let actors = world(vm).actors.clone();
+    let mut out = Vec::new();
+    for a in actors {
+        if vm.db.objects.get(a).deleted || !vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, class)) {
+            continue;
+        }
+        let scale = match get(vm, a, "DrawScale").as_float() {
+            0.0 => 1.0,
+            s => s,
+        };
+        let s3 = match get(vm, a, "DrawScale3D") {
+            Value::Struct(f) if f.len() == 3 => vec_of(&Value::Struct(f)),
+            _ => Vec3::ONE,
+        };
+        let s3 = if s3 == Vec3::ZERO { Vec3::ONE } else { s3 };
+        let Some(tris) = brush_triangles(vm, a, s3, scale) else { continue };
+        if tris.is_empty() {
+            continue;
+        }
+        let loc = vec_of(&get(vm, a, "Location"));
+        let r: Vec<i32> = get(vm, a, "Rotation").fields().iter().map(Value::as_int).collect();
+        let axes = hp3_script::natives::rot_axes([r.first().copied().unwrap_or(0), r.get(1).copied().unwrap_or(0), r.get(2).copied().unwrap_or(0)]);
+        let basis = Mat3::from_cols(Vec3::from(axes[0]), Vec3::from(axes[1]), Vec3::from(axes[2]));
+        let world_tris: Vec<[Vec3; 3]> = tris.iter().map(|t| t.map(|p| loc + basis * p)).collect();
+        let (mut lo, mut hi, mut sum) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN), Vec3::ZERO);
+        for t in &world_tris {
+            for p in t {
+                lo = lo.min(*p);
+                hi = hi.max(*p);
+                sum += *p;
+            }
+        }
+        let centre = sum / (world_tris.len() * 3) as f32;
+        let mut planes: Vec<(Vec3, f32)> = Vec::new();
+        for t in &world_tris {
+            let n = (t[1] - t[0]).cross(t[2] - t[0]);
+            if n.length_squared() < 1e-6 {
+                continue;
+            }
+            let mut n = n.normalize();
+            let mut d = n.dot(t[0]);
+            if n.dot(centre) - d > 0.0 {
+                n = -n;
+                d = -d;
+            }
+            if !planes.iter().any(|(pn, pd)| pn.dot(n) > 0.9999 && (pd - d).abs() < 0.5) {
+                planes.push((n, d));
+            }
+        }
+        out.push(VolumeHull { actor: a, priority: get(vm, a, "Priority").as_int(), planes, lo, hi });
+    }
+    out
+}
+
+/// Which physics volume a pawn is in after it has moved: the highest priority one whose brush holds its location, else
+/// the level's default. A change is told to the volumes, the pawn and its controller (`NotifyPhysicsVolumeChange`),
+/// which is how a sliding volume puts the player into its sliding state.
+pub fn update_physics_volume(vm: &mut Vm<'_>, a: ObjId) {
+    if world(vm).volume_hulls.is_none() {
+        let hulls = build_volume_hulls(vm);
+        world(vm).volume_hulls = Some(hulls);
+    }
+    let p = vec_of(&get(vm, a, "Location"));
+    let mut best: Option<(i32, ObjId)> = None;
+    if let Some(hulls) = &world(vm).volume_hulls {
+        for h in hulls {
+            if p.cmplt(h.lo).any() || p.cmpgt(h.hi).any() || best.is_some_and(|(pr, _)| pr > h.priority) {
+                continue;
+            }
+            if h.planes.iter().all(|(n, d)| n.dot(p) - d <= 0.5) {
+                best = Some((h.priority, h.actor));
+            }
+        }
+    }
+    let current = get(vm, a, "PhysicsVolume").as_obj();
+    let new = match best {
+        Some((_, v)) => Some(v),
+        None => default_physics_volume(vm).or(current),
+    };
+    if new == current || new.is_none() {
+        return;
+    }
+    let new = new.unwrap();
+    if let Some(old) = current.filter(|&o| !vm.db.objects.get(o).deleted) {
+        fire(vm, old, "PawnLeavingVolume", &mut [Value::Object(Some(a))]);
+    }
+    set(vm, a, "PhysicsVolume", Value::Object(Some(new)));
+    if physics::is_player_pawn(vm, a) {
+        let name = hp3_script::natives::object_path(vm, new);
+        vm.log.push(format!("physics volume: the player entered {name}"));
+    }
+    fire(vm, new, "PawnEnteredVolume", &mut [Value::Object(Some(a))]);
+    fire(vm, a, "PhysicsVolumeChange", &mut [Value::Object(Some(new))]);
+    if let Some(c) = get(vm, a, "Controller").as_obj() {
+        fire(vm, c, "NotifyPhysicsVolumeChange", &mut [Value::Object(Some(new))]);
+    }
+}
+
+/// The level's default physics volume (what an actor is in when no brush holds it).
+fn default_physics_volume(vm: &mut Vm<'_>) -> Option<ObjId> {
+    let class = vm.db.find("DefaultPhysicsVolume")?;
+    let actors = world(vm).actors.clone();
+    actors.into_iter().find(|&a| !vm.db.objects.get(a).deleted && vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, class)))
 }
 
 /// A mover's placement: its location and rotation.

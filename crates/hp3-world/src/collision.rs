@@ -416,6 +416,28 @@ impl Collision {
         self.movers.iter().find(|m| m.actor == actor)
     }
 
+    /// Whether a box (center, half size) overlaps a triangle of the static meshes (not the level's BSP).
+    pub fn box_overlaps_triangles(&self, center: Vec3, half: Vec3, ignore: Option<ObjId>) -> bool {
+        let swept = cells_swept(center, center, half);
+        let mut seen = hp3_script::fx::FxHashSet::default();
+        for key in &swept {
+            let Some(list) = self.grid.get(key) else { continue };
+            for &i in list {
+                if !seen.insert(i) {
+                    continue;
+                }
+                let t = &self.tris[i as usize];
+                if t.actor.is_some() && t.actor == ignore {
+                    continue;
+                }
+                if tri_box_overlap(&t.v, t.normal, center, half) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Whether a box at `at` overlaps solid geometry.
     pub fn encroaches(&self, at: Vec3, extent: Vec3, ignore: Option<ObjId>) -> bool {
         self.trace(at + Vec3::Z * 0.1, at, extent, ignore).is_some_and(|h| h.time <= 0.0)
@@ -598,4 +620,37 @@ fn box_trace(b: &ActorBox, start: Vec3, end: Vec3, extent: Vec3) -> Option<Hit> 
     }
     let time = (t_enter - EPSILON / dir.length().max(EPSILON)).max(0.0);
     Some(Hit { time, location: start + dir * time, normal, actor: Some(b.actor) })
+}
+
+/// Whether a triangle and a box (center, half size) overlap: the separating axis test.
+fn tri_box_overlap(v: &[Vec3; 3], normal: Vec3, center: Vec3, half: Vec3) -> bool {
+    let p = [v[0] - center, v[1] - center, v[2] - center];
+    // The box's own axes.
+    for axis in 0..3 {
+        let (lo, hi) = (p[0][axis].min(p[1][axis]).min(p[2][axis]), p[0][axis].max(p[1][axis]).max(p[2][axis]));
+        if lo > half[axis] || hi < -half[axis] {
+            return false;
+        }
+    }
+    // The triangle's plane.
+    let reach = half.x * normal.x.abs() + half.y * normal.y.abs() + half.z * normal.z.abs();
+    if normal.dot(p[0]).abs() > reach {
+        return false;
+    }
+    // Edge crossed with each box axis.
+    let edges = [p[1] - p[0], p[2] - p[1], p[0] - p[2]];
+    for e in edges {
+        for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+            let a = e.cross(axis);
+            if a.length_squared() < 1e-9 {
+                continue;
+            }
+            let (d0, d1, d2) = (a.dot(p[0]), a.dot(p[1]), a.dot(p[2]));
+            let r = half.x * a.x.abs() + half.y * a.y.abs() + half.z * a.z.abs();
+            if d0.min(d1).min(d2) > r || d0.max(d1).max(d2) < -r {
+                return false;
+            }
+        }
+    }
+    true
 }
