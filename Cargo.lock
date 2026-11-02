@@ -453,6 +453,7 @@ dependencies = [
  "hp3-render",
  "hp3-script",
  "hp3-world",
+ "libc",
  "pollster",
  "sdl3",
  "wgpu",

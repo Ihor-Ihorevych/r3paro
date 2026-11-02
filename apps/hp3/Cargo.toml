@@ -6,6 +6,14 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[lib]
+name = "hp3app"
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "hp3"
+path = "src/main.rs"
+
 [dependencies]
 hp3-core.workspace = true
 hp3-package.workspace = true
@@ -14,8 +22,15 @@ hp3-script.workspace = true
 hp3-world = { path = "../../crates/hp3-world" }
 hp3-render = { path = "../../crates/hp3-render" }
 hp3-engine = { path = "../../crates/hp3-engine" }
-sdl3 = { version = "0.20", features = ["build-from-source-static", "raw-window-handle"] }
 wgpu = "26"
 glam = "0.30"
 pollster = "0.4"
 hp3-audio = { path = "../../crates/hp3-audio" }
+
+# Desktop: SDL3 built from its source and linked in. Android: the SDL3 library of the APK, linked dynamically.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+sdl3 = { version = "0.20", features = ["build-from-source-static", "raw-window-handle"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+sdl3 = { version = "0.20", features = ["raw-window-handle"] }
+libc = "0.2"
