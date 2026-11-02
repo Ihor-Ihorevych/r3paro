@@ -229,7 +229,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
         if v.len() == 6 {
             let mut z = v[1];
             while z <= v[2] {
-                let hit = hp3_world::world(&mut vm).collision.trace_as(true, glam::Vec3::new(v[0], v[4], z), glam::Vec3::new(v[0], v[5], z), glam::Vec3::new(15.0, 15.0, 38.0), None);
+                let hit = hp3_world::world(&mut vm).collision.trace_as(true, glam::Vec3::new(v[0], v[4], z), glam::Vec3::new(v[0], v[5], z), probe_ext(), None);
                 match hit {
                     Some(h) => println!("z {z:7.1}: stops at y {:8.1} normal ({:.2},{:.2},{:.2}) actor {:?}", h.location.y, h.normal.x, h.normal.y, h.normal.z, h.actor.map(|o| hp3_script::natives::object_path(&vm, o))),
                     None => println!("z {z:7.1}: free"),
@@ -275,7 +275,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
         if v.len() == 6 {
             let mut z = v[1];
             while z <= v[2] {
-                let hit = hp3_world::world(&mut vm).collision.trace_as(true, glam::Vec3::new(v[4], v[0], z), glam::Vec3::new(v[5], v[0], z), glam::Vec3::new(15.0, 15.0, 38.0), None);
+                let hit = hp3_world::world(&mut vm).collision.trace_as(true, glam::Vec3::new(v[4], v[0], z), glam::Vec3::new(v[5], v[0], z), probe_ext(), None);
                 match hit {
                     Some(h) => println!("z {z:7.1}: stops at x {:8.1} normal ({:.2},{:.2},{:.2}) actor {:?}", h.location.x, h.normal.x, h.normal.y, h.normal.z, h.actor.map(|o| hp3_script::natives::object_path(&vm, o))),
                     None => println!("z {z:7.1}: free"),
@@ -1111,4 +1111,10 @@ fn float_check(vm: &mut hp3_script::Vm<'_>) -> Vec<String> {
         }
     }
     out
+}
+
+/// The box the probes sweep: a pawn's by default, `HP3_PROBE_EXT=<r>,<r>,<h>` for another.
+fn probe_ext() -> glam::Vec3 {
+    let v: Vec<f32> = std::env::var("HP3_PROBE_EXT").ok().map(|s| s.split(',').filter_map(|p| p.trim().parse().ok()).collect()).unwrap_or_default();
+    if v.len() == 3 { glam::Vec3::new(v[0], v[1], v[2]) } else { glam::Vec3::new(15.0, 15.0, 38.0) }
 }

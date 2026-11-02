@@ -113,7 +113,7 @@ pub fn move_actor(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<Hit> {
         return None;
     }
     let ext = extent(vm, a);
-    let player = is_player_pawn(vm, a);
+    let player = blocked_as_player(vm, a);
     // The level stops an actor only with `bCollideWorld`, and other actors only with `bCollideActors` and
     // `bBlockActors` (a spell flies through the creatures it touches, and a pawn in the middle of a climb has all
     // of them off so it can pass through what it climbs).
@@ -279,7 +279,7 @@ pub fn debug_blocked(vm: &mut Vm<'_>, a: ObjId) -> String {
     let accel = vec(&get(vm, a, "Acceleration"));
     let ahead = Vec3::new(accel.x, accel.y, 0.0).normalize_or_zero() * 24.0;
     let ext = extent(vm, a);
-    let player = is_player_pawn(vm, a);
+    let player = blocked_as_player(vm, a);
     let describe = |vm: &mut Vm<'_>, from: Vec3, to: Vec3, e: Vec3| -> String {
         match world(vm).collision.trace_as(player, from, to, e, Some(a)) {
             Some(h) => {
@@ -326,7 +326,7 @@ pub fn debug_floor(vm: &mut Vm<'_>, a: ObjId) -> String {
 fn floor_below(vm: &mut Vm<'_>, a: ObjId, depth: f32) -> Option<Hit> {
     let loc = vec(&get(vm, a, "Location"));
     let ext = extent(vm, a);
-    let player = is_player_pawn(vm, a);
+    let player = blocked_as_player(vm, a);
     // A box pressed into a wall by a hair has the wall at the very start of its downward sweep, and finds no floor.
     // Narrower boxes are tried until one is clear of the wall.
     let mut hit = None;
@@ -353,7 +353,7 @@ fn surface_normal(vm: &mut Vm<'_>, a: ObjId, hit: &Hit, from: Vec3, depth: f32) 
     }
     let ext = extent(vm, a);
     let thin = Vec3::new(2.0, 2.0, ext.z);
-    let player = is_player_pawn(vm, a);
+    let player = blocked_as_player(vm, a);
     match world(vm).collision.trace_as(player, from, from - Vec3::Z * depth, thin, Some(a)) {
         Some(under) if under.normal.z >= WALKABLE_Z => under.normal,
         _ => hit.normal,
@@ -364,6 +364,17 @@ fn surface_normal(vm: &mut Vm<'_>, a: ObjId, hit: &Hit, from: Vec3, depth: f32) 
 pub(crate) fn is_player_pawn(vm: &mut Vm<'_>, a: ObjId) -> bool {
     let Some(pc) = world(vm).player else { return false };
     get(vm, pc, "Pawn").as_obj() == Some(a)
+}
+
+/// Whether what `bBlockPlayers` stops stops `a`: the pawn the player controls, except the rabbit and the dragon the
+/// player has turned into, which go where the heroes may not.
+fn blocked_as_player(vm: &mut Vm<'_>, a: ObjId) -> bool {
+    if !is_player_pawn(vm, a) {
+        return false;
+    }
+    let class = vm.db.objects.get(a).class;
+    let animal = ["LapiforPawn", "Draconisfors"].iter().any(|n| vm.db.find(n).zip(class).is_some_and(|(k, c)| vm.is_child_of(c, k)));
+    !animal
 }
 
 fn gravity(vm: &mut Vm<'_>, a: ObjId) -> f32 {
@@ -658,7 +669,7 @@ fn step_up(vm: &mut Vm<'_>, a: ObjId, delta: Vec3, hit: Hit, depth: u32) {
     if !steppable && hit.normal.z >= MAX_STEP_SIDE_Z && delta.length_squared() > 1e-8 && get(vm, a, "Physics").as_byte() == PHYS_WALKING {
         let loc = vec(&get(vm, a, "Location"));
         let ext = extent(vm, a);
-        let player = is_player_pawn(vm, a);
+        let player = blocked_as_player(vm, a);
         let ahead = delta.normalize_or_zero() * (ext.x * 2.0 + 4.0);
         let up_clear = world(vm).collision.trace_as(player, loc, loc + Vec3::Z * lift, ext, Some(a)).is_none();
         let over_clear = world(vm).collision.trace_as(player, loc + Vec3::Z * lift, loc + Vec3::Z * lift + ahead, ext, Some(a)).is_none();
@@ -853,7 +864,7 @@ fn mount_note(vm: &mut Vm<'_>, line: String) {
 pub fn mount_destination(vm: &mut Vm<'_>, a: ObjId, up: Vec3, hit: &Hit) -> Option<Vec3> {
     let max_height = get(vm, a, "MaxMountHeight").as_float();
     let debug = std::env::var_os("HP3_MOUNT_DEBUG").is_some() && is_player_pawn(vm, a);
-    let player = is_player_pawn(vm, a);
+    let player = blocked_as_player(vm, a);
     if max_height <= 0.0 || hit.normal.z <= -0.1 || hit.normal.z >= 0.17 {
         if debug {
             eprintln!("mount: not a wall (normal {}, max height {max_height})", hit.normal);
