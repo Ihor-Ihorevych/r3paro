@@ -71,14 +71,14 @@ fn key_name(sc: Scancode) -> Option<String> {
         Scancode::LShift | Scancode::RShift => "Shift".into(),
         Scancode::LCtrl | Scancode::RCtrl => "Ctrl".into(),
         Scancode::LAlt | Scancode::RAlt => "Alt".into(),
-        Scancode::Up if cfg!(target_os = "android") => "W".into(),
-        Scancode::Down if cfg!(target_os = "android") => "S".into(),
+        Scancode::Up if cfg!(target_os = "android") && !FLYING.load(std::sync::atomic::Ordering::Relaxed) => "W".into(),
+        Scancode::Down if cfg!(target_os = "android") && !FLYING.load(std::sync::atomic::Ordering::Relaxed) => "S".into(),
         Scancode::Up => "Up".into(),
         Scancode::Down => "Down".into(),
         // On the phone the movement stick sends the arrow keys: they act as W, A, S and D, so forward and sideways go
         // together (the arrow keys' own forward is a separate axis that does not mix with strafing).
-        Scancode::Left if cfg!(target_os = "android") => "A".into(),
-        Scancode::Right if cfg!(target_os = "android") => "D".into(),
+        Scancode::Left if cfg!(target_os = "android") && !FLYING.load(std::sync::atomic::Ordering::Relaxed) => "A".into(),
+        Scancode::Right if cfg!(target_os = "android") && !FLYING.load(std::sync::atomic::Ordering::Relaxed) => "D".into(),
         Scancode::Left => "Left".into(),
         Scancode::Right => "Right".into(),
         Scancode::PageUp => "PageUp".into(),
@@ -172,6 +172,14 @@ impl PerfStats {
         let stages: Vec<String> = (0..self.sum.len()).map(|i| format!("{} {:.1}/{:.0}", self.names[i], self.sum[i] / n, self.worst[i])).collect();
         format!("slowest {:.0} ms; stage avg/worst ms: {}", self.slowest_frame, stages.join(" "))
     }
+}
+
+/// True while the player rides the hippogriff: the stick then steers (turns and banks) instead of walking and strafing.
+static FLYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn player_flying(vm: &mut Vm<'_>) -> bool {
+    let Some(pc) = hp3_world::world(vm).player else { return false };
+    vm.state_of(pc).is_some_and(|st| vm.db.names.get(vm.db.get(st).name).starts_with("PlayerFlapping"))
 }
 
 /// Whether something other than the player's own controller holds the player's pawn (a cutscene's controller).
@@ -411,6 +419,20 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                     }
                 }
                 Event::KeyUp { scancode: Some(sc), .. } => {
+                    // The stick's arrow keys mean different keys on foot and in flight: letting go ends both, so a key held
+                    // while the mode changes is not left pressed.
+                    if cfg!(target_os = "android") {
+                        let both: &[&str] = match sc {
+                            Scancode::Up => &["Up", "W"],
+                            Scancode::Down => &["Down", "S"],
+                            Scancode::Left => &["Left", "A"],
+                            Scancode::Right => &["Right", "D"],
+                            _ => &[],
+                        };
+                        for k in both {
+                            hp3_world::world(&mut vm).input.key_up(k);
+                        }
+                    }
                     if let Some(k) = key_name(sc) {
                         if cfg!(target_os = "android") && std::path::Path::new("/sdcard/FlipendoHP3/keys.flag").exists() {
                             eprintln!("key up {sc:?} -> {k}");
@@ -449,6 +471,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         }
         if hp3_world::world(&mut vm).frame % 6 == 0 {
             platform::set_cutscene(player_in_cutscene(&mut vm));
+            FLYING.store(player_flying(&mut vm), std::sync::atomic::Ordering::Relaxed);
         }
         // The window's surface is gone (the app is in the background): nothing is drawn until it is back.
         if !platform::surface_alive() {
