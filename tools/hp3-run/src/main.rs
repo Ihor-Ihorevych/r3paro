@@ -238,6 +238,19 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             }
         }
     }
+    // HP3_DUMP_MOVER=<name>: the mover's collision triangles in the world.
+    if let Ok(name) = std::env::var("HP3_DUMP_MOVER") {
+        let actors = hp3_world::world(&mut vm).actors.clone();
+        for a in actors {
+            if hp3_script::natives::object_path(&vm, a).ends_with(&format!(".{name}"))
+                && let Some(m) = hp3_world::world(&mut vm).collision.mover(a)
+            {
+                for t in m.world_triangles() {
+                    println!("tri ({:.0},{:.0},{:.0}) ({:.0},{:.0},{:.0}) ({:.0},{:.0},{:.0})", t[0].x, t[0].y, t[0].z, t[1].x, t[1].y, t[1].z, t[2].x, t[2].y, t[2].z);
+                }
+            }
+        }
+    }
     let steps_after_load = vm.steps;
     // Keys held for the whole run, e.g. HP3_HOLD=W,D.
     if let Ok(keys) = std::env::var("HP3_HOLD") {

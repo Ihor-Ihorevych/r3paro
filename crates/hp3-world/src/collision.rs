@@ -122,6 +122,11 @@ impl MoverShape {
         (lo, hi)
     }
 
+    /// The triangles in the world as the mover stands now (for the probe tools).
+    pub fn world_triangles(&self) -> Vec<[Vec3; 3]> {
+        self.tris.iter().map(|t| t.v.map(|v| self.to_world.transform_point3(v))).collect()
+    }
+
     pub fn place(&mut self, to_world: glam::Mat4) {
         self.to_world = to_world;
         self.to_local = to_world.inverse();

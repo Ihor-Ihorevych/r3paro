@@ -730,7 +730,9 @@ fn try_mount(vm: &mut Vm<'_>, a: ObjId, up: Vec3, hit: &Hit) -> bool {
     if is_player_pawn(vm, a) {
         let name = wall.map(|w| hp3_script::natives::object_path(vm, w)).unwrap_or_default();
         let mountable = wall.map(|w| get(vm, w, "bIsMountable").as_bool()).unwrap_or(false);
-        mount_note(vm, format!("mount: ledge {:.0} up on {name} (bIsMountable {mountable}) -> script {}", destination.z - loc.z, if taken { "took it" } else { "refused" }));
+        let found = LAST_LEDGE.with(|c| c.get());
+        let how = found.map(|(at, n, o, t, start, pass)| format!("drop from {start} landed at {at} time {t:.3} normal ({:.2},{:.2},{:.2}) on {:?} pass {pass}", n.x, n.y, n.z, o.map(|o| hp3_script::natives::object_path(vm, o)))).unwrap_or_default();
+        mount_note(vm, format!("mount: ledge {:.0} up on {name} (bIsMountable {mountable}) from {loc} -> script {} [{how}]", destination.z - loc.z, if taken { "took it" } else { "refused" }));
     }
     taken
 }
@@ -822,7 +824,14 @@ struct Ledge {
 /// `reach` above the pawn, and must find a top at least `min_rise` up; the pawn must then be able to go straight
 /// up from where it is, and across to that spot, without hitting anything. The level's geometry and movers are
 /// tried first, then other pawns.
+thread_local! {
+    /// What the last ledge search settled on: where the drop landed, the surface's normal and actor, the hit time, the
+    /// drop's start and which pass found it (for the game log).
+    static LAST_LEDGE: std::cell::Cell<Option<(Vec3, Vec3, Option<ObjId>, f32, Vec3, i32)>> = const { std::cell::Cell::new(None) };
+}
+
 fn find_ledge(col: &crate::collision::Collision, l: &Ledge) -> Option<Vec3> {
+    LAST_LEDGE.with(|c| c.set(None));
     let into = Vec3::new(-l.normal.x, -l.normal.y, 0.0).normalize_or_zero();
     let top = l.loc + l.up * l.reach;
     // What the original does is one drop two radii in from the wall: its answer is used as it comes. A stone
@@ -849,6 +858,7 @@ fn find_ledge(col: &crate::collision::Collision, l: &Ledge) -> Option<Vec3> {
             }
             if first.is_none() {
                 first = Some(destination);
+                LAST_LEDGE.with(|c| c.set(Some((down.location, down.normal, down.actor, down.time, start, pass))));
             }
             if down.normal.z >= WALKABLE_Z && flat.is_none_or(|b| destination.z > b.z + 1.0) {
                 flat = Some(destination);
