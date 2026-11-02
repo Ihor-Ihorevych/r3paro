@@ -51,7 +51,7 @@ writable. The Windows programs of the game (`.exe`, `.dll`) are not used and can
    .\hp3.exe "C:\Games\HP3"
    ```
 
-   Or drag the game folder onto `hp3.exe`... or make a shortcut whose target is `hp3.exe "C:\Games\HP3"`.
+   Or drag the game folder onto `hp3.exe`, or make a shortcut whose target is `hp3.exe "C:\Games\HP3"`.
 3. A window opens and the game starts at its own menu: **New Game**, pick a slot, and play. To jump straight to a
    level, add its name: `.\hp3.exe "C:\Games\HP3" HP3_Adv1Express` (the names are the files in `Maps`, without `.unr`;
    **F11** in game shows the list). **Shift+Escape** quits.
@@ -65,7 +65,8 @@ CMake (Visual Studio Build Tools ships one; it must be on the `PATH`, SDL3 is bu
 git clone https://github.com/Ihor-Ihorevych/hp3-engine
 cd hp3-engine
 cargo build --release -p hp3
-targetelease\hp3.exe "C:\Games\HP3"
+target
+elease\hp3.exe "C:\Games\HP3"
 ```
 
 A build without `--release` is far too slow to play. The first build takes several minutes.
