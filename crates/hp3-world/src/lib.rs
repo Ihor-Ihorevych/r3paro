@@ -94,6 +94,10 @@ pub struct World {
     actor_slots: HashMap<&'static str, Option<usize>>,
     /// Time per tick phase, when `HP3_TICK_PROFILE` is set.
     pub tick_profile: std::collections::BTreeMap<&'static str, std::time::Duration>,
+    /// While profiling: per class, how many `Tick` events ran, how many were non-trivial, and the time they took.
+    /// Classes whose `Tick` event does nothing the player can see (answers are remembered per class).
+    pub tick_skipped: std::collections::HashMap<hp3_script::class_db::StructId, bool>,
+    pub tick_classes: std::collections::HashMap<(&'static str, hp3_script::class_db::StructId), (u32, std::time::Duration)>,
 }
 
 /// The world stored in the VM. Panics if no level is loaded.
@@ -474,6 +478,8 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         phys_slots: None,
         controller_classes: Default::default(),
         tick_profile: Default::default(),
+        tick_classes: Default::default(),
+        tick_skipped: Default::default(),
         actor_slots: Default::default(),
         config,
     }));
@@ -808,12 +814,19 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         if let Some(v) = ticked.and_then(|s| vm.db.objects.values_mut(a).and_then(|v| v.get_mut(s))) {
             *v = Value::Bool(parity);
         }
-        fire(vm, a, "Tick", &mut [Value::Float(dt)]);
+        let tick_start = profile.then(std::time::Instant::now);
+        if !tick_is_invisible(vm, a) {
+            fire(vm, a, "Tick", &mut [Value::Float(dt)]);
+        }
+        class_time(vm, a, "Tick", tick_start);
         lap(vm, "actors: Tick event", &mut clock, profile);
         if vm.db.objects.get(a).deleted {
             continue;
         }
-        if let Err(e) = vm.tick_state(a, dt) {
+        let state_start = profile.then(std::time::Instant::now);
+        let state_result = vm.tick_state(a, dt);
+        class_time(vm, a, "state code", state_start);
+        if let Err(e) = state_result {
             let at = format!("{} state code: {e}", vm.db.names.get(vm.db.objects.get(a).name));
             let w = world(vm);
             if w.errors.len() < 1000 {
@@ -841,7 +854,9 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
             nav::face_focus(vm, a);
         }
         lap(vm, "actors: controller", &mut clock, profile);
+        let physics_start = profile.then(std::time::Instant::now);
         physics::step_actor(vm, a, dt);
+        class_time(vm, a, "physics", physics_start);
         lap(vm, "actors: physics", &mut clock, profile);
     }
     mark(vm, "actors");
@@ -853,6 +868,27 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     mark(vm, "animation");
     // A save the game queued is written once the frame's tick is done, as the original does.
     save::run_queued(vm);
+}
+
+/// While profiling: adds the time since `start` to the actor's class under `phase`.
+fn class_time(vm: &mut Vm<'_>, a: ObjId, phase: &'static str, start: Option<std::time::Instant>) {
+    if let (Some(start), Some(class)) = (start, vm.db.objects.get(a).class) {
+        let e = world(vm).tick_classes.entry((phase, class)).or_default();
+        e.0 += 1;
+        e.1 += start.elapsed();
+    }
+}
+
+/// Whether an actor's `Tick` event can only update something that is never drawn here: a shadow projector keeps a
+/// character's blob shadow under it with traces every tick, and projectors are not rendered, so its tick is skipped.
+fn tick_is_invisible(vm: &mut Vm<'_>, a: ObjId) -> bool {
+    let Some(class) = vm.db.objects.get(a).class else { return false };
+    if let Some(&known) = world(vm).tick_skipped.get(&class) {
+        return known;
+    }
+    let answer = vm.db.find("ShadowProjector").is_some_and(|p| vm.is_child_of(class, p));
+    world(vm).tick_skipped.insert(class, answer);
+    answer
 }
 
 /// Whether an actor is a controller; answers are remembered per class.

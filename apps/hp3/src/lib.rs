@@ -563,6 +563,13 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             let fps = frames as f32 / fps_timer.elapsed().as_secs_f32();
             if std::env::var_os("HP3_PERF").is_some() || cfg!(target_os = "android") {
                 eprintln!("perf: {fps:.0} fps, {}", perf.report());
+                // Where the world's ticks spent their time this second (ms per second), biggest first.
+                let mut phases: Vec<_> = std::mem::take(&mut hp3_world::world(&mut vm).tick_profile).into_iter().collect();
+                phases.sort_by(|a, b| b.1.cmp(&a.1));
+                let text: Vec<String> = phases.iter().take(7).map(|(n, t)| format!("{n} {:.0}", t.as_secs_f32() * 1000.0)).collect();
+                if !text.is_empty() {
+                    eprintln!("perf: tick phases (ms this second): {}", text.join(", "));
+                }
             }
             perf = PerfStats::default();
             let _ = window.set_title(&format!("hp3 - {current_map} - {fps:.0} fps"));

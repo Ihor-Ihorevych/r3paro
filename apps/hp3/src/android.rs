@@ -48,6 +48,9 @@ fn forward_output_to_logcat() {
 #[unsafe(no_mangle)]
 pub extern "C" fn SDL_main(argc: c_int, argv: *mut *mut c_char) -> c_int {
     forward_output_to_logcat();
+    // The world's tick timings are collected and written to the log once a second (see the perf lines).
+    // SAFETY: nothing else is running yet; this is the first thing the game thread does.
+    unsafe { std::env::set_var("HP3_TICK_PROFILE", "1") };
     let args: Vec<String> = (0..argc.max(0) as usize)
         .filter_map(|i| {
             // SAFETY: SDL passes `argc` valid NUL-terminated strings.

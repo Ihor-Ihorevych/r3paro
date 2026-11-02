@@ -805,6 +805,12 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
         println!("  {c:7} {n}");
     }
     if std::env::var_os("HP3_TICK_PROFILE").is_some() {
+        let mut classes: Vec<_> = hp3_world::world(&mut vm).tick_classes.clone().into_iter().collect();
+        classes.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+        println!("time per phase and class (top 25):");
+        for ((phase, c), (n, t)) in classes.iter().take(25) {
+            println!("  {:>9.1} ms {:>7} calls {phase}: {}", t.as_secs_f64() * 1000.0, n, vm.db.names.get(vm.db.get(*c).name));
+        }
         println!("time per tick phase:");
         for (phase, t) in hp3_world::world(&mut vm).tick_profile.clone() {
             println!("  {:>10.1} ms {phase}", t.as_secs_f64() * 1000.0);

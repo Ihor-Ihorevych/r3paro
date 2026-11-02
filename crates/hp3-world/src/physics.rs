@@ -1236,13 +1236,22 @@ fn clear_way(vm: &mut Vm<'_>, a: ObjId, from: Vec3, to: Vec3, rot: [i32; 3]) -> 
 
 /// Carries what rides on the mover along its step: the same shift, plus the swing a rotation gives a rider at
 /// some distance from the pivot, and the turn itself for the rider's heading.
+/// The actors standing on (based on) `a`: found by reading the `Base` slot of every actor directly, not by name.
+fn riders_of(vm: &mut Vm<'_>, a: ObjId) -> Vec<ObjId> {
+    let base = crate::actor_slot(vm, "Base");
+    let actors = std::mem::take(&mut world(vm).actors);
+    let riders = actors.iter().copied().filter(|&r| r != a && crate::read(vm, r, base).as_obj() == Some(a)).collect();
+    world(vm).actors = actors;
+    riders
+}
+
 fn carry_riders(vm: &mut Vm<'_>, a: ObjId, from: Vec3, delta: Vec3, old_rot: [i32; 3], new_rot: [i32; 3]) {
     use hp3_script::natives::rot_axes;
-    let riders: Vec<ObjId> = world(vm).actors.iter().copied().filter(|&r| r != a).collect();
+    let riders = riders_of(vm, a);
     let (o, n) = (rot_axes(old_rot), rot_axes(new_rot));
     let turn = [0, 1, 2].map(|i| ((new_rot[i] & 0xFFFF) - (old_rot[i] & 0xFFFF) + 32768).rem_euclid(65536) - 32768);
     for r in riders {
-        if get(vm, r, "Base").as_obj() != Some(a) || vm.db.objects.get(r).deleted {
+        if vm.db.objects.get(r).deleted {
             continue;
         }
         let rel = vec(&get(vm, r, "Location")) - from;
@@ -1313,9 +1322,11 @@ fn moving_brush(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         carry_riders(vm, a, here, to - here, here_rot, rot);
         if first_step && to != here {
             first_step = false;
-            let riders = world(vm).actors.clone().into_iter().filter(|&r| r != a && get(vm, r, "Base").as_obj() == Some(a)).count();
-            let name = hp3_script::natives::object_path(vm, a);
-            vm.log.push(format!("mover {name} moves with {riders} riders"));
+            if std::env::var_os("HP3_MOVER_LOG").is_some() {
+                let riders = riders_of(vm, a).len();
+                let name = hp3_script::natives::object_path(vm, a);
+                vm.log.push(format!("mover {name} moves with {riders} riders"));
+            }
         }
         set(vm, a, "PhysAlpha", Value::Float(alpha));
         if alpha >= 1.0 {
