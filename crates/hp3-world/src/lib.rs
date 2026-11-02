@@ -987,6 +987,13 @@ fn mover_shape(vm: &mut Vm<'_>, a: ObjId) -> Option<collision::MoverShape> {
         let chain = vm.db.set.export_chain(&p, index);
         let Some(Asset::StaticMesh(sm)) = native_asset(&p, index, &chain) else { return None };
         let pos: Vec<Vec3> = sm.vertices.iter().map(|v| Vec3::new(v.position.x, v.position.y, v.position.z) * s3 * scale).collect();
+        if std::env::var("HP3_MOVER_MESH").is_ok_and(|n| hp3_script::natives::object_path(vm, a).ends_with(&n)) {
+            eprintln!("mover mesh: {} vertices, {} render triangles, {} collision triangles, scale {s3} {scale}", pos.len(), sm.indices.len() / 3, sm.collision_triangles.len());
+            for t in sm.indices.chunks_exact(3) {
+                let [a0, b0, c0] = [t[0], t[1], t[2]].map(|i| pos.get(i as usize).copied().unwrap_or(Vec3::ZERO));
+                eprintln!("render tri ({:.0},{:.0},{:.0}) ({:.0},{:.0},{:.0}) ({:.0},{:.0},{:.0})", a0.x, a0.y, a0.z, b0.x, b0.y, b0.z, c0.x, c0.y, c0.z);
+            }
+        }
         if !sm.collision_triangles.is_empty() {
             for t in &sm.collision_triangles {
                 tris.push(t.vertices.map(|i| pos.get(i as usize).copied().unwrap_or(Vec3::ZERO)));
