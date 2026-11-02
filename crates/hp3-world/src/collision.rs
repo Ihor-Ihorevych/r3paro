@@ -66,6 +66,8 @@ pub struct Collision {
     /// Actors whose static triangles, volumes or models are baked into the level but whose collision the game has
     /// turned off since (`SetCollision`, a destroyed actor): they are not traced against until it is on again.
     inactive: std::collections::HashSet<ObjId>,
+    /// Who the baked shapes of an actor stop: (other actors, players). An actor not listed stops both.
+    blocks: HashMap<ObjId, (bool, bool)>,
     model_grid: HashMap<(i32, i32), Vec<u32>>,
 }
 
@@ -377,7 +379,7 @@ impl Collision {
                 if t.actor.is_some() && t.actor == ignore {
                     continue;
                 }
-                if t.actor.is_some_and(|a| self.inactive.contains(&a) || self.uses_model(a, extent)) {
+                if t.actor.is_some_and(|a| self.inactive.contains(&a) || !self.blocks_mover(a) || self.uses_model(a, extent)) {
                     continue;
                 }
                 if let Some(h) = tri_trace(t, start, end, extent) {
@@ -394,7 +396,7 @@ impl Collision {
                     continue;
                 }
                 let m = &self.mesh_models[i as usize];
-                if Some(m.actor) == ignore || self.inactive.contains(&m.actor) || !self.uses_model(m.actor, extent) {
+                if Some(m.actor) == ignore || self.inactive.contains(&m.actor) || !self.blocks_mover(m.actor) || !self.uses_model(m.actor, extent) {
                     continue;
                 }
                 let mut out = None;
@@ -447,6 +449,17 @@ impl Collision {
         let mut seen = std::collections::HashSet::new();
         let tris = self.tris.iter().filter_map(|t| t.actor);
         tris.chain(self.mesh_models.iter().map(|m| m.actor)).filter(|a| seen.insert(*a)).collect()
+    }
+
+    /// Whether the baked shapes of `actor` stop the mover being traced: a volume that blocks players only lets creatures
+    /// through, and one that blocks creatures only lets the player through.
+    fn blocks_mover(&self, actor: ObjId) -> bool {
+        self.blocks.get(&actor).is_none_or(|&(actors, players)| if self.player_mover { players } else { actors })
+    }
+
+    /// Sets which kinds of mover the baked shapes of an actor stop.
+    pub fn set_blocks(&mut self, actor: ObjId, actors: bool, players: bool) {
+        self.blocks.insert(actor, (actors, players));
     }
 
     /// Turns the baked collision of an actor off or on.

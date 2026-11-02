@@ -744,9 +744,9 @@ fn sync_baked_collision(vm: &mut Vm<'_>) {
 /// Makes an actor's baked collision follow its current flags: at once when a script changes them, and in the periodic pass
 /// for changes made some other way.
 pub fn refresh_baked_collision(vm: &mut Vm<'_>, a: ObjId) {
-    let active = !vm.db.objects.get(a).deleted
-        && get(vm, a, "bCollideActors").as_bool()
-        && (get(vm, a, "bBlockActors").as_bool() || get(vm, a, "bBlockPlayers").as_bool());
+    let (blocks_actors, blocks_players) = (get(vm, a, "bBlockActors").as_bool(), get(vm, a, "bBlockPlayers").as_bool());
+    let active = !vm.db.objects.get(a).deleted && get(vm, a, "bCollideActors").as_bool() && (blocks_actors || blocks_players);
+    world(vm).collision.set_blocks(a, blocks_actors, blocks_players);
     world(vm).collision.set_active(a, active);
 }
 
