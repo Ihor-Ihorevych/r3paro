@@ -48,9 +48,6 @@ fn forward_output_to_logcat() {
 #[unsafe(no_mangle)]
 pub extern "C" fn SDL_main(argc: c_int, argv: *mut *mut c_char) -> c_int {
     forward_output_to_logcat();
-    // The world's tick timings are collected and written to the log once a second (see the perf lines).
-    // SAFETY: nothing else is running yet; this is the first thing the game thread does.
-    unsafe { std::env::set_var("HP3_TICK_PROFILE", "1") };
     let args: Vec<String> = (0..argc.max(0) as usize)
         .filter_map(|i| {
             // SAFETY: SDL passes `argc` valid NUL-terminated strings.
@@ -59,6 +56,12 @@ pub extern "C" fn SDL_main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         })
         .collect();
     log_line(&format!("hp3 starts with {args:?}"));
+    // A file named `profile.flag` in the game folder asks for the world's tick timings in the log, once a second (they
+    // slow the game down by a few milliseconds a tick, so they are off otherwise).
+    if args.get(1).is_some_and(|root| std::path::Path::new(root).join("profile.flag").exists()) {
+        // SAFETY: nothing else is running yet; this is the first thing the game thread does.
+        unsafe { std::env::set_var("HP3_TICK_PROFILE", "1") };
+    }
     let Some(root) = args.get(1).map(PathBuf::from) else {
         log_line("no game folder given");
         return 2;

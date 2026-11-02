@@ -528,8 +528,10 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         let refs: Vec<_> = instances.iter().map(|(m, t, l)| (m.as_ref(), *t, *l)).collect();
         stages.push(("instances", frame_start.elapsed().as_secs_f32() * 1000.0));
         let particle_quads = hp3_engine::particle_quads(&mut vm, &loader, &mut particle_cache, &camera);
+        stages.push(("particles", frame_start.elapsed().as_secs_f32() * 1000.0));
         let particle_images = |k: &hp3_assets::loader::ObjKey| loader.image_with_alpha(&loader.set.get(&k.0).ok()?, k.1);
         let particle_draw = particle_renderer.prepare(&renderer, &particle_quads, &particle_images);
+        stages.push(("particle_upload", frame_start.elapsed().as_secs_f32() * 1000.0));
         let cmd = dynamic.draw_full(
             &renderer,
             &gpu_scene,
@@ -563,12 +565,24 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             let fps = frames as f32 / fps_timer.elapsed().as_secs_f32();
             if std::env::var_os("HP3_PERF").is_some() || cfg!(target_os = "android") {
                 eprintln!("perf: {fps:.0} fps, {}", perf.report());
+                let (skinned, plain, drawn) = hp3_engine::take_instance_times();
+                eprintln!("perf: instances: skinned meshes {skinned:.0} ms/s ({} per frame), other meshes {plain:.0} ms/s", drawn / perf.frames.max(1) as u64);
                 // Where the world's ticks spent their time this second (ms per second), biggest first.
                 let mut phases: Vec<_> = std::mem::take(&mut hp3_world::world(&mut vm).tick_profile).into_iter().collect();
                 phases.sort_by(|a, b| b.1.cmp(&a.1));
                 let text: Vec<String> = phases.iter().take(7).map(|(n, t)| format!("{n} {:.0}", t.as_secs_f32() * 1000.0)).collect();
                 if !text.is_empty() {
                     eprintln!("perf: tick phases (ms this second): {}", text.join(", "));
+                }
+                let mut classes: Vec<_> = std::mem::take(&mut hp3_world::world(&mut vm).tick_classes).into_iter().collect();
+                classes.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+                let text: Vec<String> = classes
+                    .iter()
+                    .take(8)
+                    .map(|((phase, c), (n, t))| format!("{phase}:{} {:.0}ms/{n}", vm.db.names.get(vm.db.get(*c).name), t.as_secs_f32() * 1000.0))
+                    .collect();
+                if !text.is_empty() {
+                    eprintln!("perf: top classes: {}", text.join(", "));
                 }
             }
             perf = PerfStats::default();

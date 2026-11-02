@@ -1727,11 +1727,7 @@ pub fn far_move(vm: &mut Vm<'_>, a: ObjId, to: Vec3, test: bool, attached_move: 
         crate::natives::set_base(vm, a, None, true);
     }
     // What rides on it (not on a bone) goes along, unchecked.
-    let everyone: Vec<ObjId> = world(vm).actors.clone();
-    let carried: Vec<ObjId> = everyone
-        .into_iter()
-        .filter(|&o| o != a && get(vm, o, "Base").as_obj() == Some(a) && get(vm, o, "AttachmentBone").as_name() == hp3_script::Name::NONE)
-        .collect();
+    let carried: Vec<ObjId> = riders_of(vm, a).into_iter().filter(|&o| get(vm, o, "AttachmentBone").as_name() == hp3_script::Name::NONE).collect();
     for o in carried {
         let there = vec(&get(vm, o, "Location")) + (at - from);
         set(vm, o, "Location", value(there));

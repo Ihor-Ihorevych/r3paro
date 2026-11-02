@@ -393,6 +393,16 @@ fn vec3(v: &Value) -> Vec3 {
     hp3_world::physics::vec(v)
 }
 
+/// Time spent this second making skinned meshes and plain ones for the frame, and how many skinned ones there were
+/// (nanoseconds, nanoseconds, count): read and cleared by `take_instance_times`.
+static INSTANCE_NS: [std::sync::atomic::AtomicU64; 3] = [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
+
+/// (skinned ms, plain ms, skinned actors drawn) since the last call.
+pub fn take_instance_times() -> (f32, f32, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (INSTANCE_NS[0].swap(0, Relaxed) as f32 / 1e6, INSTANCE_NS[1].swap(0, Relaxed) as f32 / 1e6, INSTANCE_NS[2].swap(0, Relaxed))
+}
+
 /// The meshes to draw this frame with their actor-to-world transforms.
 pub fn actor_instances(
     vm: &mut Vm<'_>,
@@ -404,24 +414,44 @@ pub fn actor_instances(
 ) -> Vec<(Rc<GpuMesh>, Mat4, Vec3)> {
     let actors = world(vm).actors.clone();
     let mut out = Vec::new();
+    // Most of a level's actors draw nothing (volumes, triggers, baked static meshes): they are told apart by reading
+    // a few values through slots found once, before anything is looked up by name.
+    let (hidden, special_hidden, draw_slot, static_slot) = (
+        hp3_world::actor_slot(vm, "bHidden"),
+        hp3_world::actor_slot(vm, "bSpecialHidden"),
+        hp3_world::actor_slot(vm, "DrawType"),
+        hp3_world::actor_slot(vm, "bStatic"),
+    );
     for a in actors {
-        // `bSpecialHidden` keeps an actor out of the normal view (the animation helper of a ledge climb has it).
-        if vm.db.objects.get(a).deleted || get(vm, a, "bHidden").as_bool() || get(vm, a, "bSpecialHidden").as_bool() {
+        if vm.db.objects.get(a).deleted {
             continue;
         }
-        let draw_type = get(vm, a, "DrawType").as_byte();
-        let mesh = match draw_type {
-            DT_MESH => get(vm, a, "Mesh").as_obj(),
-            DT_STATIC_MESH if !get(vm, a, "bStatic").as_bool() => get(vm, a, "StaticMesh").as_obj(),
-            _ => None,
-        };
+        let draw_type = hp3_world::read(vm, a, draw_slot).as_byte();
+        if draw_type != DT_MESH && (draw_type != DT_STATIC_MESH || hp3_world::read(vm, a, static_slot).as_bool()) {
+            continue;
+        }
+        // `bSpecialHidden` keeps an actor out of the normal view (the animation helper of a ledge climb has it).
+        if hp3_world::read(vm, a, hidden).as_bool() || hp3_world::read(vm, a, special_hidden).as_bool() {
+            continue;
+        }
+        let mesh = if draw_type == DT_MESH { get(vm, a, "Mesh").as_obj() } else { get(vm, a, "StaticMesh").as_obj() };
         let Some(mesh) = mesh else { continue };
         let skins: Vec<Option<ObjId>> = match get(vm, a, "Skins") {
             Value::Array(v) => v.iter().map(Value::as_obj).collect(),
             _ => Vec::new(),
         };
+        let t0 = std::time::Instant::now();
         let skinned = if draw_type == DT_MESH { cache.skinned(vm, loader, r, dynamic, a, mesh, &skins) } else { None };
-        let Some(gpu) = skinned.or_else(|| cache.get(vm, loader, r, dynamic, mesh, &skins)) else { continue };
+        let t1 = std::time::Instant::now();
+        let was_skinned = skinned.is_some();
+        let found = skinned.or_else(|| cache.get(vm, loader, r, dynamic, mesh, &skins));
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            INSTANCE_NS[0].fetch_add((t1 - t0).as_nanos() as u64, Relaxed);
+            INSTANCE_NS[1].fetch_add(t1.elapsed().as_nanos() as u64, Relaxed);
+            INSTANCE_NS[2].fetch_add(was_skinned as u64, Relaxed);
+        }
+        let Some(gpu) = found else { continue };
         let loc = vec3(&get(vm, a, "Location")) + Vec3::Z * hp3_world::physics::view_offset(vm, a);
         let rot: Vec<i32> = get(vm, a, "Rotation").fields().iter().map(Value::as_int).collect();
         let rot = [rot.first().copied().unwrap_or(0), rot.get(1).copied().unwrap_or(0), rot.get(2).copied().unwrap_or(0)];
