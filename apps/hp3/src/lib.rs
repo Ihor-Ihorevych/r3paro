@@ -41,8 +41,10 @@ mod platform {
         true
     }
     pub fn tick_frame() {}
+    /// The desktop game runs at 60 frames a second; `HP3_FPS=<n>` changes it and 0 lifts the limit.
     pub fn frame_budget() -> Option<f32> {
-        None
+        let fps = std::env::var("HP3_FPS").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(60.0);
+        (fps > 0.0).then(|| 1.0 / fps)
     }
     pub fn fov_offset() -> f32 {
         0.0
@@ -529,9 +531,13 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         }
         // Settings > FPS limit: a frame takes at least that long.
         if let Some(budget) = platform::frame_budget() {
+            // Sleep for most of the wait and spin the rest: a sleep alone overshoots by a few milliseconds.
             let spent = last.elapsed().as_secs_f32();
-            if spent < budget {
-                std::thread::sleep(std::time::Duration::from_secs_f32(budget - spent));
+            if spent < budget - 0.002 {
+                std::thread::sleep(std::time::Duration::from_secs_f32(budget - 0.002 - spent));
+            }
+            while last.elapsed().as_secs_f32() < budget {
+                std::hint::spin_loop();
             }
         }
         let now = Instant::now();
