@@ -562,8 +562,11 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
                 if drop > 0.5 {
                     set(vm, a, "Location", value(loc - Vec3::Z * (drop - 0.5)));
                 }
-                if get(vm, a, "Base").as_obj() != floor.actor {
-                    set(vm, a, "Base", Value::Object(floor.actor));
+                let before = get(vm, a, "Base").as_obj();
+                if before != floor.actor {
+                    // Standing on (or stepping off) another pawn is told to both (a Bundimun hears `PawnLandedOnMe`).
+                    let pawn_involved = floor.actor.is_some_and(|b| is_pawn(vm, b)) || before.is_some_and(|b| is_pawn(vm, b));
+                    crate::natives::set_base(vm, a, floor.actor, pawn_involved);
                 }
             }
             None => {
