@@ -453,7 +453,7 @@ impl Renderer {
         let view_proj = camera.view_proj(aspect);
         self.queue.write_buffer(&scene.globals, 0, bytemuck::cast_slice(&view_proj.to_cols_array()));
         let mut enc = self.device.create_command_encoder(&Default::default());
-        let clear = wgpu::LoadOp::Clear(wgpu::Color { r: 0.05, g: 0.05, b: 0.1, a: 1.0 });
+        let clear = wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 });
         // The sky first: the level seen from the sky zone with the camera's rotation, behind everything.
         if let Some(sky) = scene.sky {
             let sky_camera = Camera { position: sky, ..*camera };
