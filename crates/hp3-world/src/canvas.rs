@@ -81,6 +81,8 @@ impl FontInfo {
 pub struct CanvasState {
     pub object: Option<ObjId>,
     pub tiles: Vec<Tile>,
+    /// How much bigger the HUD and subtitles are drawn than the game lays them out (0 or 1: as laid out).
+    pub ui_scale: f32,
     fonts: HashMap<ObjId, Option<Rc<FontInfo>>>,
 }
 
@@ -249,15 +251,31 @@ pub fn render(vm: &mut Vm<'_>, width: u32, height: u32) -> Vec<Tile> {
             c
         }
     };
-    set(vm, canvas, "SizeX", Value::Int(width as i32));
-    set(vm, canvas, "SizeY", Value::Int(height as i32));
+    // The HUD is laid out on a canvas that many times smaller and drawn that many times bigger.
+    let scale = match world(vm).canvas.ui_scale {
+        s if s > 0.05 => s,
+        _ => 1.0,
+    };
+    let (hud_w, hud_h) = ((width as f32 / scale).round().max(1.0), (height as f32 / scale).round().max(1.0));
+    set(vm, canvas, "SizeX", Value::Int(hud_w as i32));
+    set(vm, canvas, "SizeY", Value::Int(hud_h as i32));
     fire(vm, canvas, "Reset", &mut []);
-    set(vm, canvas, "ClipX", Value::Float(width as f32));
-    set(vm, canvas, "ClipY", Value::Float(height as f32));
+    set(vm, canvas, "ClipX", Value::Float(hud_w));
+    set(vm, canvas, "ClipY", Value::Float(hud_h));
     crate::interactions::pre_render(vm, canvas);
     if let Some(hud) = get(vm, pc, "myHUD").as_obj() {
         fire(vm, hud, "PostRender", &mut [Value::Object(Some(canvas))]);
     }
+    if scale != 1.0 {
+        for t in &mut world(vm).canvas.tiles {
+            t.x *= scale;
+            t.y *= scale;
+            t.w *= scale;
+            t.h *= scale;
+        }
+    }
+    set(vm, canvas, "SizeX", Value::Int(width as i32));
+    set(vm, canvas, "SizeY", Value::Int(height as i32));
     // Interactions (the GUI's menus, the console) draw over the HUD.
     fire(vm, canvas, "Reset", &mut []);
     set(vm, canvas, "ClipX", Value::Float(width as f32));

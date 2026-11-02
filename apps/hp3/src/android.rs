@@ -78,6 +78,7 @@ static SURFACE_ALIVE: AtomicBool = AtomicBool::new(true);
 static FRAMES: AtomicI32 = AtomicI32::new(0);
 static FPS_LIMIT: AtomicI32 = AtomicI32::new(60);
 static FOV_OFFSET: AtomicU32 = AtomicU32::new(0);
+static UI_SCALE: AtomicU32 = AtomicU32::new(0x3F80_0000); // 1.0
 static SAVED: AtomicI32 = AtomicI32::new(0);
 static LEVEL: Mutex<String> = Mutex::new(String::new());
 
@@ -120,6 +121,11 @@ pub fn fov_offset() -> f32 {
     f32::from_bits(FOV_OFFSET.load(Ordering::Relaxed))
 }
 
+/// How much bigger than the game lays them out the HUD and subtitles are drawn (Settings > Interface size).
+pub fn ui_scale() -> f32 {
+    f32::from_bits(UI_SCALE.load(Ordering::Relaxed))
+}
+
 /// A quick save was written: the activity shows a toast.
 pub fn note_saved() {
     SAVED.fetch_add(1, Ordering::Relaxed);
@@ -149,7 +155,6 @@ native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeLessonDrawing,
 native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeVendorActive, false);
 native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeOnBroom, false);
 
-native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetUiScale, _scale: f32);
 native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetDebugMode, _on: u8);
 native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetAutoJump, _on: u8);
 native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetFirstPerson, _on: u8);
@@ -157,6 +162,11 @@ native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetPerfLog, _o
 native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetTouch, _x: f32, _y: f32, _down: u8);
 native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeMenuAdjust, _index: i32, _dir: i32);
 native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetLessonTimeScale, _scale: f32);
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_flipendo_spike_FlipendoActivity_nativeSetUiScale(_env: Env, _class: *mut c_void, scale: f32) {
+    UI_SCALE.store(scale.clamp(0.3, 3.0).to_bits(), Ordering::Relaxed);
+}
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_github_flipendo_spike_FlipendoActivity_nativeSetFovOffset(_env: Env, _class: *mut c_void, degrees: f32) {

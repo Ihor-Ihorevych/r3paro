@@ -46,6 +46,9 @@ mod platform {
     pub fn fov_offset() -> f32 {
         0.0
     }
+    pub fn ui_scale() -> f32 {
+        1.0
+    }
     pub fn note_saved() {}
 }
 
@@ -498,6 +501,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             width as f32 / height as f32,
         );
         stages.push(("draw", frame_start.elapsed().as_secs_f32() * 1000.0));
+        hp3_world::world(&mut vm).canvas.ui_scale = platform::ui_scale();
         let mut quads = hp3_engine::hud_quads(&mut vm, &loader, &mut hud_cache, width, height);
         quads.extend(hp3_engine::screen_flash(&mut vm, width, height));
         quads.extend(levels.quads(width, height, &current_map));
