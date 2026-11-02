@@ -24,6 +24,7 @@ mod audio;
 pub mod commands;
 mod gamelog;
 mod levelmenu;
+mod present;
 use hp3_script::Value;
 
 /// What the platform layer needs to know about the game and tells it: on Android Flipendo's touch controls ask through JNI
@@ -261,22 +262,9 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
     let mut hud_cache = hp3_engine::HudCache::default();
 
     let (mut width, mut height) = window.size_in_pixels();
-    let configure = |w: u32, h: u32| {
-        surface.configure(
-            &renderer.device,
-            &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format,
-                width: w.max(1),
-                height: h.max(1),
-                present_mode: wgpu::PresentMode::AutoVsync,
-                desired_maximum_frame_latency: 2,
-                alpha_mode: caps.alpha_modes[0],
-                view_formats: vec![],
-            },
-        );
-    };
-    configure(width, height);
+    // Frames are drawn off-screen and shown by a thread of their own, so waiting for the display does not hold up the game.
+    let mut presenter = present::Presenter::new(surface, &caps, renderer.device.clone(), renderer.queue.clone(), format, width, height)
+        .ok_or("the display surface cannot be copied into")?;
     let mut depth = renderer.depth_target(width.max(1), height.max(1));
 
     let (start, start_rot) = scene.player_starts.first().copied().unwrap_or((Vec3::ZERO, [0, 0, 0]));
@@ -392,7 +380,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                 }
                 Event::Window { win_event: WindowEvent::PixelSizeChanged(w, h), .. } => {
                     (width, height) = (w.max(1) as u32, h.max(1) as u32);
-                    configure(width, height);
+                    presenter.resize(width, height);
                     depth = renderer.depth_target(width, height);
                 }
                 Event::MouseMotion { xrel, yrel, .. } => {
@@ -422,7 +410,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         if surface_was_gone {
             surface_was_gone = false;
             (width, height) = window.size_in_pixels();
-            configure(width, height);
+            presenter.resize(width, height);
             depth = renderer.depth_target(width.max(1), height.max(1));
         }
         // Settings > FPS limit: a frame takes at least that long.
@@ -514,16 +502,6 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         }
         game_log.update(&mut vm);
         stages.push(("camera", frame_start.elapsed().as_secs_f32() * 1000.0));
-        let frame = match surface.get_current_texture() {
-            Ok(f) => f,
-            Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
-                configure(width, height);
-                continue;
-            }
-            Err(e) => return Err(e.into()),
-        };
-        let view = frame.texture.create_view(&Default::default());
-        stages.push(("acquire", frame_start.elapsed().as_secs_f32() * 1000.0));
         let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut mesh_cache, lighting.as_ref(), Some((camera.position, camera.forward())));
         let refs: Vec<_> = instances.iter().map(|(m, t, l)| (m.as_ref(), *t, *l)).collect();
         stages.push(("instances", frame_start.elapsed().as_secs_f32() * 1000.0));
@@ -532,6 +510,10 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         let particle_images = |k: &hp3_assets::loader::ObjKey| loader.image_with_alpha(&loader.set.get(&k.0).ok()?, k.1);
         let particle_draw = particle_renderer.prepare(&renderer, &particle_quads, &particle_images);
         stages.push(("particle_upload", frame_start.elapsed().as_secs_f32() * 1000.0));
+        // The off-screen image to draw into: waits only if the display is two frames behind.
+        let slot = presenter.take();
+        stages.push(("wait", frame_start.elapsed().as_secs_f32() * 1000.0));
+        let view = presenter.view(slot).clone();
         let cmd = dynamic.draw_full(
             &renderer,
             &gpu_scene,
@@ -552,7 +534,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         stages.push(("hud", frame_start.elapsed().as_secs_f32() * 1000.0));
         renderer.queue.submit([cmd, hud]);
         stages.push(("submit", frame_start.elapsed().as_secs_f32() * 1000.0));
-        frame.present();
+        presenter.show(slot);
         platform::tick_frame();
         stages.push(("present", frame_start.elapsed().as_secs_f32() * 1000.0));
         if stages.last().is_some_and(|s| s.1 > 200.0) {
