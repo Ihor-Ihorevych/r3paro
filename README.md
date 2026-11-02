@@ -7,7 +7,7 @@ puzzles, cutscenes, voices and music are the retail game's, not a remake.
 **It ships no game data.** You need your own retail copy of the PC game. R3paro is written clean-room
 (`CLEANROOM.md`) and licensed GPLv3. It supports Harry Potter 3 only.
 
-Version **0.5.1**. It is the engine behind Harry Potter 3 in
+Version **0.5.2**. It is the engine behind Harry Potter 3 in
 [Flipendo Droid](https://github.com/Ihor-Ihorevych/flipendo-droid) (Android), and it also runs on Windows.
 
 ## What works
@@ -76,8 +76,8 @@ A build without `--release` is far too slow to play. The first build takes sever
 On Android the engine is part of [Flipendo Droid](https://github.com/Ihor-Ihorevych/flipendo-droid), which brings the touch
 controls and settings. You need Android 10 or newer, 64-bit, and about 1 GB free for the game's data.
 
-1. Install the APK from Flipendo's [Releases](https://github.com/Ihor-Ihorevych/flipendo-droid/releases): the **lite** app has no
-   game data (steps 2 and 3 follow); a **self pack** already carries the games and unpacks them on first start (then skip to 4).
+1. Install the APK from Flipendo's [Releases](https://github.com/Ihor-Ihorevych/flipendo-droid/releases). The app has no
+   game data (steps 2 and 3 follow).
 2. Put the game's folder on the phone: copy your `HP3` folder (the one from step 1 above, or the data zip of the release)
    to the phone's internal storage, for example as **FlipendoHP3**. Keep the `System`, `Maps`... folders directly inside.
 3. Start Flipendo and allow **All files access** when it asks, then open the app again.
@@ -118,6 +118,7 @@ Environment variables (set them before starting, e.g. `$env:HP3_FPS = 0` in Powe
 |---|---|
 | `HP3_FPS=<n>` | frame rate limit (60 by default, `0` for none) |
 | `HP3_FIRST_PERSON=1` | camera in the character's head |
+| `HP3_LANGUAGE=<ext>` | interface language: `int` (English), `ukr`, `bel`, `geo`, `lav`; also read from a `.flipendo-language` file next to the game (the Android launcher writes it). Menus and loading tips only: subtitles stay in the edition's language |
 | `HP3_HIT_LOG=1` | prints what blocks a character (for collision bugs) |
 | `HP3_UNLIT=1` | lighting off |
 | `HP3_PROFILE=1` | frame timing |
@@ -139,6 +140,10 @@ A workspace of crates: `hp3-package` (the package format), `hp3-assets` (meshes,
 game's natives), `hp3-anim` (skeletal animation), `hp3-audio`, `hp3-render` (wgpu), `hp3-gui`, `hp3-engine` and
 the `hp3` app (SDL3 window and Android entry). Formats and findings are written down in `docs/formats/` and
 `docs/status.md`.
+
+## Community
+
+Questions, bug reports and results from your phone are welcome in the Telegram group: [flipendodroid.t.me](https://t.me/flipendodroid).
 
 ## Clean room
 

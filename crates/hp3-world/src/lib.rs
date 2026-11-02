@@ -86,6 +86,8 @@ pub struct World {
     pub controller_classes: HashMap<hp3_script::StructId, bool>,
     /// A level switch asked for and due (`Level.NextURL`).
     pub pending_travel: Option<String>,
+    /// The game asked to leave (`ConsoleCommand("exit")`, the Quit page's Yes): the app ends its main loop.
+    pub quit_requested: bool,
     /// Walking pawns' view offsets while they ease onto a step (drawing only).
     pub step_smooth: std::collections::HashMap<ObjId, f32>,
     /// The physics volumes of the level with their brush planes (built the first time a pawn is checked).
@@ -468,6 +470,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         viewport: Default::default(),
         native_fonts: Default::default(),
         pending_travel: None,
+        quit_requested: false,
         step_smooth: Default::default(),
         volume_hulls: None,
         travel_info: travel.clone().unwrap_or_default(),

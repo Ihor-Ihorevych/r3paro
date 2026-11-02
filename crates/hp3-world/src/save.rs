@@ -647,6 +647,8 @@ pub fn console(vm: &mut Vm<'_>, command: &str) -> String {
                 write(vm, slot);
             }
         }
+        // The Quit page's Yes: the app leaves its main loop (on the phone the game's activity then ends).
+        "EXIT" | "QUIT" => world(vm).quit_requested = true,
         "COPYSAVEDGAME" => {
             if let (Some(from), Some(to)) = (number(rest.first()), number(rest.get(1))) {
                 copy(vm, from, to);

@@ -4,6 +4,7 @@
 //!   class name, prints that class's properties and default values.
 
 mod casttest;
+mod langcheck;
 mod mounttest;
 
 use std::path::Path;
@@ -109,6 +110,7 @@ fn main() -> ExitCode {
         Some("levels") if args.len() >= 2 => levels(Path::new(&args[1]), args.get(2).and_then(|f| f.parse().ok()).unwrap_or(120)),
         Some("level") if args.len() >= 3 => level(Path::new(&args[1]), &args[2], args.get(3).and_then(|f| f.parse().ok()).unwrap_or(600)),
         Some("call") if args.len() >= 4 => call(Path::new(&args[1]), &args[2], &args[3], &args[4..]),
+        Some("lang") if args.len() >= 3 => langcheck::check(Path::new(&args[1]), &args[2], args.get(3).map(Path::new)),
         _ => {
             eprintln!("usage: hp3-run classes <HP3 folder> [class]");
             return ExitCode::from(2);

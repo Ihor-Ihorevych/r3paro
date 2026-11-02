@@ -94,6 +94,13 @@ impl Ini {
         self.sections.contains_key(&section.to_ascii_lowercase())
     }
 
+    /// The names of the sections (lower case), sorted.
+    pub fn section_names(&self) -> Vec<&str> {
+        let mut v: Vec<&str> = self.sections.keys().map(String::as_str).collect();
+        v.sort_unstable();
+        v
+    }
+
     /// Layers `other` over this file: its keys replace this file's.
     pub fn overlay(&mut self, other: &Ini) {
         for (sec, entries) in &other.sections {

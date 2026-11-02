@@ -36,6 +36,7 @@ use android as platform;
 mod platform {
     pub fn set_in_menu(_open: bool) {}
     pub fn set_cutscene(_on: bool) {}
+    pub fn set_creature(_on: bool) {}
     pub fn set_level(_name: &str) {}
     pub fn surface_alive() -> bool {
         true
@@ -203,6 +204,14 @@ fn player_in_cutscene(vm: &mut Vm<'_>) -> bool {
     let Some(pc) = hp3_world::world(vm).player else { return false };
     let Some(pawn) = hp3_world::get(vm, pc, "Pawn").as_obj() else { return false };
     hp3_world::get(vm, pawn, "Controller").as_obj().is_some_and(|c| c != pc)
+}
+
+/// Whether the player steers a creature the game gave them (the rabbit of Lapifors, the dragon of Draconifors...): Enter
+/// ends it (`Enter=Use | BypassCutscene | EndCreaturePossess`), which a phone has no key for.
+fn player_controls_creature(vm: &mut Vm<'_>) -> bool {
+    let Some(pc) = hp3_world::world(vm).player else { return false };
+    let Some(class) = hp3_world::get(vm, pc, "Pawn").as_obj().and_then(|p| vm.db.objects.get(p).class) else { return false };
+    ["LapiforPawn", "AviforPawn", "SuperChickenPawn"].iter().filter_map(|n| vm.db.find(n)).any(|c| vm.is_child_of(class, c))
 }
 
 fn game_camera(vm: &mut Vm<'_>) -> Option<Camera> {
@@ -499,6 +508,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         }
         if hp3_world::world(&mut vm).frame % 6 == 0 {
             platform::set_cutscene(player_in_cutscene(&mut vm));
+            platform::set_creature(player_controls_creature(&mut vm));
             FLYING.store(player_flying(&mut vm), std::sync::atomic::Ordering::Relaxed);
             CREATURE.store(player_is_creature(&mut vm), std::sync::atomic::Ordering::Relaxed);
         }
@@ -593,6 +603,9 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         }
         stages.push(("ticks", frame_start.elapsed().as_secs_f32() * 1000.0));
         // A level switch the game asked for: the new level is loaded and its scene built.
+        if hp3_world::world(&mut vm).quit_requested {
+            break 'main;
+        }
         if let Some(url) = hp3_world::take_travel(&mut vm).or_else(|| pending_level.take()) {
             let t = Instant::now();
             let pkg = hp3_world::travel(&mut vm, &url)?;

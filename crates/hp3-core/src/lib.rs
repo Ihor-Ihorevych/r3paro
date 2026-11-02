@@ -13,8 +13,11 @@ pub struct Config {
     pub system: PathBuf,
     pub ini: Ini,
     pub user: Ini,
-    /// Localization file extension, e.g. `int` or `rus`.
+    /// Localization file extension, e.g. `int` or `rus`: the player's choice, else the install's own.
     pub language: String,
+    /// The install's own language (`Default.ini`'s `Language`): its texts stand in for what a chosen translation
+    /// lacks (a Russian edition's dialogue has no other language).
+    pub edition: String,
     localized: HashMap<String, Option<Ini>>,
     /// The other ini files of the System folder (`Spells.ini`...), by lower-case name without the extension.
     named: HashMap<String, Ini>,
@@ -29,7 +32,14 @@ impl Config {
         };
         let ini = find("Default.ini").and_then(|p| Ini::load(&p).ok()).unwrap_or_default();
         let user = find("User.ini").and_then(|p| Ini::load(&p).ok()).unwrap_or_default();
-        let language = ini.get("Engine.Engine", "Language").unwrap_or("int").to_ascii_lowercase();
+        let edition = ini.get("Engine.Engine", "Language").unwrap_or("int").to_ascii_lowercase();
+        // The language the player chose: `HP3_LANGUAGE`, or the one Flipendo's launcher wrote next to the game.
+        let chosen = std::env::var("HP3_LANGUAGE")
+            .ok()
+            .or_else(|| std::fs::read_to_string(root.join(".flipendo-language")).ok())
+            .map(|l| l.trim().to_ascii_lowercase())
+            .filter(|l| !l.is_empty() && l.len() <= 8 && l.chars().all(|c| c.is_ascii_alphanumeric()));
+        let language = chosen.unwrap_or_else(|| edition.clone());
         let mut named = HashMap::new();
         if let Ok(entries) = std::fs::read_dir(&system) {
             for path in entries.flatten().map(|e| e.path()) {
@@ -42,7 +52,7 @@ impl Config {
                 }
             }
         }
-        Config { system, ini, user, language, localized: HashMap::new(), named }
+        Config { system, ini, user, language, edition, localized: HashMap::new(), named }
     }
 
     /// A value from the ini file a class's `config(File)` names. `System` (and no name) is the main
@@ -73,9 +83,16 @@ impl Config {
         if user.is_empty() { self.ini.get_all(section, key) } else { user }
     }
 
-    /// A localized string from `<package>.<language>` (falling back to `<package>.int`).
+    /// A localized string from `<package>.<language>`, falling back to `<package>.int` and then to the edition's own
+    /// language.
     pub fn localize(&mut self, package: &str, section: &str, key: &str) -> Option<String> {
-        for lang in [self.language.clone(), "int".to_string()] {
+        let mut langs = vec![self.language.clone()];
+        for l in ["int".to_string(), self.edition.clone()] {
+            if !langs.contains(&l) {
+                langs.push(l);
+            }
+        }
+        for lang in langs {
             let file = format!("{}.{}", package.to_ascii_lowercase(), lang);
             if !self.localized.contains_key(&file) {
                 // A package may name a subfolder of System (`Cutscenes0Intro`); each part matches ignoring case.
@@ -99,5 +116,51 @@ impl Config {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A game folder with a Russian edition: `Default.ini` says `Language=Rus`, `HpMenu.rus` has two texts.
+    fn install(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("hp3-core-{name}-{}", std::process::id()));
+        let system = root.join("System");
+        std::fs::create_dir_all(&system).unwrap();
+        std::fs::write(system.join("Default.ini"), "[Engine.Engine]\nLanguage=Rus\n").unwrap();
+        std::fs::write(system.join("HpMenu.rus"), "[All]\nback=Nazad\nonly_rus=Tolko\n").unwrap();
+        std::fs::write(system.join("HpMenu.ukr"), "[All]\nback=Nazad-uk\n").unwrap();
+        root
+    }
+
+    #[test]
+    fn the_installs_language_is_the_default() {
+        let root = install("default");
+        let mut c = Config::load(&root);
+        assert_eq!((c.language.as_str(), c.edition.as_str()), ("rus", "rus"));
+        assert_eq!(c.localize("HpMenu", "All", "back").as_deref(), Some("Nazad"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_launchers_choice_wins_and_falls_back_to_the_edition() {
+        let root = install("chosen");
+        std::fs::write(root.join(".flipendo-language"), "UKR\r\n").unwrap();
+        let mut c = Config::load(&root);
+        assert_eq!((c.language.as_str(), c.edition.as_str()), ("ukr", "rus"));
+        assert_eq!(c.localize("HpMenu", "All", "back").as_deref(), Some("Nazad-uk"));
+        // Not in the translation: the edition's text stands in.
+        assert_eq!(c.localize("HpMenu", "All", "only_rus").as_deref(), Some("Tolko"));
+        assert_eq!(c.localize("HpMenu", "All", "nowhere"), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_garbled_choice_is_ignored() {
+        let root = install("garbled");
+        std::fs::write(root.join(".flipendo-language"), "../../etc\n").unwrap();
+        assert_eq!(Config::load(&root).language, "rus");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

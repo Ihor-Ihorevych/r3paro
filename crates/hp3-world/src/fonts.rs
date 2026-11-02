@@ -15,11 +15,32 @@ use hp3_script::{ObjId, Vm};
 
 use crate::world;
 
-/// Characters every native font carries: printable ASCII, Latin-1, Cyrillic and common punctuation.
-fn charset() -> Vec<char> {
-    let mut v: Vec<char> = (0x20u32..0x7f).chain(0xa0..0x100).chain(0x400..0x460).filter_map(char::from_u32).collect();
+/// Characters every native font carries: printable ASCII, Latin-1 and Latin Extended-A (Latvian), Cyrillic with
+/// Ukrainian's Ґ, common punctuation, and Georgian when that is the language.
+pub fn charset(language: &str) -> Vec<char> {
+    let mut v: Vec<char> =
+        (0x20u32..0x7f).chain(0xa0..0x180).chain(0x400..0x460).chain(0x490..0x492).filter_map(char::from_u32).collect();
     v.extend(['–', '—', '‘', '’', '“', '”', '„', '…', '«', '»', '№', '•', '™']);
+    if language == "geo" {
+        v.extend((0x10d0u32..0x1100).filter_map(char::from_u32));
+    }
     v
+}
+
+/// Fonts that fill in what the main one lacks (Georgian letters), in the order they are tried.
+fn fallback_files(language: &str) -> Vec<Vec<u8>> {
+    if language != "geo" {
+        return Vec::new();
+    }
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let candidates = [
+        "/system/fonts/NotoSansGeorgian-VF.ttf".to_string(),
+        "/system/fonts/NotoSansGeorgian-Regular.ttf".into(),
+        "/system/fonts/NotoSansGeorgian-Regular.otf".into(),
+        format!("{windows}\\Fonts\\sylfaen.ttf"),
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf".into(),
+    ];
+    candidates.iter().filter_map(|p| std::fs::read(p).ok()).collect()
 }
 
 /// A font file for a family name.
@@ -79,16 +100,21 @@ pub fn create(vm: &mut Vm<'_>, family: &str, px: u32) -> Option<ObjId> {
 fn rasterize(vm: &mut Vm<'_>, family: &str, px: u32) -> Option<ObjId> {
     let data = font_file(family)?;
     let face = fontdue::Font::from_bytes(data, fontdue::FontSettings::default()).ok()?;
+    let language = world(vm).config.language.clone();
+    let fallbacks: Vec<fontdue::Font> =
+        fallback_files(&language).into_iter().filter_map(|d| fontdue::Font::from_bytes(d, fontdue::FontSettings::default()).ok()).collect();
     let size = px as f32;
     let line = face.horizontal_line_metrics(size)?;
     let height = (line.ascent - line.descent).ceil().max(1.0) as i32;
     // Each glyph gets a cell as wide as its advance and as tall as the line, the bitmap at its offsets.
     const WIDTH: i32 = 1024;
-    let chars = charset();
+    let chars = charset(&language);
     let mut cells = Vec::new();
     let (mut x, mut y) = (0i32, 0i32);
     for &c in &chars {
-        let (m, bitmap) = face.rasterize(c, size);
+        // A letter the main font lacks comes from the first fallback that has it.
+        let source = std::iter::once(&face).chain(&fallbacks).find(|f| f.lookup_glyph_index(c) != 0).unwrap_or(&face);
+        let (m, bitmap) = source.rasterize(c, size);
         let advance = m.advance_width.round().max(1.0) as i32;
         if x + advance > WIDTH {
             x = 0;
@@ -134,8 +160,8 @@ fn rasterize(vm: &mut Vm<'_>, family: &str, px: u32) -> Option<ObjId> {
 /// Whether the configured language draws its text with system fonts (its script is missing from HP3's
 /// bitmap fonts).
 pub fn need_sap_font(vm: &mut Vm<'_>) -> bool {
-    let lang = world(vm).config.language.to_ascii_lowercase();
-    matches!(lang.as_str(), "rus" | "cze" | "pol" | "tha" | "jap" | "kor" | "sim" | "tra")
+    // The language is kept in lower case. Ukrainian, Belarusian, Georgian and Latvian are Flipendo's translations.
+    matches!(world(vm).config.language.as_str(), "rus" | "cze" | "pol" | "tha" | "jap" | "kor" | "sim" | "tra" | "ukr" | "bel" | "geo" | "lav")
 }
 
 /// The system font standing in for a bitmap font of the size class in `bitmap_name` (Tiny, Small, Med, Big,
