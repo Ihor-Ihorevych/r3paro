@@ -613,8 +613,24 @@ fn climb_or_slide(vm: &mut Vm<'_>, a: ObjId, delta: Vec3, hit: Hit) -> bool {
     false
 }
 
+/// With a `hit.flag` file next to the game's data (or `HP3_HIT_LOG` set), says once a second what blocks a mover.
+fn log_block(vm: &mut Vm<'_>, a: ObjId, hit: &Hit) {
+    if world(vm).frame % 30 != 0 {
+        return;
+    }
+    let wanted = std::env::var_os("HP3_HIT_LOG").is_some() || std::path::Path::new("/sdcard/FlipendoHP3/hit.flag").exists();
+    if !wanted {
+        return;
+    }
+    let who = hp3_script::natives::object_path(vm, a);
+    let by = hit.actor.map(|o| hp3_script::natives::object_path(vm, o)).unwrap_or_else(|| "the level".into());
+    let at = vec(&get(vm, a, "Location"));
+    eprintln!("blocked: {who} at {at} by {by} normal {}", hit.normal);
+}
+
 /// Tells the pawn's script it ran into a wall: not for another pawn, and not when it was not pushing.
 fn notify_hit_wall(vm: &mut Vm<'_>, a: ObjId, hit: &Hit) {
+    log_block(vm, a, hit);
     let human = world(vm).player.is_some_and(|pc| get(vm, pc, "Pawn").as_obj() == Some(a));
     let hit_pawn = hit.actor.is_some_and(|o| is_pawn(vm, o));
     let pushing = vec(&get(vm, a, "Acceleration")).length_squared() > 1e-6 || human;
@@ -1031,6 +1047,7 @@ fn fall(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         } else if try_mount(vm, a, Vec3::Z, &hit) {
             return;
         } else {
+            log_block(vm, a, &hit);
             fire(vm, a, "HitWall", &mut [value(hit.normal), Value::Object(hit.actor)]);
         }
     }

@@ -254,7 +254,14 @@ pub fn step(vm: &mut Vm<'_>, t: &mut CastTest, frame: u32) {
     // HP3_CAST_DIRECT=1: the spell is born on the target instead of flying there, which exercises the target's
     // reaction without depending on the geometry between Harry and it.
     if r == 100 && std::env::var_os("HP3_CAST_DIRECT").is_some() {
-        direct_hit(vm, t, pawn, target);
+        direct_hit(vm, &t.spell, pawn, target);
+    }
+    // HP3_CAST_THEN=<SpellClass>@<ticks after the cast starts>: a second spell born on the same target.
+    if let Ok(spec) = std::env::var("HP3_CAST_THEN")
+        && let Some((spell, at)) = spec.split_once('@')
+        && at.parse::<u32>() == Ok(r)
+    {
+        direct_hit(vm, spell, pawn, target);
     }
     if r == 90 {
         report_cursor(vm);
@@ -598,8 +605,8 @@ fn report_spell(vm: &mut Vm<'_>, r: u32) {
 }
 
 /// Spawns the spell on the target, initialises and launches it like the wand does.
-fn direct_hit(vm: &mut Vm<'_>, t: &CastTest, pawn: ObjId, target: ObjId) {
-    let Some(class) = vm.db.find(&t.spell).map(|s| vm.db.get(s).object) else { return };
+fn direct_hit(vm: &mut Vm<'_>, spell_name: &str, pawn: ObjId, target: ObjId) {
+    let Some(class) = vm.db.find(spell_name).map(|s| vm.db.get(s).object) else { return };
     let at = get(vm, target, "Location");
     let args = [Value::Object(Some(class)), Value::Object(Some(pawn)), Value::Empty, at.clone(), Value::Empty];
     let Ok(Value::Object(Some(spell))) = hp3_world::natives::spawn(vm, None, &args) else {
