@@ -25,6 +25,15 @@ mod gamelog;
 mod levelmenu;
 use hp3_script::Value;
 
+/// Tells the Android touch controls whether a menu is open (they step aside for it); nothing on the desktop.
+#[cfg(target_os = "android")]
+fn publish_menu(open: bool) {
+    android::set_in_menu(open);
+}
+
+#[cfg(not(target_os = "android"))]
+fn publish_menu(_open: bool) {}
+
 /// The ini's name for a key.
 fn key_name(sc: Scancode) -> Option<String> {
     let name = sc.name();
@@ -233,6 +242,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         let menu = hp3_world::gui::menu_open(&mut vm);
         if menu != in_menu {
             in_menu = menu;
+            publish_menu(menu);
             sdl.mouse().set_relative_mouse_mode(&window, !menu);
         }
         for event in events.poll_iter() {

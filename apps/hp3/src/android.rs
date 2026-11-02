@@ -5,6 +5,7 @@ use std::ffi::{CStr, CString, c_char, c_int};
 use std::io::{BufRead, BufReader};
 use std::os::fd::FromRawFd;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 unsafe extern "C" {
     fn __android_log_write(priority: c_int, tag: *const c_char, text: *const c_char) -> c_int;
@@ -64,4 +65,17 @@ pub extern "C" fn SDL_main(argc: c_int, argv: *mut *mut c_char) -> c_int {
             1
         }
     }
+}
+
+/// Whether a menu (rather than play) is on screen; the touch controls read it through JNI.
+static IN_MENU: AtomicBool = AtomicBool::new(true);
+
+pub fn set_in_menu(open: bool) {
+    IN_MENU.store(open, Ordering::Relaxed);
+}
+
+/// `GameActivity.nativeInMenu()`: true while a menu takes the touches.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_ut2004_android_GameActivity_nativeInMenu(_env: *mut std::ffi::c_void, _class: *mut std::ffi::c_void) -> u8 {
+    IN_MENU.load(Ordering::Relaxed) as u8
 }
