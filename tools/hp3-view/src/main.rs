@@ -261,7 +261,7 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
     let renderer = Renderer::new_headless()?;
     let dynamic = Dynamic::new(&renderer);
     let mut cache = hp3_engine::MeshCache::default();
-    let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut cache, lighting.as_ref());
+    let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut cache, lighting.as_ref(), None);
     eprintln!("{} static batches, {} live actors drawn", scene.batches.len(), instances.len());
     // HP3_SOAK=<n>: keeps ticking and drawing for n more frames (HP3_HOLD=<key> held), to find per-frame leaks.
     if let Some(n) = std::env::var("HP3_SOAK").ok().and_then(|v| v.parse::<u32>().ok()) {
@@ -279,7 +279,7 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
             let _ = hp3_world::player_view(&mut vm);
             let view_ms = t.elapsed().as_secs_f32() * 1000.0;
             let t = std::time::Instant::now();
-            let _ = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut cache, lighting.as_ref());
+            let _ = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut cache, lighting.as_ref(), None);
             let inst_ms = t.elapsed().as_secs_f32() * 1000.0;
             let t = std::time::Instant::now();
             let _ = hp3_engine::hud_quads(&mut vm, &loader, &mut soak_hud, 1280, 720);

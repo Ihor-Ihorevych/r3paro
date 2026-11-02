@@ -524,7 +524,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         };
         let view = frame.texture.create_view(&Default::default());
         stages.push(("acquire", frame_start.elapsed().as_secs_f32() * 1000.0));
-        let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut mesh_cache, lighting.as_ref());
+        let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut mesh_cache, lighting.as_ref(), Some((camera.position, camera.forward())));
         let refs: Vec<_> = instances.iter().map(|(m, t, l)| (m.as_ref(), *t, *l)).collect();
         stages.push(("instances", frame_start.elapsed().as_secs_f32() * 1000.0));
         let particle_quads = hp3_engine::particle_quads(&mut vm, &loader, &mut particle_cache, &camera);
