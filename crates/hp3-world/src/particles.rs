@@ -90,6 +90,8 @@ struct Config {
     start_range: RangeVec,
     shape: u8,
     sphere_radius: Range,
+    /// `StartLocationPolarRange`: angle around, angle from the top (65536ths of a turn) and radius.
+    polar: RangeVec,
     start_velocity: RangeVec,
     acceleration: Vec3,
     start_size: RangeVec,
@@ -190,6 +192,7 @@ impl Config {
             start_range: RangeVec::of(&get(vm, o, "StartLocationRange")),
             shape: get(vm, o, "StartLocationShape").as_byte(),
             sphere_radius: Range::of(&get(vm, o, "SphereRadiusRange")),
+            polar: RangeVec::of(&get(vm, o, "StartLocationPolarRange")),
             start_velocity: RangeVec::of(&get(vm, o, "StartVelocityRange")),
             acceleration: vec3(vm, o, "Acceleration"),
             start_size: RangeVec::of(&get(vm, o, "StartSizeRange")),
@@ -313,12 +316,26 @@ fn spawn(config: &Config, rng: &mut Rng, origin: Vec3, rot: Mat3, fill_age: f32,
             let r = config.start_offset + config.start_range.pick(rng);
             origin + axes[0] * r.x + axes[1] * r.y + axes[2] * r.z
         }
-        1 => {
-            // Inside a sphere.
-            let d = Vec3::new(rng.next() * 2.0 - 1.0, rng.next() * 2.0 - 1.0, rng.next() * 2.0 - 1.0).normalize_or_zero();
-            config.start_offset + d * config.sphere_radius.pick(rng)
+        shape => {
+            // The shapes add up: a box (0), a sphere (1), polar coordinates (2), all three (3).
+            let all = shape == 3;
+            let mut at = config.start_offset;
+            if all || shape == 0 {
+                at += config.start_range.pick(rng);
+            }
+            if all || shape == 1 {
+                let d = Vec3::new(rng.next() * 2.0 - 1.0, rng.next() * 2.0 - 1.0, rng.next() * 2.0 - 1.0).normalize_or_zero();
+                at += d * config.sphere_radius.pick(rng);
+            }
+            if all || shape == 2 {
+                let p = config.polar.pick(rng);
+                let (around, down) = (p.x * std::f32::consts::PI / 32768.0, p.y * std::f32::consts::PI / 32768.0);
+                // With the first angle near 0 and the second sweeping all the way round, as the hippogriff rings have them, the
+                // points make a circle standing across the actor's forward axis, which a flight goes through.
+                at += Vec3::new(p.z * around.sin() * down.sin(), p.z * around.cos() * down.sin(), p.z * down.cos());
+            }
+            at
         }
-        _ => config.start_offset + config.start_range.pick(rng),
     };
     let relative = config.coordinates == 1;
     let pos = if relative { local } else if config.coordinates == 2 { local } else { origin + rot * local };
