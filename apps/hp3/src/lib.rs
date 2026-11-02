@@ -502,7 +502,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         }
         game_log.update(&mut vm);
         stages.push(("camera", frame_start.elapsed().as_secs_f32() * 1000.0));
-        let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut mesh_cache, lighting.as_ref(), Some((camera.position, camera.forward())));
+        let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut mesh_cache, lighting.as_ref(), Some(hp3_engine::View { eye: camera.position, forward: camera.forward(), fov_degrees: camera.fov_degrees }));
         let refs: Vec<_> = instances.iter().map(|(m, t, l)| (m.as_ref(), *t, *l)).collect();
         stages.push(("instances", frame_start.elapsed().as_secs_f32() * 1000.0));
         let particle_quads = hp3_engine::particle_quads(&mut vm, &loader, &mut particle_cache, &camera);

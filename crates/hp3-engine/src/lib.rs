@@ -403,8 +403,31 @@ pub fn take_instance_times() -> (f32, f32, u64) {
     (INSTANCE_NS[0].swap(0, Relaxed) as f32 / 1e6, INSTANCE_NS[1].swap(0, Relaxed) as f32 / 1e6, INSTANCE_NS[2].swap(0, Relaxed))
 }
 
-/// How far behind the camera (Unreal units) a skeletal mesh must be to be skipped: more than any character is long.
-const BEHIND_CULL: f32 = 400.0;
+/// What the camera sees, to leave out skeletal meshes that are surely out of view.
+pub struct View {
+    pub eye: Vec3,
+    pub forward: Vec3,
+    /// Horizontal field of view in degrees.
+    pub fov_degrees: f32,
+}
+
+/// The largest radius (Unreal units) a character is taken to have around its location.
+const CULL_RADIUS: f32 = 400.0;
+
+impl View {
+    /// True when something with `CULL_RADIUS` around `at` lies outside a cone a little wider than the view.
+    fn rules_out(&self, at: Vec3) -> bool {
+        let d = at - self.eye;
+        let dist = d.length();
+        if dist <= CULL_RADIUS {
+            return false;
+        }
+        let angle = (d.dot(self.forward) / dist).clamp(-1.0, 1.0).acos().to_degrees();
+        // The cone reaches past the corners of the screen (the field of view is not the diagonal) and past the radius.
+        let cone = self.fov_degrees * 0.5 + 25.0 + (CULL_RADIUS / dist).asin().to_degrees();
+        angle > cone
+    }
+}
 
 /// The meshes to draw this frame with their actor-to-world transforms.
 pub fn actor_instances(
@@ -414,7 +437,7 @@ pub fn actor_instances(
     dynamic: &Dynamic,
     cache: &mut MeshCache,
     lighting: Option<&Lighting>,
-    view: Option<(Vec3, Vec3)>,
+    view: Option<View>,
 ) -> Vec<(Rc<GpuMesh>, Mat4, Vec3)> {
     let actors = world(vm).actors.clone();
     let mut out = Vec::new();
@@ -440,10 +463,10 @@ pub fn actor_instances(
         }
         let mesh = if draw_type == DT_MESH { get(vm, a, "Mesh").as_obj() } else { get(vm, a, "StaticMesh").as_obj() };
         let Some(mesh) = mesh else { continue };
-        // A skinned character well behind the camera is not skinned at all (`view` = camera position and forward).
+        // A skinned character that cannot be in view is not skinned at all.
         if draw_type == DT_MESH
-            && let Some((eye, forward)) = view
-            && (vec3(&get(vm, a, "Location")) - eye).dot(forward) < -BEHIND_CULL
+            && let Some(v) = &view
+            && v.rules_out(vec3(&get(vm, a, "Location")))
         {
             continue;
         }
