@@ -28,21 +28,75 @@ Known gaps are in `docs/status.md` and `docs/ROADMAP.md`: no movie playback (Bin
 (some list and slider widgets), and many values still need to be matched to the retail game by playing it.
 Please report what you find.
 
-## Play it on Windows
+## Install and run
 
-1. Install the Rust toolchain (rustup) and CMake. SDL3 is built from source, so CMake must be on the `PATH`
-   (Visual Studio Build Tools ships one).
-2. Build and run, giving the folder of your HP3 install (the one with `System` and `Maps` in it):
+You need **your own copy of the PC game** (Harry Potter and the Prisoner of Azkaban, 2004). The engine reads its
+data files and runs its scripts; nothing is downloaded or shipped with it.
+
+### 1. Get the game's folder ready
+
+Install the PC game (or copy an existing install). The folder you need is the one that has `System` and `Maps`
+next to `Textures`, `Sounds` and `Music`, with `System\Core.u` inside (written `system/core.u` on a phone).
+The engine only reads this folder; it writes its saved games to a `Save` folder inside it, so the folder must be
+writable. The Windows programs of the game (`.exe`, `.dll`) are not used and can be missing.
+
+### 2. Windows
+
+**Easiest: the release zip.**
+
+1. Download `hp3-engine-<version>-windows.zip` from the [Releases](../../releases) page and unpack it anywhere.
+2. Open a terminal (PowerShell or cmd) in that folder and start the game, giving it the path of the game folder:
+
+   ```
+   .\hp3.exe "C:\Games\HP3"
+   ```
+
+   Or drag the game folder onto `hp3.exe`... or make a shortcut whose target is `hp3.exe "C:\Games\HP3"`.
+3. A window opens and the game starts at its own menu: **New Game**, pick a slot, and play. To jump straight to a
+   level, add its name: `.\hp3.exe "C:\Games\HP3" HP3_Adv1Express` (the names are the files in `Maps`, without `.unr`;
+   **F11** in game shows the list). **Shift+Escape** quits.
+
+The first start takes a few seconds while the scripts and the level load; a log scrolls in the terminal.
+
+**Build it yourself** (the same exe, from this source): install [rustup](https://rustup.rs) (stable Rust) and
+CMake (Visual Studio Build Tools ships one; it must be on the `PATH`, SDL3 is built from source), then:
 
 ```sh
+git clone https://github.com/Ihor-Ihorevych/hp3-engine
+cd hp3-engine
 cargo build --release -p hp3
-target/release/hp3.exe "C:/Games/HP3"              # the front end
-target/release/hp3.exe "C:/Games/HP3" HP3_Adv1Express   # a level straight away
+targetelease\hp3.exe "C:\Games\HP3"
 ```
 
-`hp3.exe` opens a window; Shift+Escape quits. `cargo build` without `--release` is too slow to play.
+A build without `--release` is far too slow to play. The first build takes several minutes.
 
-### Controls
+### 3. Android
+
+On Android the engine is part of [Flipendo Droid](https://github.com/Ihor-Ihorevych/flipendo-droid), which brings the touch
+controls and settings. You need Android 10 or newer, 64-bit, and about 1 GB free for the game's data.
+
+1. Install the APK from Flipendo's [Releases](https://github.com/Ihor-Ihorevych/flipendo-droid/releases): the **lite** app has no
+   game data (steps 2 and 3 follow); a **self pack** already carries the games and unpacks them on first start (then skip to 4).
+2. Put the game's folder on the phone: copy your `HP3` folder (the one from step 1 above, or the data zip of the release)
+   to the phone's internal storage, for example as **FlipendoHP3**. Keep the `System`, `Maps`... folders directly inside.
+3. Start Flipendo and allow **All files access** when it asks, then open the app again.
+4. On the start screen pick **Harry Potter 3**. If it does not find the game by itself, tap **Choose folder** and select the
+   folder from step 2. The launcher remembers it.
+5. Play: the left half of the screen is a floating stick, drag the right half to look around, the big button casts, the
+   other buttons jump and use. Settings (the gear, top right) has the control layout, render scale, FPS limit and a debug menu with
+   cheats and a level list.
+
+### If something goes wrong
+
+| What you see | What to do |
+|---|---|
+| `error: ... Core.u` or "no such package" | the folder you gave is not the game's folder: it must hold `System\Core.u` and `Maps` |
+| the window opens and stays black | wait for the level to load (a minute on a slow disk); the terminal prints progress. Update your graphics driver if it never ends |
+| very slow | use the release build (`cargo build --release`); `HP3_FPS=0` lifts the 60 fps cap |
+| no sound | check the system volume and the default audio device; the music is `Music\*.ogg` |
+| a level crashes or a puzzle can't be solved | start it from the terminal, copy the last lines and open an issue with the level name |
+
+## Controls (Windows)
 
 They are the game's own key bindings (read from its ini files): **W A S D** walk, **Space** jumps, the **mouse**
 looks and the **left button** casts, the **right button** jumps too, **Enter** uses things and skips cutscenes,
@@ -55,9 +109,9 @@ looks and the **left button** casts, the **right button** jumps too, **Enter** u
 | F11 | list of levels |
 | G, F, H | debug movement: ghost, fly, walk |
 
-### Options
+## Options
 
-Environment variables (set them before starting):
+Environment variables (set them before starting, e.g. `$env:HP3_FPS = 0` in PowerShell):
 
 | Variable | |
 |---|---|
@@ -68,12 +122,6 @@ Environment variables (set them before starting):
 | `HP3_PROFILE=1` | frame timing |
 
 `docs/` lists the rest. Headless tools for development (`hp3-run`, `hp3-view`, `hp3-pkg`) are below.
-
-## Play it on Android
-
-Use Flipendo Droid: it carries this engine, Flipendo's touch controls and settings, and a launcher that takes
-the HP3 data folder. The Android build of the library is made by Flipendo's `android/build-apk.sh`
-(`cargo build --release --target aarch64-linux-android -p hp3 --lib`, NDK 27).
 
 ## Tools
 
