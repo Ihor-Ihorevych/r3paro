@@ -109,6 +109,19 @@ impl MoverShape {
         MoverShape { actor, tris, to_world: glam::Mat4::IDENTITY, to_local: glam::Mat4::IDENTITY, radius }
     }
 
+    /// The box around the mover's triangles in the world as it is now.
+    pub fn world_bounds(&self) -> (Vec3, Vec3) {
+        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        for t in &self.tris {
+            for v in t.v {
+                let w = self.to_world.transform_point3(v);
+                lo = lo.min(w);
+                hi = hi.max(w);
+            }
+        }
+        (lo, hi)
+    }
+
     pub fn place(&mut self, to_world: glam::Mat4) {
         self.to_world = to_world;
         self.to_local = to_world.inverse();
@@ -409,6 +422,11 @@ impl Collision {
             .filter(|b| b.is_pawn && Some(b.actor) != ignore)
             .filter_map(|b| box_trace(b, start, end, extent))
             .min_by(|a, b| a.time.total_cmp(&b.time))
+    }
+
+    /// Each mover's name id and world box (for the game log).
+    pub fn mover_boxes(&self) -> Vec<(ObjId, Vec3, Vec3)> {
+        self.movers.iter().map(|m| { let (lo, hi) = m.world_bounds(); (m.actor, lo, hi) }).collect()
     }
 
     /// The mover of `actor`, when that actor is one.

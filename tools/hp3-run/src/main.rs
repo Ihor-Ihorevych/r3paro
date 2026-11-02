@@ -211,7 +211,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                 let mut x = v[0];
                 while x <= v[2] {
                     let from = glam::Vec3::new(x, y, v[5]);
-                    let hit = hp3_world::world(&mut vm).collision.trace_as(true, from, glam::Vec3::new(x, y, v[6]), glam::Vec3::new(2.0, 2.0, 2.0), None);
+                    let hit = hp3_world::world(&mut vm).collision.trace_as(true, from, glam::Vec3::new(x, y, v[6]), glam::Vec3::new(2.0, 2.0, 2.0) * if std::env::var_os("HP3_PROBE_PAWN").is_some() { glam::Vec3::new(7.5, 7.5, 19.0) } else { glam::Vec3::ONE }, None);
                     match hit {
                         Some(h) => line += &format!(" {:6.1}{}", h.location.z, if h.actor.is_some() { "m" } else { " " }),
                         None => line += "   --   ",
