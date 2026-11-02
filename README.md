@@ -1,8 +1,8 @@
 # hp3-engine
 
-An open-source engine for *Harry Potter and the Prisoner of Azkaban* (PC, 2004), written in Rust.
-It runs the game's own compiled UnrealScript on a new engine, so the levels, characters, spells, puzzles,
-cutscenes, voices and music are the retail game's, not a remake.
+A clean-room reimplementation of the engine of *Harry Potter and the Prisoner of Azkaban* (PC, 2004) in Rust.
+It is a new, open-source engine that runs the game's own compiled UnrealScript, so the levels, characters, spells,
+puzzles, cutscenes, voices and music are the retail game's, not a remake.
 
 **It ships no game data.** You need your own retail copy of the PC game. hp3-engine is written clean-room
 (`CLEANROOM.md`) and licensed GPLv3. It supports Harry Potter 3 only.
