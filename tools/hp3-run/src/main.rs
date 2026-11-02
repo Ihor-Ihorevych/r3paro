@@ -16,6 +16,23 @@ use hp3_script::ClassDb;
 /// player's pawn.
 fn trigger_tag(vm: &mut hp3_script::Vm<'_>) {
     let Ok(tag) = std::env::var("HP3_TRIGGER") else { return };
+    trigger_named(vm, &tag);
+}
+
+/// HP3_TRIGGERS=<tag>@<tick>,<tag>@<tick>: triggers several tags at their own ticks.
+fn trigger_list(vm: &mut hp3_script::Vm<'_>, frame: u32) {
+    let Ok(spec) = std::env::var("HP3_TRIGGERS") else { return };
+    for item in spec.split(',') {
+        if let Some((tag, tick)) = item.rsplit_once('@')
+            && tick.trim().parse::<u32>() == Ok(frame)
+        {
+            trigger_named(vm, tag.trim());
+        }
+    }
+}
+
+fn trigger_named(vm: &mut hp3_script::Vm<'_>, tag: &str) {
+    let tag = tag.to_string();
     {
         let n = vm.db.names.intern(&tag);
         let pawn = hp3_world::world(vm).player.and_then(|pc| hp3_world::get(vm, pc, "Pawn").as_obj());
@@ -354,6 +371,25 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                         hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "Velocity")),
                         hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "Acceleration"))
                     );
+                    // HP3_WATCH_PROPS=A,B: more properties of the watched actors.
+                    if let Ok(props) = std::env::var("HP3_WATCH_PROPS") {
+                        let mut extra = String::new();
+                        for n in props.split(',') {
+                            // `Name[i]` reads element i of a fixed array.
+                            let (base, idx) = n.split_once('[').map_or((n, 0usize), |(b, i)| (b, i.trim_end_matches(']').parse().unwrap_or(0)));
+                            let v = match hp3_world::slot(&mut vm, a, base) {
+                                Some(sl) => vm.db.objects.values(a).and_then(|v| v.get(sl + idx).cloned()).unwrap_or_default(),
+                                None => hp3_script::Value::Empty,
+                            };
+                            let v = match v {
+                                hp3_script::Value::Name(x) => vm.db.names.get(x).to_string(),
+                                hp3_script::Value::Object(Some(x)) => hp3_script::natives::object_path(&mut vm, x),
+                                other => format!("{other:?}"),
+                            };
+                            extra.push_str(&format!(" {n}={v}"));
+                        }
+                        println!("watchprops {frame} {path}{extra}");
+                    }
                 }
             }
         }
@@ -398,6 +434,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                 println!("channels {frame} speed {:.0}: {}", vel.truncate().length(), line.join(" | "));
             }
         }
+        trigger_list(&mut vm, frame);
         // HP3_SET=<actor name>.<bool property>=<true|false>@<tick>: sets a flag on an actor.
         if let Ok(spec) = std::env::var("HP3_SET")
             && let Some((what, tick)) = spec.split_once('@')

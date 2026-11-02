@@ -1176,8 +1176,9 @@ fn mover_rotation(vm: &mut Vm<'_>, a: ObjId, f: f32, done: bool) -> [i32; 3] {
     let key = get(vm, a, "KeyNum").as_byte() as usize;
     let (base, k) = (rotator_ints(&get(vm, a, "BaseRot")), indexed_rot(vm, a, "KeyRot", key));
     let shortest = get(vm, a, "bUseShortestRotation").as_bool();
+    // At the end the mover is exactly at its key's turn from where it was placed (`BaseRot`).
     if shortest && done {
-        return k;
+        return [0, 1, 2].map(|i| (base[i] & 0xFFFF) + k[i]);
     }
     [0, 1, 2].map(|i| {
         let goal = if shortest { (base[i] & 0xFFFF) + k[i] } else { base[i] + k[i] };

@@ -215,6 +215,23 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
                 }
             }
         }
+        // HP3_TRIGGERS=<tag>@<tick>,...: more tags to trigger, each at its own tick.
+        if let Ok(spec) = std::env::var("HP3_TRIGGERS") {
+            for item in spec.split(',') {
+                if let Some((tag, tick)) = item.rsplit_once('@')
+                    && tick.trim().parse::<u32>() == Ok(frame)
+                {
+                    let n = vm.db.names.intern(tag.trim());
+                    let pawn = hp3_world::world(&mut vm).player.and_then(|pc| hp3_world::get(&mut vm, pc, "Pawn").as_obj());
+                    let actors = hp3_world::world(&mut vm).actors.clone();
+                    for a in actors {
+                        if hp3_world::get(&mut vm, a, "Tag").as_name() == n {
+                            hp3_world::fire(&mut vm, a, "Trigger", &mut [Value::Object(pawn), Value::Object(pawn)]);
+                        }
+                    }
+                }
+            }
+        }
         hp3_world::tick(&mut vm, 1.0 / 60.0);
     }
     // HP3_SHOW_HUD=1 fades every HUD item in (they rest hidden until the game shows them).
