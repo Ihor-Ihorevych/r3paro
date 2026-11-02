@@ -210,6 +210,10 @@ pub fn exec(vm: &mut Vm<'_>, pc: ObjId, cmd: &str) {
     let mut words = cmd.split_whitespace();
     let Some(name) = words.next() else { return };
     let args: Vec<Value> = words.map(|w| Value::Str(w.to_string())).collect();
+    // Enter skips every cutscene, including the ones the level marks as not to be skipped.
+    if name.eq_ignore_ascii_case("BypassCutscene") {
+        allow_bypass(vm);
+    }
     let targets = [Some(pc), get(vm, pc, "Pawn").as_obj(), get(vm, pc, "myHUD").as_obj()];
     for t in targets.into_iter().flatten() {
         let Some(n) = vm.db.names.find(name) else { break };
@@ -228,4 +232,15 @@ pub fn exec(vm: &mut Vm<'_>, pc: ObjId, cmd: &str) {
         }
     }
     vm.log.push(format!("exec: {cmd}: no such function on the controller, its pawn or the HUD"));
+}
+
+/// Clears `bNoBypass` on every cutscene so the bypass is not refused.
+fn allow_bypass(vm: &mut Vm<'_>) {
+    let Some(class) = vm.db.find("KWCutScene") else { return };
+    let actors = crate::world(vm).actors.clone();
+    for a in actors {
+        if vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, class)) && get(vm, a, "bNoBypass").as_bool() {
+            crate::set(vm, a, "bNoBypass", Value::Bool(false));
+        }
+    }
 }
