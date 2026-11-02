@@ -729,6 +729,9 @@ fn try_mount(vm: &mut Vm<'_>, a: ObjId, up: Vec3, hit: &Hit) -> bool {
     let loc = vec(&get(vm, a, "Location"));
     let wall = hit.actor.or(world(vm).level_info);
     let taken = fire(vm, a, "Mount", &mut [value(destination - loc), Value::Object(wall)]).as_bool();
+    if taken && is_player_pawn(vm, a) {
+        MOUNT_GOAL.with(|g| g.set(Some((a.0, destination, false))));
+    }
     if is_player_pawn(vm, a) {
         let name = wall.map(|w| hp3_script::natives::object_path(vm, w)).unwrap_or_default();
         let mountable = wall.map(|w| get(vm, w, "bIsMountable").as_bool()).unwrap_or(false);
@@ -737,6 +740,48 @@ fn try_mount(vm: &mut Vm<'_>, a: ObjId, up: Vec3, hit: &Hit) -> bool {
         mount_note(vm, format!("mount: ledge {:.0} up on {name} (bIsMountable {mountable}) from {loc} -> script {} [{how}]", destination.z - loc.z, if taken { "took it" } else { "refused" }));
     }
     taken
+}
+
+thread_local! {
+    /// The player's climb in progress: the pawn, where the ledge search said it would end up, and whether the script's
+    /// climb states have been seen yet.
+    static MOUNT_GOAL: std::cell::Cell<Option<(u32, Vec3, bool)>> = const { std::cell::Cell::new(None) };
+}
+
+/// When the player's climb ends away from the ledge top the search found (the climb animation's own motion can stop
+/// short against the wall and leave the pawn overlapping the block it climbs), the pawn is put on the ledge top.
+fn finish_mount(vm: &mut Vm<'_>, a: ObjId) {
+    let Some((who, goal, seen)) = MOUNT_GOAL.with(|g| g.get()) else { return };
+    if who != a.0 {
+        return;
+    }
+    let climbing = vm.state_of(a).is_some_and(|s| vm.db.names.get(vm.db.get(s).name).to_ascii_lowercase().contains("mount"));
+    if climbing {
+        MOUNT_GOAL.with(|g| g.set(Some((who, goal, true))));
+        return;
+    }
+    if !seen {
+        return;
+    }
+    MOUNT_GOAL.with(|g| g.set(None));
+    let loc = vec(&get(vm, a, "Location"));
+    let off = goal - loc;
+    if off.truncate().length() < 10.0 && off.z.abs() < 12.0 {
+        return;
+    }
+    if off.length() > 160.0 {
+        return;
+    }
+    // The ledge top has to be free for the pawn's box.
+    let ext = extent(vm, a) - Vec3::splat(0.5);
+    let free = world(vm).collision.trace_as(true, goal + Vec3::Z * 0.1, goal, ext, Some(a)).is_none();
+    if free {
+        set(vm, a, "Location", value(goal));
+        set(vm, a, "Velocity", value(Vec3::ZERO));
+        vm.log.push(format!("mount: the climb ended at {loc}; the pawn is put on the ledge top at {goal}"));
+    } else {
+        vm.log.push(format!("mount: the climb ended at {loc}, away from the ledge top {goal}, which is not free"));
+    }
 }
 
 /// Writes a line about a mount attempt to the log once (the same line again and again is dropped).
@@ -1289,6 +1334,9 @@ pub fn step_actor(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         let down = world(vm).collision.trace_as(false, at, at - Vec3::Z * 30.0, ext, Some(a));
         let thin = world(vm).collision.trace_as(false, at, at - Vec3::Z * 30.0, Vec3::new(1.0, 1.0, ext.z), Some(a));
         eprintln!("step: {} phys {} at {} ext {ext} vel {} down {:?} thin {:?}", hp3_script::natives::object_path(vm, a), crate::read(vm, a, s.physics).as_byte(), at, vec(&get(vm, a, "Velocity")), down.map(|h| (h.time, h.normal)), thin.map(|h| (h.time, h.normal)));
+    }
+    if MOUNT_GOAL.with(|g| g.get().is_some()) {
+        finish_mount(vm, a);
     }
     match crate::read(vm, a, s.physics).as_byte() {
         PHYS_MOVING_BRUSH => {
