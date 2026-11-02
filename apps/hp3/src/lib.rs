@@ -177,6 +177,20 @@ impl PerfStats {
 /// True while the player rides the hippogriff: the stick then steers (turns and banks) instead of walking and strafing.
 static FLYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// True while the player controls a creature (the rabbit, the dragon): on the phone the jump button then also ends it,
+/// as the Enter key does on the desktop.
+static CREATURE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn player_is_creature(vm: &mut Vm<'_>) -> bool {
+    let Some(pc) = hp3_world::world(vm).player else { return false };
+    hp3_world::get(vm, pc, "Pawn").as_obj().is_some_and(|p| !hp3_world::get(vm, p, "bIsMainPlayer").as_bool())
+}
+
+/// Whether the key is the one the phone's jump button sends.
+fn is_jump_key(name: &str) -> bool {
+    name == "Space" || name == "RightMouse"
+}
+
 fn player_flying(vm: &mut Vm<'_>) -> bool {
     let Some(pc) = hp3_world::world(vm).player else { return false };
     vm.state_of(pc).is_some_and(|st| vm.db.names.get(vm.db.get(st).name).starts_with("PlayerFlapping"))
@@ -416,6 +430,9 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                             eprintln!("key down {sc:?} -> {k}");
                         }
                         hp3_world::world(&mut vm).input.key_down(&k);
+                        if cfg!(target_os = "android") && is_jump_key(&k) && CREATURE.load(std::sync::atomic::Ordering::Relaxed) {
+                            hp3_world::world(&mut vm).input.key_down("Enter");
+                        }
                     }
                 }
                 Event::KeyUp { scancode: Some(sc), .. } => {
@@ -438,16 +455,25 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                             eprintln!("key up {sc:?} -> {k}");
                         }
                         hp3_world::world(&mut vm).input.key_up(&k);
+                        if cfg!(target_os = "android") && is_jump_key(&k) {
+                            hp3_world::world(&mut vm).input.key_up("Enter");
+                        }
                     }
                 }
                 Event::MouseButtonDown { mouse_btn, .. } if !free_camera => {
                     if let Some(k) = mouse_name(mouse_btn) {
                         hp3_world::world(&mut vm).input.key_down(k);
+                        if cfg!(target_os = "android") && is_jump_key(k) && CREATURE.load(std::sync::atomic::Ordering::Relaxed) {
+                            hp3_world::world(&mut vm).input.key_down("Enter");
+                        }
                     }
                 }
                 Event::MouseButtonUp { mouse_btn, .. } => {
                     if let Some(k) = mouse_name(mouse_btn) {
                         hp3_world::world(&mut vm).input.key_up(k);
+                        if cfg!(target_os = "android") && is_jump_key(k) {
+                            hp3_world::world(&mut vm).input.key_up("Enter");
+                        }
                     }
                 }
                 Event::Window { win_event: WindowEvent::PixelSizeChanged(w, h), .. } => {
@@ -472,6 +498,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         if hp3_world::world(&mut vm).frame % 6 == 0 {
             platform::set_cutscene(player_in_cutscene(&mut vm));
             FLYING.store(player_flying(&mut vm), std::sync::atomic::Ordering::Relaxed);
+            CREATURE.store(player_is_creature(&mut vm), std::sync::atomic::Ordering::Relaxed);
         }
         // The window's surface is gone (the app is in the background): nothing is drawn until it is back.
         if !platform::surface_alive() {

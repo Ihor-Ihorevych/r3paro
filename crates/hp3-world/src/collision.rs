@@ -43,6 +43,8 @@ pub struct ActorBox {
     pub blocks_actors: bool,
     pub blocks_players: bool,
     pub is_pawn: bool,
+    /// The actor's `Owner`: an owner and what it owns do not stop each other (a thrown pebble passes its thrower).
+    pub owner: Option<ObjId>,
 }
 
 #[derive(Default)]
@@ -51,6 +53,8 @@ pub struct Collision {
     tris: Vec<Tri>,
     grid: HashMap<(i32, i32), Vec<u32>>,
     pub actors: Vec<ActorBox>,
+    /// The `Owner` of the actor being moved.
+    pub mover_owner: Option<ObjId>,
     /// Whether the trace being made is for the player's pawn (which `bBlockPlayers` blocks) or for any other
     /// actor (which `bBlockActors` blocks).
     player_mover: bool,
@@ -415,7 +419,7 @@ impl Collision {
             }
         }
         for b in self.actors.iter().filter(|_| actors && !self.passes_actors) {
-            if Some(b.actor) == ignore || !(if self.player_mover { b.blocks_players } else { b.blocks_actors }) {
+            if Some(b.actor) == ignore || (b.owner.is_some() && b.owner == ignore) || (self.mover_owner.is_some() && self.mover_owner == Some(b.actor)) || !(if self.player_mover { b.blocks_players } else { b.blocks_actors }) {
                 continue;
             }
             if let Some(h) = box_trace(b, start, end, extent) {

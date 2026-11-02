@@ -62,7 +62,7 @@ fn refresh_actor_boxes(vm: &mut Vm<'_>) {
         if r <= 0.0 || h <= 0.0 {
             continue;
         }
-        boxes.push(ActorBox { actor: a, center: crate::read_vec(vm, a, s.location), extent: Vec3::new(r, r, h), blocks_actors, blocks_players, is_pawn: is_pawn(vm, a) });
+        boxes.push(ActorBox { actor: a, center: crate::read_vec(vm, a, s.location), extent: Vec3::new(r, r, h), blocks_actors, blocks_players, is_pawn: is_pawn(vm, a), owner: crate::read(vm, a, s.owner).as_obj() });
     }
     world(vm).actors = actors;
     world(vm).collision.actors = boxes;
@@ -80,6 +80,7 @@ pub struct Slots {
     location: Option<usize>,
     physics: Option<usize>,
     is_static: Option<usize>,
+    owner: Option<usize>,
 }
 
 impl Slots {
@@ -94,6 +95,7 @@ impl Slots {
             location: crate::actor_slot(vm, "Location"),
             physics: crate::actor_slot(vm, "Physics"),
             is_static: crate::actor_slot(vm, "bStatic"),
+            owner: crate::actor_slot(vm, "Owner"),
         }
     }
 }
@@ -104,6 +106,7 @@ pub fn move_actor(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<Hit> {
         return None;
     }
     let loc = vec(&get(vm, a, "Location"));
+    world(vm).collision.mover_owner = get(vm, a, "Owner").as_obj();
     // A ghost (the debug mode) has no collision at all.
     if is_player_pawn(vm, a) && !get(vm, a, "bCollideWorld").as_bool() && !get(vm, a, "bCollideActors").as_bool() {
         set(vm, a, "Location", value(loc + delta));
