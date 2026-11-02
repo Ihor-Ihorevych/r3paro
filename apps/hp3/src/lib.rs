@@ -256,7 +256,13 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
     if audio.is_none() {
         eprintln!("audio: off");
     }
-    let mut window = video.window(&format!("hp3 - {map}"), 1280, 720).resizable().position_centered().build()?;
+    let mut builder = video.window(&format!("hp3 - {map}"), 1280, 720);
+    builder.resizable().position_centered();
+    // On the phone the game fills the whole screen at the display's own size and shape, not a 16:9 window.
+    if cfg!(target_os = "android") {
+        builder.fullscreen().high_pixel_density();
+    }
+    let mut window = builder.build()?;
 
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
     // SAFETY: the window outlives the surface; both live until the end of this function.
@@ -277,6 +283,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
     let mut hud_cache = hp3_engine::HudCache::default();
 
     let (mut width, mut height) = window.size_in_pixels();
+    eprintln!("window: {width}x{height} pixels, {:?} points", window.size());
     // Frames are drawn off-screen and shown by a thread of their own, so waiting for the display does not hold up the game.
     let mut presenter = present::Presenter::new(surface, &caps, renderer.device.clone(), renderer.queue.clone(), format, width, height)
         .ok_or("the display surface cannot be copied into")?;
