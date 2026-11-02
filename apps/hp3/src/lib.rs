@@ -65,12 +65,12 @@ fn key_name(sc: Scancode) -> Option<String> {
         Scancode::LShift | Scancode::RShift => "Shift".into(),
         Scancode::LCtrl | Scancode::RCtrl => "Ctrl".into(),
         Scancode::LAlt | Scancode::RAlt => "Alt".into(),
+        Scancode::Up if cfg!(target_os = "android") => "W".into(),
+        Scancode::Down if cfg!(target_os = "android") => "S".into(),
         Scancode::Up => "Up".into(),
         Scancode::Down => "Down".into(),
         // On the phone the movement stick sends the arrow keys: they act as W, A, S and D, so forward and sideways go
         // together (the arrow keys' own forward is a separate axis that does not mix with strafing).
-        Scancode::Up if cfg!(target_os = "android") => "W".into(),
-        Scancode::Down if cfg!(target_os = "android") => "S".into(),
         Scancode::Left if cfg!(target_os = "android") => "A".into(),
         Scancode::Right if cfg!(target_os = "android") => "D".into(),
         Scancode::Left => "Left".into(),
@@ -385,11 +385,17 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                 Event::KeyDown { scancode: Some(Scancode::F1), repeat: false, .. } => free_camera = !free_camera,
                 Event::KeyDown { scancode: Some(sc), repeat: false, .. } if !free_camera => {
                     if let Some(k) = key_name(sc) {
+                        if cfg!(target_os = "android") && std::path::Path::new("/sdcard/FlipendoHP3/keys.flag").exists() {
+                            eprintln!("key down {sc:?} -> {k}");
+                        }
                         hp3_world::world(&mut vm).input.key_down(&k);
                     }
                 }
                 Event::KeyUp { scancode: Some(sc), .. } => {
                     if let Some(k) = key_name(sc) {
+                        if cfg!(target_os = "android") && std::path::Path::new("/sdcard/FlipendoHP3/keys.flag").exists() {
+                            eprintln!("key up {sc:?} -> {k}");
+                        }
                         hp3_world::world(&mut vm).input.key_up(&k);
                     }
                 }
