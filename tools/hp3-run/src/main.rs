@@ -375,6 +375,11 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                     if let Ok(props) = std::env::var("HP3_WATCH_PROPS") {
                         let mut extra = String::new();
                         for n in props.split(',') {
+                            if n == "bounds" {
+                                let b = hp3_world::world(&mut vm).collision.mover(a).map(|m| m.world_bounds());
+                                extra.push_str(&format!(" bounds={b:?}"));
+                                continue;
+                            }
                             // `Name[i]` reads element i of a fixed array.
                             let (base, idx) = n.split_once('[').map_or((n, 0usize), |(b, i)| (b, i.trim_end_matches(']').parse().unwrap_or(0)));
                             let v = match hp3_world::slot(&mut vm, a, base) {

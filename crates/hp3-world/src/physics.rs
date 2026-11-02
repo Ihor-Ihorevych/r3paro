@@ -1107,7 +1107,14 @@ fn rotate(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     let (r, c) = (rate.fields(), rot.fields());
     if r.len() == 3 && c.len() == 3 {
         let v: Vec<Value> = (0..3).map(|i| Value::Int(c[i].as_int().wrapping_add((r[i].as_int() as f32 * dt) as i32) & 0xFFFF)).collect();
+        let (old_rot, new_rot) = (rotator_ints(&rot), rotator_ints(&Value::Struct(v.clone().into())));
         set(vm, a, "Rotation", Value::Struct(v.into()));
+        // A spinning platform (a mover) takes its collision and what stands on it round with it.
+        if world(vm).collision.mover(a).is_some() {
+            place_mover_shape(vm, a);
+            let at = vec(&get(vm, a, "Location"));
+            carry_riders(vm, a, at, Vec3::ZERO, old_rot, new_rot);
+        }
     }
 }
 
