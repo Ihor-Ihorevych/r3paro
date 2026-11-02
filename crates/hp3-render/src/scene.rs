@@ -284,7 +284,8 @@ fn add_terrain(b: &mut Batcher<'_, '_>, map: &Rc<Package>, inputs: &MapInputs) {
             .flatten()
             .unwrap_or_default();
         let quad_visible = |x: usize, y: usize| {
-            let q = y * (w - 1) + x;
+            // One bit per heightmap cell (a 64x64 map has a 4096-bit bitmap), so a row is the full width, not width - 1.
+            let q = y * w + x;
             visible.is_empty() || visible.get(q / 32).is_some_and(|b| b & (1 << (q % 32)) != 0)
         };
         // Vertex normals from the faces around each vertex; lighting per vertex.
