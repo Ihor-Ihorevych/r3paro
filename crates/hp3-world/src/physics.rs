@@ -748,6 +748,30 @@ thread_local! {
     static MOUNT_GOAL: std::cell::Cell<Option<(u32, Vec3, bool)>> = const { std::cell::Cell::new(None) };
 }
 
+thread_local! {
+    /// A pawn easing onto the top of the ledge it climbed: the pawn, the spot and the seconds left.
+    static MOUNT_GLIDE: std::cell::Cell<Option<(u32, Vec3, f32)>> = const { std::cell::Cell::new(None) };
+}
+
+/// One step of that glide: the pawn moves a share of the way to the spot (and stands still otherwise). True while it
+/// goes on.
+fn glide_to_ledge(vm: &mut Vm<'_>, a: ObjId, dt: f32) -> bool {
+    let Some((who, goal, left)) = MOUNT_GLIDE.with(|g| g.get()) else { return false };
+    if who != a.0 {
+        return false;
+    }
+    let loc = vec(&get(vm, a, "Location"));
+    let share = (dt * 14.0).min(1.0);
+    let next = loc + (goal - loc) * share;
+    let done = (goal - next).length() < 0.5 || left - dt <= 0.0;
+    set(vm, a, "Location", value(if done { goal } else { next }));
+    set(vm, a, "Velocity", value(Vec3::ZERO));
+    set(vm, a, "Acceleration", value(Vec3::ZERO));
+    MOUNT_GLIDE.with(|g| g.set(if done { None } else { Some((who, goal, left - dt)) }));
+    crate::touch::settle(vm, a);
+    !done
+}
+
 /// When the player's climb ends away from the ledge top the search found (the climb animation's own motion can stop
 /// short against the wall and leave the pawn overlapping the block it climbs), the pawn is put on the ledge top.
 fn finish_mount(vm: &mut Vm<'_>, a: ObjId) {
@@ -776,9 +800,9 @@ fn finish_mount(vm: &mut Vm<'_>, a: ObjId) {
     let ext = extent(vm, a) - Vec3::splat(0.5);
     let free = world(vm).collision.trace_as(true, goal + Vec3::Z * 0.1, goal, ext, Some(a)).is_none();
     if free {
-        set(vm, a, "Location", value(goal));
-        set(vm, a, "Velocity", value(Vec3::ZERO));
-        vm.log.push(format!("mount: the climb ended at {loc}; the pawn is put on the ledge top at {goal}"));
+        // He glides there over a third of a second (see `glide_to_ledge`) instead of jumping.
+        MOUNT_GLIDE.with(|g| g.set(Some((a.0, goal, 0.35))));
+        vm.log.push(format!("mount: the climb ended at {loc}; the pawn glides onto the ledge top at {goal}"));
     } else {
         vm.log.push(format!("mount: the climb ended at {loc}, away from the ledge top {goal}, which is not free"));
     }
@@ -1337,6 +1361,9 @@ pub fn step_actor(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     }
     if MOUNT_GOAL.with(|g| g.get().is_some()) {
         finish_mount(vm, a);
+    }
+    if MOUNT_GLIDE.with(|g| g.get().is_some()) && glide_to_ledge(vm, a, dt) {
+        return;
     }
     match crate::read(vm, a, s.physics).as_byte() {
         PHYS_MOVING_BRUSH => {
