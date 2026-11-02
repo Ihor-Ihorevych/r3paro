@@ -435,6 +435,7 @@ pub fn register(vm: &mut Vm<'_>) {
                     set(vm, o, p, Value::Bool(a[i].as_bool()));
                 }
             }
+            crate::refresh_baked_collision(vm, o);
             crate::touch::settle(vm, o);
         }
         Ok(Value::Empty)

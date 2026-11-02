@@ -737,11 +737,17 @@ fn start_book_fights(vm: &mut Vm<'_>) {
 fn sync_baked_collision(vm: &mut Vm<'_>) {
     let owners = world(vm).collision.baked_owners();
     for a in owners {
-        let active = !vm.db.objects.get(a).deleted
-            && get(vm, a, "bCollideActors").as_bool()
-            && (get(vm, a, "bBlockActors").as_bool() || get(vm, a, "bBlockPlayers").as_bool());
-        world(vm).collision.set_active(a, active);
+        refresh_baked_collision(vm, a);
     }
+}
+
+/// Makes an actor's baked collision follow its current flags: at once when a script changes them, and in the periodic pass
+/// for changes made some other way.
+pub fn refresh_baked_collision(vm: &mut Vm<'_>, a: ObjId) {
+    let active = !vm.db.objects.get(a).deleted
+        && get(vm, a, "bCollideActors").as_bool()
+        && (get(vm, a, "bBlockActors").as_bool() || get(vm, a, "bBlockPlayers").as_bool());
+    world(vm).collision.set_active(a, active);
 }
 
 pub fn tick(vm: &mut Vm<'_>, dt: f32) {
@@ -1014,6 +1020,7 @@ pub fn destroy_actor(vm: &mut Vm<'_>, o: ObjId) -> bool {
     fire(vm, o, "Destroyed", &mut []);
     touch::forget(vm, o);
     vm.db.objects.get_mut(o).deleted = true;
+    world(vm).collision.set_active(o, false);
     let w = world(vm);
     w.actors.retain(|&x| x != o);
     w.timers.remove(&o);

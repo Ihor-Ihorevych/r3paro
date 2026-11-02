@@ -625,39 +625,56 @@ fn segment_distance(p: Vec3, a: Vec3, b: Vec3) -> f32 {
     (p - (a + ab * t)).length()
 }
 
-/// Swept box against a box (slab test on the boxes' Minkowski sum).
+/// Swept cylinder against an actor's cylinder: an actor collides as an upright cylinder (radius, half height), so the
+/// moving thing's circle is added to the actor's in the plane and its half height to the actor's in height.
 fn box_trace(b: &ActorBox, start: Vec3, end: Vec3, extent: Vec3) -> Option<Hit> {
-    let half = b.extent + extent;
-    let lo = b.center - half;
-    let hi = b.center + half;
+    let radius = b.extent.x.max(b.extent.y) + extent.x.max(extent.y);
+    let half_height = b.extent.z + extent.z;
     let dir = end - start;
     let mut t_enter = 0.0f32;
     let mut t_exit = 1.0f32;
     let mut normal = Vec3::ZERO;
-    for axis in 0..3 {
-        let (s, d) = (start[axis], dir[axis]);
-        if d.abs() < 1e-6 {
-            if s <= lo[axis] || s >= hi[axis] {
-                return None;
-            }
-            continue;
+    // Height: the same slab test as a box's.
+    let (s, d) = (start.z - b.center.z, dir.z);
+    if d.abs() < 1e-6 {
+        if s <= -half_height || s >= half_height {
+            return None;
         }
-        let (mut t0, mut t1) = ((lo[axis] - s) / d, (hi[axis] - s) / d);
-        let mut n = Vec3::ZERO;
-        n[axis] = -d.signum();
+    } else {
+        let (mut t0, mut t1) = ((-half_height - s) / d, (half_height - s) / d);
         if t0 > t1 {
             std::mem::swap(&mut t0, &mut t1);
         }
         if t0 > t_enter {
             t_enter = t0;
-            normal = n;
+            normal = Vec3::new(0.0, 0.0, -d.signum());
         }
         t_exit = t_exit.min(t1);
-        if t_enter > t_exit {
+    }
+    // Plane: the segment against the circle.
+    let p = Vec3::new(start.x - b.center.x, start.y - b.center.y, 0.0);
+    let v = Vec3::new(dir.x, dir.y, 0.0);
+    let a = v.dot(v);
+    let c = p.dot(p) - radius * radius;
+    if a < 1e-9 {
+        if c >= 0.0 {
             return None;
         }
+    } else {
+        let half_b = p.dot(v);
+        let disc = half_b * half_b - a * c;
+        if disc <= 0.0 {
+            return None;
+        }
+        let root = disc.sqrt();
+        let (t0, t1) = ((-half_b - root) / a, (-half_b + root) / a);
+        if t0 > t_enter {
+            t_enter = t0;
+            normal = (p + v * t0).normalize_or_zero();
+        }
+        t_exit = t_exit.min(t1);
     }
-    if normal == Vec3::ZERO || t_enter > 1.0 {
+    if t_enter > t_exit || normal == Vec3::ZERO || t_enter > 1.0 {
         return None;
     }
     let time = (t_enter - EPSILON / dir.length().max(EPSILON)).max(0.0);

@@ -312,8 +312,9 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                     let at = hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "Location"));
                     let rot: Vec<i32> = hp3_world::get(&mut vm, a, "Rotation").fields().iter().map(hp3_script::Value::as_int).collect();
                     println!(
-                        "watch {frame} {path} label {:?} at {at} rot {rot:?} state {state} phys {:?} hidden {:?} draw {:?} mesh {:?} vel {:?} accel {:?}",
+                        "watch {frame} {path} label {:?} coll {} at {at} rot {rot:?} state {state} phys {:?} hidden {:?} draw {:?} mesh {:?} vel {:?} accel {:?}",
                         { let t = hp3_world::get(&mut vm, a, "Tag").as_name(); format!("{:?} tag {}", hp3_world::get(&mut vm, a, "Label"), vm.db.names.get(t)) },
+                        format!("r{} h{} scale{}", hp3_world::get(&mut vm, a, "CollisionRadius").as_float(), hp3_world::get(&mut vm, a, "CollisionHeight").as_float(), hp3_world::get(&mut vm, a, "DrawScale").as_float()),
                         hp3_world::get(&mut vm, a, "Physics"),
                         hp3_world::get(&mut vm, a, "bHidden"),
                         hp3_world::get(&mut vm, a, "DrawType"),
@@ -358,7 +359,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                     .filter(|(_, c)| c.sequence.is_some() && c.alpha > 0.001 || *(&c.playing) && c.alpha > 0.001)
                     .map(|(i, c)| {
                         let n = c.sequence.and_then(|s| set.as_ref().map(|set| set.sequences[s].name.clone())).unwrap_or_default();
-                        format!("ch{i} {n} a{:.2} f{:.1} r{:.2} bone {:?}", c.alpha, c.frame, c.rate, c.bone)
+                        format!("ch{i} {n} a{:.2} f{:.1}/{} r{:.2} bone {:?}", c.alpha, c.frame, c.sequence.and_then(|s| set.as_ref().map(|set| set.sequences[s].frames)).unwrap_or(0), c.rate, c.bone)
                     })
                     .collect();
                 let vel = hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "Velocity"));

@@ -9,6 +9,9 @@ use crate::{fire, get, physics::vec, world};
 
 /// How often (in ticks) each controller looks.
 const LOOK_EVERY: u64 = 5;
+/// The probe bit of the `SeePlayer` event in a state's mask (the engine's fixed event numbering: bit = name index - 300).
+const SEE_PLAYER_PROBE: u32 = 40;
+
 /// Head height above a pawn's location that sight is measured from.
 const EYE_HEIGHT: f32 = 30.0;
 
@@ -27,7 +30,9 @@ pub fn tick(vm: &mut Vm<'_>) {
     }
     let Some(controller_class) = vm.db.find("Controller") else { return };
     let Some(see) = vm.db.names.find("SeePlayer") else { return };
-    let target = vec(&get(vm, player_pawn, "Location")) + glam::Vec3::Z * EYE_HEIGHT;
+    // The player's body is looked at in two places, its middle and its head: either one in the clear is enough.
+    let (feet, height) = (vec(&get(vm, player_pawn, "Location")), get(vm, player_pawn, "CollisionHeight").as_float());
+    let targets = [feet, feet + glam::Vec3::Z * height * 0.8];
     let actors = world(vm).actors.clone();
     for c in actors {
         if vm.db.objects.get(c).deleted || Some(c) == world(vm).player {
@@ -38,11 +43,19 @@ pub fn tick(vm: &mut Vm<'_>) {
             continue;
         }
         let Some(pawn) = get(vm, c, "Pawn").as_obj() else { continue };
-        if debug {
-            let eye = vec(&get(vm, pawn, "Location"));
-            eprintln!("see: {} radius {} periph {} dist {} sees {}", hp3_script::natives::object_path(vm, c), get(vm, pawn, "SightRadius").as_float(), get(vm, pawn, "PeripheralVision").as_float(), (eye - target).length(), sees(vm, pawn, target));
+        // The event reaches the controller only if its state probes it: the state's own and the class's probes, minus
+        // what the state ignores (a crab in the middle of a flip is not told).
+        if let Some(state) = vm.state_of(c) {
+            let (probes, not_ignored) = (vm.db.get(state).state_info.0, vm.db.get(state).state_info.1);
+            let mask = (probes | vm.db.get(class).state_info.0) & not_ignored;
+            if std::env::var_os("HP3_SEE_DEBUG").is_some() {
+                eprintln!("see: state {} mask {:#x}", vm.db.names.get(vm.db.get(state).name), mask);
+            }
+            if mask & (1u64 << SEE_PLAYER_PROBE) == 0 {
+                continue;
+            }
         }
-        if pawn == player_pawn || sees(vm, pawn, target) {
+        if pawn == player_pawn || targets.iter().any(|t| sees(vm, pawn, *t)) {
             if pawn != player_pawn {
                 fire(vm, c, "SeePlayer", &mut [Value::Object(Some(player_pawn))]);
             }
@@ -52,7 +65,7 @@ pub fn tick(vm: &mut Vm<'_>) {
 
 /// True when `pawn` has `target` within its sight radius and field of view, with nothing of the level in between.
 fn sees(vm: &mut Vm<'_>, pawn: ObjId, target: glam::Vec3) -> bool {
-    let eye = vec(&get(vm, pawn, "Location")) + glam::Vec3::Z * EYE_HEIGHT;
+    let eye = vec(&get(vm, pawn, "Location")) + glam::Vec3::Z * (get(vm, pawn, "CollisionHeight").as_float() * 0.8).clamp(4.0, EYE_HEIGHT);
     let to = target - eye;
     let dist = to.length();
     let radius = get(vm, pawn, "SightRadius").as_float();
