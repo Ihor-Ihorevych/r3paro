@@ -238,6 +238,37 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             }
         }
     }
+    // HP3_BONES=<actor name>: every bone of that actor's mesh, as a height against its location.
+    if let Ok(name) = std::env::var("HP3_BONES") {
+        let actors = hp3_world::world(&mut vm).actors.clone();
+        for a in actors {
+            if !hp3_script::natives::object_path(&vm, a).ends_with(&format!(".{name}")) {
+                continue;
+            }
+            let at = hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "Location"));
+            let Some(mesh) = hp3_world::get(&mut vm, a, "Mesh").as_obj() else { continue };
+            let Some(skel) = hp3_world::anim::skeleton_of(&mut vm, mesh) else { continue };
+            for n in skel.skeleton.names.clone() {
+                if let Some(m) = hp3_world::anim::bone_matrix(&mut vm, a, &n) {
+                    let p = m.w_axis.truncate() - at;
+                    println!("bone {n}: ({:.1},{:.1},{:.1})", p.x, p.y, p.z);
+                }
+            }
+            println!("mesh offset {:?}", hp3_world::mesh_offset(&mut vm, a));
+        }
+    }
+    // HP3_PROBE_Z=x,y,z_top,z_bottom: drops a line from the top to the bottom there, printing each surface it meets.
+    if let Ok(spec) = std::env::var("HP3_PROBE_Z") {
+        let v: Vec<f32> = spec.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        if v.len() == 4 {
+            let mut top = v[2];
+            for _ in 0..12 {
+                let Some(h) = hp3_world::world(&mut vm).collision.trace_static(glam::Vec3::new(v[0], v[1], top), glam::Vec3::new(v[0], v[1], v[3]), glam::Vec3::ZERO) else { break };
+                println!("surface z {:.1} actor {:?}", h.location.z, h.actor.map(|o| hp3_script::natives::object_path(&vm, o)));
+                top = h.location.z - 0.5;
+            }
+        }
+    }
     // HP3_PROBE_X=y,z0,z1,step,x0,x1: traces a pawn-sized box along +x at each height, printing where it stops.
     if let Ok(spec) = std::env::var("HP3_PROBE_X") {
         let v: Vec<f32> = spec.split(',').filter_map(|p| p.trim().parse().ok()).collect();

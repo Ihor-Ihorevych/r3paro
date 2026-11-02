@@ -88,6 +88,7 @@ pub struct Animation {
     sets: HashMap<ObjId, Option<Rc<AnimSet>>>,
     skeletons: HashMap<ObjId, Option<Rc<MeshSkeleton>>>,
     bone_maps: HashMap<(ObjId, usize), Rc<Vec<Option<usize>>>>,
+    rest_bottoms: HashMap<ObjId, f32>,
     /// Actors attached to another actor's bone (lower-case bone name).
     pub attachments: HashMap<ObjId, (ObjId, String)>,
     /// `FinishAnim` waits: (who waits, whose channel, which channel).
@@ -169,6 +170,21 @@ pub fn skeleton_of(vm: &mut Vm<'_>, mesh: ObjId) -> Option<Rc<MeshSkeleton>> {
 fn rotator_of(v: &Value) -> [i32; 3] {
     let r: Vec<i32> = v.fields().iter().map(Value::as_int).collect();
     [r.first().copied().unwrap_or(0), r.get(1).copied().unwrap_or(0), r.get(2).copied().unwrap_or(0)]
+}
+
+/// The height of the lowest bone of a mesh's rest pose, in the mesh's own space (about 0 when the mesh's origin is at its feet).
+pub fn rest_bottom(vm: &mut Vm<'_>, mesh: ObjId) -> f32 {
+    if let Some(&b) = world(vm).anim.rest_bottoms.get(&mesh) {
+        return b;
+    }
+    let bottom = skeleton_of(vm, mesh)
+        .map(|skel| {
+            hp3_anim::bones(&skel.skeleton, None, None, 0.0).iter().map(|m| (skel.to_actor * *m).w_axis.z).fold(f32::MAX, f32::min)
+        })
+        .filter(|b| b.is_finite() && *b != f32::MAX)
+        .unwrap_or(0.0);
+    world(vm).anim.rest_bottoms.insert(mesh, bottom);
+    bottom
 }
 
 /// An actor's transform: actor space to world.

@@ -1018,7 +1018,14 @@ pub fn mesh_offset(vm: &mut Vm<'_>, a: ObjId) -> glam::Vec3 {
     let mut offset = vec_of(&get(vm, a, "PrePivot")) + vec_of(&get(vm, a, "SavedPrePivot"));
     let align = get(vm, a, "bAlignBottomAlways").as_bool() || (get(vm, a, "bAlignBottom").as_bool() && get(vm, a, "bCollideWorld").as_bool());
     if align {
-        offset.z -= get(vm, a, "CollisionHeight").as_float();
+        let scale = match get(vm, a, "DrawScale").as_float() {
+            0.0 => 1.0,
+            s => s,
+        };
+        // A mesh whose origin is not at its feet (a gargoyle's is at its middle) is set down on its lowest bone.
+        let bottom = get(vm, a, "Mesh").as_obj().map_or(0.0, |m| anim::rest_bottom(vm, m)) * scale;
+        let height = get(vm, a, "CollisionHeight").as_float();
+        offset.z -= if bottom.abs() > 15.0 { height + bottom } else { height };
         if get(vm, a, "Physics").as_byte() != 0 {
             offset.z -= 5.0;
         }
