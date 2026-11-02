@@ -13,6 +13,13 @@ use crate::common::Vec3;
 use crate::texture::{self, Format};
 use crate::{Asset, read_native};
 
+/// A steady scroll of a material's picture, in texture repeats per second.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pan {
+    pub u: f32,
+    pub v: f32,
+}
+
 /// Decoded RGBA8 image.
 #[derive(Clone, Debug)]
 pub struct Image {
@@ -240,6 +247,57 @@ impl<'s> Loader<'s> {
             i = ni;
         }
         None
+    }
+
+    /// How fast a material's picture slides across a surface (texture repeats per second, `u` and `v`), when a
+    /// `TexPanner` is on the way down to the texture: the scenery outside a train's windows scrolls this way.
+    pub fn pan_of(&self, pkg: &Rc<Package>, r: ObjRef) -> Option<Pan> {
+        let (mut p, mut i) = self.set.resolve(pkg, r)?;
+        let mut pan: Option<Pan> = None;
+        for _ in 0..16 {
+            let chain = self.set.export_chain(&p, i);
+            if chain.iter().any(|c| c.eq_ignore_ascii_case("Texture")) {
+                break;
+            }
+            // A triggered panner starts when the level triggers it; it is not a steady scroll.
+            let steady = chain.first().is_some_and(|c| c.eq_ignore_ascii_case("TexPanner"));
+            let (found, next) = self.with_tags(&p, i, |tags, _| {
+                let mut found = None;
+                if steady {
+                    let rate = props::find(&p, tags, "PanRate", 0).and_then(|t| t.as_f32()).unwrap_or(0.0);
+                    // `PanDirection` is a rotator (pitch, yaw, roll); the default is straight along u.
+                    let (pitch, yaw) = props::find(&p, tags, "PanDirection", 0)
+                        .and_then(|t| {
+                            let a = i32::from_le_bytes(t.data.get(0..4)?.try_into().ok()?);
+                            let b = i32::from_le_bytes(t.data.get(4..8)?.try_into().ok()?);
+                            Some((a, b))
+                        })
+                        .unwrap_or((0, 0));
+                    let (pitch, yaw) = (rot_to_rad(pitch), rot_to_rad(yaw));
+                    found = Some(Pan { u: rate * pitch.cos() * yaw.cos(), v: rate * pitch.cos() * yaw.sin() });
+                }
+                let mut next = None;
+                for name in ["SourceTexture", "Diffuse", "Material", "Material1", "Material2", "SelfIllumination"] {
+                    if let Some(t) = props::find(&p, tags, name, 0)
+                        && t.ty == TagType::Object
+                    {
+                        next = t.as_obj();
+                        break;
+                    }
+                }
+                (found, next)
+            })?;
+            if let Some(f) = found {
+                pan = Some(match pan {
+                    Some(o) => Pan { u: o.u + f.u, v: o.v + f.v },
+                    None => f,
+                });
+            }
+            let (np, ni) = self.set.resolve(&p, next?)?;
+            p = np;
+            i = ni;
+        }
+        pan.filter(|p| p.u != 0.0 || p.v != 0.0)
     }
 
     /// Material references of a static mesh's sections, from its `Materials` array of structs.

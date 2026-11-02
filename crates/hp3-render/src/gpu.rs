@@ -396,7 +396,7 @@ impl Renderer {
             let vertices = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,
                 contents: bytemuck::cast_slice(&batch.vertices),
-                usage: wgpu::BufferUsages::VERTEX,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             });
             let indices = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,
@@ -405,7 +405,8 @@ impl Renderer {
             });
             let translucent = batch.texture.as_ref().and_then(|k| scene.images.get(k)).is_some_and(|i| i.translucent);
             let pass = if batch.blend.is_some() { 1 } else if translucent { 2 } else { 0 };
-            draws.push(Draw { bind, vertices, indices, count: batch.indices.len() as u32, pass });
+            let pan = batch.pan.map(|p| (p, batch.vertices.clone()));
+            draws.push(Draw { bind, vertices, indices, count: batch.indices.len() as u32, pass, pan });
         }
         // A second camera for the sky zone's view.
         let sky_globals = d.create_buffer(&wgpu::BufferDescriptor {
@@ -420,6 +421,18 @@ impl Renderer {
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: sky_globals.as_entire_binding() }],
         });
         GpuScene { globals, globals_bg, draws, sky: scene.sky, sky_globals, sky_globals_bg }
+    }
+
+    /// Slides the pictures of scrolling materials (the scenery outside a train's windows) to where `seconds` of the level's
+    /// time puts them.
+    pub fn animate_scene(&self, scene: &GpuScene, seconds: f32) {
+        for d in &scene.draws {
+            let Some((pan, base)) = &d.pan else { continue };
+            // The pan wraps every 8 repeats, as the game's own does, which keeps the numbers small.
+            let (du, dv) = ((seconds * pan.u).rem_euclid(8.0), (seconds * pan.v).rem_euclid(8.0));
+            let moved: Vec<Vertex> = base.iter().map(|v| Vertex { uv: [v.uv[0] + du, v.uv[1] + dv], ..*v }).collect();
+            self.queue.write_buffer(&d.vertices, 0, bytemuck::cast_slice(&moved));
+        }
     }
 
     /// Draws `scene` from `camera` into `color` (with `depth` of the same size).
@@ -603,6 +616,8 @@ struct Draw {
     count: u32,
     /// 0 opaque, 1 terrain layer, 2 alpha-blended.
     pass: u8,
+    /// A scrolling material: its speed and the vertices as built, which `animate_scene` shifts.
+    pan: Option<(hp3_assets::loader::Pan, Vec<Vertex>)>,
 }
 
 /// A scene uploaded to the GPU.

@@ -124,6 +124,8 @@ pub struct Batch {
     pub lightmap: Option<usize>,
     /// A terrain layer: blended over what is below by this alpha map (sampled with `light_uv`).
     pub blend: Option<ObjKey>,
+    /// The picture slides over the surface at this speed (a `TexPanner`).
+    pub pan: Option<loader::Pan>,
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
 }
@@ -186,12 +188,15 @@ pub fn rotation_matrix(rot: [i32; 3]) -> Mat4 {
 
 struct Batcher<'l, 's> {
     loader: &'l Loader<'s>,
-    by_texture: HashMap<(Option<ObjKey>, Option<usize>), usize>,
+    by_texture: HashMap<(Option<ObjKey>, Option<usize>, Option<(u32, u32)>), usize>,
+    /// The scroll of the material `texture_for` looked at last; the next `batch` takes it.
+    last_pan: Option<loader::Pan>,
     scene: Scene,
 }
 
 impl Batcher<'_, '_> {
     fn texture_for(&mut self, pkg: &Rc<Package>, material: ObjRef) -> Option<ObjKey> {
+        self.last_pan = self.loader.pan_of(pkg, material);
         let (tp, ti) = self.loader.base_texture(pkg, material)?;
         let k = loader::key(&tp, ti);
         if !self.scene.images.contains_key(&k) {
@@ -231,9 +236,10 @@ impl Batcher<'_, '_> {
 
     fn batch(&mut self, texture: Option<ObjKey>, lightmap: Option<usize>) -> &mut Batch {
         let next = self.scene.batches.len();
-        let i = *self.by_texture.entry((texture.clone(), lightmap)).or_insert(next);
+        let pan = self.last_pan.take();
+        let i = *self.by_texture.entry((texture.clone(), lightmap, pan.map(|p| (p.u.to_bits(), p.v.to_bits())))).or_insert(next);
         if i == next {
-            self.scene.batches.push(Batch { texture, lightmap, blend: None, vertices: Vec::new(), indices: Vec::new() });
+            self.scene.batches.push(Batch { texture, lightmap, blend: None, pan, vertices: Vec::new(), indices: Vec::new() });
         }
         &mut self.scene.batches[i]
     }
@@ -247,7 +253,7 @@ pub fn build(loader: &Loader<'_>, map: &Rc<Package>) -> Scene {
 /// Like `build_with`, also drawing terrain with the given layers.
 pub fn build_map(loader: &Loader<'_>, map: &Rc<Package>, include: &dyn Fn(usize) -> bool, inputs: &MapInputs) -> Scene {
     let mut scene = build_with(loader, map, include, inputs.lighting.as_ref());
-    let mut b = Batcher { loader, by_texture: HashMap::new(), scene: std::mem::take(&mut scene) };
+    let mut b = Batcher { loader, by_texture: HashMap::new(), last_pan: None, scene: std::mem::take(&mut scene) };
     add_terrain(&mut b, map, inputs);
     b.scene
 }
@@ -310,7 +316,7 @@ fn add_terrain(b: &mut Batcher<'_, '_>, map: &Rc<Package>, inputs: &MapInputs) {
                 break;
             }
             let m = layer.matrix;
-            let mut batch = Batch { texture: Some(texture), lightmap: None, blend: alpha, vertices: Vec::with_capacity(w * h), indices: Vec::new() };
+            let mut batch = Batch { texture: Some(texture), lightmap: None, blend: alpha, pan: None, vertices: Vec::with_capacity(w * h), indices: Vec::new() };
             for k in 0..w * h {
                 let p = pos(k);
                 let u = p.x * m[0][0] + p.y * m[1][0] + p.z * m[2][0] + m[3][0];
@@ -338,7 +344,7 @@ fn add_terrain(b: &mut Batcher<'_, '_>, map: &Rc<Package>, inputs: &MapInputs) {
 /// per frame.
 /// per frame. With `lighting`, surfaces are lit; without, everything is drawn at full brightness.
 pub fn build_with(loader: &Loader<'_>, map: &Rc<Package>, include: &dyn Fn(usize) -> bool, lighting: Option<&Lighting>) -> Scene {
-    let mut b = Batcher { loader, by_texture: HashMap::new(), scene: Scene::default() };
+    let mut b = Batcher { loader, by_texture: HashMap::new(), last_pan: None, scene: Scene::default() };
     add_bsp(&mut b, map, lighting);
     add_actors(&mut b, map, include, lighting);
     b.scene

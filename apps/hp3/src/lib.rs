@@ -121,6 +121,10 @@ fn mouse_name(b: MouseButton) -> Option<&'static str> {
 
 /// How far (in units) the camera is moved back from the view the game computes while the player is in control.
 const CAMERA_PULL_BACK: f32 = 24.0;
+/// How high above the pawn's location the camera's line to the player starts, and how far (Unreal units) the camera keeps
+/// from a wall; the near plane is 4, so this is enough for it never to see through.
+const CAMERA_HEAD_HEIGHT: f32 = 40.0;
+const CAMERA_CLEARANCE: f32 = 10.0;
 
 /// The game's view: the player controller's `PlayerCalcView`.
 /// Per-second frame timing: for each stage of a frame, its average and its worst time over the second.
@@ -178,6 +182,14 @@ fn game_camera(vm: &mut Vm<'_>) -> Option<Camera> {
             let (pitch, yaw) = (rotation[0] as f32 * k, rotation[1] as f32 * k);
             let forward = Vec3::new(pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), pitch.sin());
             position -= forward * CAMERA_PULL_BACK;
+            // The camera stays on the player's side of a wall: it comes in along the line from the head to where it
+            // would be, as far as the level's geometry lets it.
+            if let Some(pawn) = hp3_world::world(vm).player.and_then(|pc| hp3_world::get(vm, pc, "Pawn").as_obj()) {
+                let head = hp3_world::physics::vec(&hp3_world::get(vm, pawn, "Location")) + Vec3::Z * CAMERA_HEAD_HEIGHT;
+                if let Some(hit) = hp3_world::world(vm).collision.trace_static(head, position, Vec3::splat(CAMERA_CLEARANCE)) {
+                    position = head + (position - head) * hit.time;
+                }
+            }
         }
         return Some(Camera { position, rotation, fov_degrees: fov + platform::fov_offset() });
     }
@@ -513,6 +525,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         let particle_images = |k: &hp3_assets::loader::ObjKey| loader.image_with_alpha(&loader.set.get(&k.0).ok()?, k.1);
         let particle_draw = particle_renderer.prepare(&renderer, &particle_quads, &particle_images);
         stages.push(("particle_upload", frame_start.elapsed().as_secs_f32() * 1000.0));
+        renderer.animate_scene(&gpu_scene, hp3_world::world(&mut vm).frame as f32 / 60.0);
         // The off-screen image to draw into: waits only if the display is two frames behind.
         let slot = presenter.take();
         stages.push(("wait", frame_start.elapsed().as_secs_f32() * 1000.0));
