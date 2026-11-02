@@ -12,7 +12,9 @@ const RING: usize = 2;
 
 enum Msg {
     Frame { slot: usize, image: wgpu::Texture, width: u32, height: u32 },
-    /// The surface was recreated or the window changed: configure it again.
+    /// The window got a new native surface (the app came back from the background): present to this one from now on.
+    Surface(wgpu::Surface<'static>),
+    /// The window changed: configure the surface again.
     Reconfigure { width: u32, height: u32 },
     Quit,
 }
@@ -80,6 +82,12 @@ impl Presenter {
         Some(presenter)
     }
 
+    /// Presents to a surface made for the window anew, as after the app was in the background: the old one belongs to a
+    /// native window that is gone.
+    pub fn replace_surface(&self, surface: wgpu::Surface<'static>) {
+        let _ = self.tx.send(Msg::Surface(surface));
+    }
+
     /// Configures the surface for this size again (after a resize or the window coming back).
     pub fn reconfigure(&self, width: u32, height: u32) {
         let _ = self.tx.send(Msg::Reconfigure { width: width.max(1), height: height.max(1) });
@@ -123,7 +131,7 @@ impl Drop for Presenter {
 }
 
 fn present_loop(
-    surface: wgpu::Surface<'static>,
+    mut surface: wgpu::Surface<'static>,
     alpha_mode: wgpu::CompositeAlphaMode,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -131,7 +139,7 @@ fn present_loop(
     messages: Receiver<Msg>,
     free: Sender<usize>,
 ) {
-    let configure = |width: u32, height: u32| {
+    let configure = |surface: &wgpu::Surface<'static>, width: u32, height: u32| {
         surface.configure(
             &device,
             &wgpu::SurfaceConfiguration {
@@ -150,21 +158,27 @@ fn present_loop(
     for message in messages {
         match message {
             Msg::Quit => break,
+            Msg::Surface(new) => {
+                surface = new;
+                configured = (0, 0);
+            }
             Msg::Reconfigure { width, height } => {
-                configure(width, height);
+                configure(&surface, width, height);
                 configured = (width, height);
             }
             Msg::Frame { slot, image, width, height } => {
                 if configured != (width, height) {
-                    configure(width, height);
+                    configure(&surface, width, height);
                     configured = (width, height);
                 }
                 let frame = match surface.get_current_texture() {
-                    Ok(f) => Some(f),
+                    // Configuring a surface whose window is gone is an error: the frame is dropped and the surface is set
+                    // up again when the next one arrives or the window gives a new one.
                     Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
-                        configure(width, height);
+                        configured = (0, 0);
                         None
                     }
+                    Ok(f) => Some(f),
                     Err(e) => {
                         eprintln!("present: {e}");
                         None

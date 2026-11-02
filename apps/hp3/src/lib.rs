@@ -425,6 +425,12 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         if surface_was_gone {
             surface_was_gone = false;
             (width, height) = window.size_in_pixels();
+            // The native window is a new one: the old surface is dead, so the presenter gets a surface made from it.
+            // SAFETY: the window outlives the presenter, which is declared after it and dropped first.
+            match unsafe { wgpu::SurfaceTargetUnsafe::from_window(&window).map_err(|e| e.to_string()).and_then(|t| instance.create_surface_unsafe(t).map_err(|e| e.to_string())) } {
+                Ok(s) => presenter.replace_surface(s),
+                Err(e) => eprintln!("surface: {e}"),
+            }
             presenter.resize(width, height);
             depth = renderer.depth_target(width.max(1), height.max(1));
         }
