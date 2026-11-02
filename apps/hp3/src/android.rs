@@ -79,3 +79,27 @@ pub fn set_in_menu(open: bool) {
 pub extern "system" fn Java_com_ut2004_android_GameActivity_nativeInMenu(_env: *mut std::ffi::c_void, _class: *mut std::ffi::c_void) -> u8 {
     IN_MENU.load(Ordering::Relaxed) as u8
 }
+
+/// `GameActivity.nativeCommand(String)`: a command from the touch menus, for the game loop (see `commands`).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_ut2004_android_GameActivity_nativeCommand(env: *mut *const *const std::ffi::c_void, _class: *mut std::ffi::c_void, text: *mut std::ffi::c_void) {
+    if env.is_null() || text.is_null() {
+        return;
+    }
+    // JNI's function table: GetStringUTFChars is entry 169 and ReleaseStringUTFChars entry 170.
+    type GetChars = unsafe extern "system" fn(*mut *const *const std::ffi::c_void, *mut std::ffi::c_void, *mut u8) -> *const c_char;
+    type ReleaseChars = unsafe extern "system" fn(*mut *const *const std::ffi::c_void, *mut std::ffi::c_void, *const c_char);
+    // SAFETY: `env` is the JNIEnv pointer the VM passes in; its table has these entries at these indices.
+    unsafe {
+        let table = *env;
+        let get: GetChars = std::mem::transmute(*table.add(169));
+        let release: ReleaseChars = std::mem::transmute(*table.add(170));
+        let chars = get(env, text, std::ptr::null_mut());
+        if chars.is_null() {
+            return;
+        }
+        let command = CStr::from_ptr(chars).to_string_lossy().into_owned();
+        release(env, text, chars);
+        crate::commands::push(command);
+    }
+}

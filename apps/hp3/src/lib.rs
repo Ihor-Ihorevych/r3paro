@@ -21,6 +21,7 @@ use sdl3::mouse::MouseButton;
 #[cfg(target_os = "android")]
 pub mod android;
 mod audio;
+pub mod commands;
 mod gamelog;
 mod levelmenu;
 use hp3_script::Value;
@@ -300,6 +301,8 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                     hp3_world::world(&mut vm).input.key_down(key);
                     hp3_world::world(&mut vm).input.key_up(key);
                 }
+                Event::KeyDown { scancode: Some(Scancode::F5), repeat: false, .. } if !in_menu => commands::push("quicksave"),
+                Event::KeyDown { scancode: Some(Scancode::F9), repeat: false, .. } if !in_menu => commands::push("quickload"),
                 Event::KeyDown { scancode: Some(Scancode::F1), repeat: false, .. } => free_camera = !free_camera,
                 Event::KeyDown { scancode: Some(sc), repeat: false, .. } if !free_camera => {
                     if let Some(k) = key_name(sc) {
@@ -336,6 +339,9 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                 }
                 _ => {}
             }
+        }
+        for command in commands::take() {
+            commands::run(&mut vm, &command, &mut pending_level);
         }
         let now = Instant::now();
         let dt = (now - last).as_secs_f32().min(0.1);
