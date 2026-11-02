@@ -422,13 +422,21 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             last = Instant::now();
             continue;
         }
+        // The presenter could not set its surface up: try again with a new one.
+        if presenter.take_broken() {
+            surface_was_gone = true;
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
         if surface_was_gone {
             surface_was_gone = false;
             (width, height) = window.size_in_pixels();
             // The native window is a new one: the old surface is dead, so the presenter gets a surface made from it.
             // SAFETY: the window outlives the presenter, which is declared after it and dropped first.
             match unsafe { wgpu::SurfaceTargetUnsafe::from_window(&window).map_err(|e| e.to_string()).and_then(|t| instance.create_surface_unsafe(t).map_err(|e| e.to_string())) } {
-                Ok(s) => presenter.replace_surface(s),
+                Ok(s) => {
+                    eprintln!("surface: new one for the returned window ({width}x{height})");
+                    presenter.replace_surface(s)
+                }
                 Err(e) => eprintln!("surface: {e}"),
             }
             presenter.resize(width, height);

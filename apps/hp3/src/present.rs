@@ -4,6 +4,8 @@
 //! chain's next image, which blocks until vsync lets one go), copies the frame in and presents it. The game thread
 //! meanwhile already ticks the next frame instead of standing in that wait.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 
@@ -28,6 +30,8 @@ pub struct Presenter {
     free: Receiver<usize>,
     free_tx: Sender<usize>,
     tx: Sender<Msg>,
+    /// Set by the thread when the surface could not be set up (its window is not there): the game makes a new one.
+    broken: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -69,15 +73,17 @@ impl Presenter {
             let _ = free_tx.send(i);
         }
         let back = free_tx.clone();
+        let broken = Arc::new(AtomicBool::new(false));
+        let thread_broken = broken.clone();
         let (thread_device, thread_queue) = (device.clone(), queue);
         let thread = std::thread::Builder::new()
             .name("hp3-present".into())
-            .spawn(move || present_loop(surface, alpha_mode, thread_device, thread_queue, format, rx, back))
+            .spawn(move || present_loop(surface, alpha_mode, thread_device, thread_queue, format, rx, back, thread_broken))
             .ok()?;
         let (width, height) = (width.max(1), height.max(1));
         let images = make_images(&device, format, width, height);
         let views = images.iter().map(|t| t.create_view(&Default::default())).collect();
-        let presenter = Presenter { device, format, images, views, size: (width, height), free, free_tx, tx, thread: Some(thread) };
+        let presenter = Presenter { device, format, images, views, size: (width, height), free, free_tx, tx, broken, thread: Some(thread) };
         presenter.reconfigure(width, height);
         Some(presenter)
     }
@@ -86,6 +92,11 @@ impl Presenter {
     /// native window that is gone.
     pub fn replace_surface(&self, surface: wgpu::Surface<'static>) {
         let _ = self.tx.send(Msg::Surface(surface));
+    }
+
+    /// True once if the surface could not be set up since the last call.
+    pub fn take_broken(&self) -> bool {
+        self.broken.swap(false, Ordering::Relaxed)
     }
 
     /// Configures the surface for this size again (after a resize or the window coming back).
@@ -138,8 +149,11 @@ fn present_loop(
     format: wgpu::TextureFormat,
     messages: Receiver<Msg>,
     free: Sender<usize>,
+    broken: Arc<AtomicBool>,
 ) {
-    let configure = |surface: &wgpu::Surface<'static>, width: u32, height: u32| {
+    // Configuring a surface can fail (its window may be gone or not there yet): that is reported, not a crash.
+    let configure = |surface: &wgpu::Surface<'static>, width: u32, height: u32| -> bool {
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
         surface.configure(
             &device,
             &wgpu::SurfaceConfiguration {
@@ -153,6 +167,14 @@ fn present_loop(
                 view_formats: vec![],
             },
         );
+        match pollster::block_on(device.pop_error_scope()) {
+            Some(e) => {
+                eprintln!("present: surface: {e}");
+                broken.store(true, Ordering::Relaxed);
+                false
+            }
+            None => true,
+        }
     };
     let mut configured = (0, 0);
     for message in messages {
@@ -163,15 +185,13 @@ fn present_loop(
                 configured = (0, 0);
             }
             Msg::Reconfigure { width, height } => {
-                configure(&surface, width, height);
-                configured = (width, height);
+                configured = if configure(&surface, width, height) { (width, height) } else { (0, 0) };
             }
             Msg::Frame { slot, image, width, height } => {
                 if configured != (width, height) {
-                    configure(&surface, width, height);
-                    configured = (width, height);
+                    configured = if configure(&surface, width, height) { (width, height) } else { (0, 0) };
                 }
-                let frame = match surface.get_current_texture() {
+                let frame = match if configured == (0, 0) { Err(wgpu::SurfaceError::Lost) } else { surface.get_current_texture() } {
                     // Configuring a surface whose window is gone is an error: the frame is dropped and the surface is set
                     // up again when the next one arrives or the window gives a new one.
                     Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
