@@ -73,6 +73,8 @@ pub struct Collision {
     /// Who the baked shapes of an actor stop: (other actors, players). An actor not listed stops both.
     blocks: HashMap<ObjId, (bool, bool)>,
     model_grid: HashMap<(i32, i32), Vec<u32>>,
+    /// World boxes of the volumes (blocking volumes): a mover that starts inside one is not held by it, so it can leave.
+    volume_bounds: HashMap<ObjId, (Vec3, Vec3)>,
 }
 
 /// A static mesh's collision model placed in the world. It stands in for the mesh's triangles for the kinds of
@@ -383,7 +385,7 @@ impl Collision {
                 if t.actor.is_some() && t.actor == ignore {
                     continue;
                 }
-                if t.actor.is_some_and(|a| self.inactive.contains(&a) || !self.blocks_mover(a) || self.uses_model(a, extent)) {
+                if t.actor.is_some_and(|a| self.inactive.contains(&a) || !self.blocks_mover(a) || self.uses_model(a, extent) || self.starts_in_volume(a, start)) {
                     continue;
                 }
                 if let Some(h) = tri_trace(t, start, end, extent) {
@@ -446,6 +448,30 @@ impl Collision {
     /// The mover of `actor`, when that actor is one.
     pub fn mover(&self, actor: ObjId) -> Option<&MoverShape> {
         self.movers.iter().find(|m| m.actor == actor)
+    }
+
+    /// Marks these baked actors as volumes, whose boxes are worked out from their triangles.
+    pub fn mark_volumes(&mut self, volumes: &std::collections::HashSet<ObjId>) {
+        let mut bounds: HashMap<ObjId, (Vec3, Vec3)> = HashMap::default();
+        for t in &self.tris {
+            let Some(a) = t.actor.filter(|a| volumes.contains(a)) else { continue };
+            let e = bounds.entry(a).or_insert((t.v[0], t.v[0]));
+            for v in t.v {
+                *e = (e.0.min(v), e.1.max(v));
+            }
+        }
+        self.volume_bounds = bounds;
+    }
+
+    fn starts_in_volume(&self, actor: ObjId, start: Vec3) -> bool {
+        self.volume_bounds.get(&actor).is_some_and(|(lo, hi)| start.cmpgt(*lo).all() && start.cmplt(*hi).all())
+    }
+
+    /// The world box of the baked triangles of `actor`.
+    pub fn baked_bounds(&self, actor: ObjId) -> Option<(Vec3, Vec3)> {
+        let mut it = self.tris.iter().filter(|t| t.actor == Some(actor)).flat_map(|t| t.v);
+        let first = it.next()?;
+        Some(it.fold((first, first), |(lo, hi), v| (lo.min(v), hi.max(v))))
     }
 
     /// The actors that own baked triangles or models.

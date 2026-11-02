@@ -99,6 +99,8 @@ pub struct World {
     /// Classes whose `Tick` event does nothing the player can see (answers are remembered per class).
     pub tick_skipped: std::collections::HashMap<hp3_script::class_db::StructId, bool>,
     pub tick_classes: std::collections::HashMap<(&'static str, hp3_script::class_db::StructId), (u32, std::time::Duration)>,
+    /// Whether the blocking volumes have been told to the collision.
+    pub volumes_marked: bool,
 }
 
 /// The world stored in the VM. Panics if no level is loaded.
@@ -480,6 +482,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         controller_classes: Default::default(),
         tick_profile: Default::default(),
         tick_classes: Default::default(),
+        volumes_marked: false,
         tick_skipped: Default::default(),
         actor_slots: Default::default(),
         config,
@@ -737,6 +740,15 @@ fn start_book_fights(vm: &mut Vm<'_>) {
 /// original's live collision hash amounts to: a trace made after a script's change sees it.
 fn sync_baked_collision(vm: &mut Vm<'_>) {
     let owners = world(vm).collision.baked_owners();
+    if !world(vm).volumes_marked {
+        world(vm).volumes_marked = true;
+        let volumes: std::collections::HashSet<ObjId> = owners
+            .iter()
+            .copied()
+            .filter(|&a| get(vm, a, "bWorldGeometry").as_bool() && get(vm, a, "StaticMesh").as_obj().is_none())
+            .collect();
+        world(vm).collision.mark_volumes(&volumes);
+    }
     let slots = (actor_slot(vm, "bCollideActors"), actor_slot(vm, "bBlockActors"), actor_slot(vm, "bBlockPlayers"));
     for a in owners {
         let (collide, actors, players) = (read(vm, a, slots.0).as_bool(), read(vm, a, slots.1).as_bool(), read(vm, a, slots.2).as_bool());

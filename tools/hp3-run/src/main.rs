@@ -366,6 +366,22 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                 println!("channels {frame} speed {:.0}: {}", vel.truncate().length(), line.join(" | "));
             }
         }
+        // HP3_UNCOLLIDE=<actor name>[,<actor name>]@<tick>: those actors stop colliding (as SetCollision(false) does).
+        if let Ok(spec) = std::env::var("HP3_UNCOLLIDE")
+            && let Some((names, tick)) = spec.split_once('@')
+            && tick.parse::<u32>() == Ok(frame)
+        {
+            let actors = hp3_world::world(&mut vm).actors.clone();
+            for a in actors {
+                let path = hp3_script::natives::object_path(&mut vm, a);
+                if names.split(',').any(|n| path.ends_with(&format!(".{n}"))) {
+                    let bounds = hp3_world::world(&mut vm).collision.baked_bounds(a);
+                    hp3_world::set(&mut vm, a, "bCollideActors", hp3_script::Value::Bool(false));
+                    hp3_world::refresh_baked_collision(&mut vm, a);
+                    println!("uncollide {path} baked bounds {bounds:?}");
+                }
+            }
+        }
         // HP3_TELEPORT=<x>,<y>,<z>@<tick>: moves the player's pawn there (as SetLocation does), to walk into a trigger.
         if let Ok(spec) = std::env::var("HP3_TELEPORT")
             && let Some((at, tick)) = spec.split_once('@')
