@@ -1639,7 +1639,9 @@ mod mount_tests {
 
 /// Whether a box at `at` overlaps the level (its geometry and movers; actors do not count).
 fn overlaps_world(col: &crate::collision::Collision, at: Vec3, extent: Vec3) -> bool {
-    col.trace_static(at + Vec3::Z * 0.1, at, extent).is_some_and(|h| h.time <= 0.0)
+    // A box that has sunk into a surface is behind its face, where a sweep finds nothing: the triangles are tested for
+    // overlap as well.
+    col.trace_static(at + Vec3::Z * 0.1, at, extent).is_some_and(|h| h.time <= 0.0) || col.box_overlaps_triangles(at, extent, None)
 }
 
 /// A place close to `want` where a box of `extent` fits in the level: `want` itself, or a nudge out of the floor,
@@ -1729,6 +1731,10 @@ pub fn far_move(vm: &mut Vm<'_>, a: ObjId, to: Vec3, test: bool, attached_move: 
         return true;
     }
     let mut at = to;
+    if std::env::var_os("HP3_FAR_DEBUG").is_some() {
+        let ext = extent(vm, a);
+        eprintln!("far_move {} to {to} collideworld {} ext {ext} overlaps {}", hp3_script::natives::object_path(vm, a), get(vm, a, "bCollideWorld").as_bool(), overlaps_world(&world(vm).collision, to, ext));
+    }
     if get(vm, a, "bCollideWorld").as_bool() {
         let ext = extent(vm, a);
         match find_spot(&world(vm).collision, ext, to) {

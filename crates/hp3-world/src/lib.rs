@@ -775,7 +775,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         start_book_fights(vm);
     }
     perception::tick(vm);
-    {
+    if std::env::var_os("HP3_NO_BAKED_SYNC").is_none() {
         sync_baked_collision(vm);
     }
     if let Some(li) = world(vm).level_info {
