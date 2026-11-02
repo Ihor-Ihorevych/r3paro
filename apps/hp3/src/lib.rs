@@ -47,6 +47,12 @@ mod platform {
     pub fn fov_offset() -> f32 {
         0.0
     }
+    pub fn in_cutscene() -> bool {
+        false
+    }
+    pub fn first_person() -> bool {
+        std::env::var_os("HP3_FIRST_PERSON").is_some()
+    }
     pub fn ui_scale() -> f32 {
         1.0
     }
@@ -124,6 +130,8 @@ fn mouse_name(b: MouseButton) -> Option<&'static str> {
 
 /// How far (in units) the camera is moved back from the view the game computes while the player is in control.
 const CAMERA_PULL_BACK: f32 = 24.0;
+/// How far in front of the head's centre the first-person camera sits, so it is outside the head's mesh.
+const FIRST_PERSON_AHEAD: f32 = 12.0;
 /// How high above the pawn's location the camera's line to the player starts, and how far (Unreal units) the camera keeps
 /// from a wall; the near plane is 4, so this is enough for it never to see through.
 const CAMERA_HEAD_HEIGHT: f32 = 40.0;
@@ -185,6 +193,17 @@ fn game_camera(vm: &mut Vm<'_>) -> Option<Camera> {
             let (pitch, yaw) = (rotation[0] as f32 * k, rotation[1] as f32 * k);
             let forward = Vec3::new(pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), pitch.sin());
             position -= forward * CAMERA_PULL_BACK;
+            if platform::first_person()
+                && let Some(pawn) = hp3_world::world(vm).player.and_then(|pc| hp3_world::get(vm, pc, "Pawn").as_obj())
+            {
+                // First person: the camera is in the head, a little ahead of it, looking where the game's camera looks.
+                let eye = match hp3_world::get(vm, pawn, "BaseEyeHeight").as_float() {
+                    h if h > 1.0 => h,
+                    _ => hp3_world::get(vm, pawn, "CollisionHeight").as_float() * 0.8,
+                };
+                let head = hp3_world::physics::vec(&hp3_world::get(vm, pawn, "Location")) + Vec3::Z * eye;
+                return Some(Camera { position: head + forward * FIRST_PERSON_AHEAD, rotation, fov_degrees: fov + platform::fov_offset() });
+            }
             // The camera stays on the player's side of a wall: it comes in along the line from the head to where it
             // would be, as far as the level's geometry lets it.
             if let Some(pawn) = hp3_world::world(vm).player.and_then(|pc| hp3_world::get(vm, pc, "Pawn").as_obj()) {
@@ -547,7 +566,13 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         }
         game_log.update(&mut vm);
         stages.push(("camera", frame_start.elapsed().as_secs_f32() * 1000.0));
-        let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut mesh_cache, lighting.as_ref(), Some(hp3_engine::View { eye: camera.position, forward: camera.forward(), fov_degrees: camera.fov_degrees }));
+        // In first person the player's own body and what it carries are not drawn.
+        let hidden_pawn = if platform::first_person() && !platform::in_cutscene() {
+            hp3_world::world(&mut vm).player.and_then(|pc| hp3_world::get(&mut vm, pc, "Pawn").as_obj())
+        } else {
+            None
+        };
+        let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut mesh_cache, lighting.as_ref(), Some(hp3_engine::View { eye: camera.position, forward: camera.forward(), fov_degrees: camera.fov_degrees }), hidden_pawn);
         let refs: Vec<_> = instances.iter().map(|(m, t, l)| (m.as_ref(), *t, *l)).collect();
         stages.push(("instances", frame_start.elapsed().as_secs_f32() * 1000.0));
         let particle_quads = hp3_engine::particle_quads(&mut vm, &loader, &mut particle_cache, &camera);

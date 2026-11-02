@@ -438,6 +438,7 @@ pub fn actor_instances(
     cache: &mut MeshCache,
     lighting: Option<&Lighting>,
     view: Option<View>,
+    hidden_pawn: Option<ObjId>,
 ) -> Vec<(Rc<GpuMesh>, Mat4, Vec3)> {
     let actors = world(vm).actors.clone();
     let mut out = Vec::new();
@@ -451,6 +452,11 @@ pub fn actor_instances(
     );
     for a in actors {
         if vm.db.objects.get(a).deleted {
+            continue;
+        }
+        if let Some(pawn) = hidden_pawn
+            && (a == pawn || get(vm, a, "Owner").as_obj() == Some(pawn) || get(vm, a, "Base").as_obj() == Some(pawn))
+        {
             continue;
         }
         let draw_type = hp3_world::read(vm, a, draw_slot).as_byte();

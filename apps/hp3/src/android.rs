@@ -83,6 +83,7 @@ static CUTSCENE: AtomicBool = AtomicBool::new(false);
 static SURFACE_ALIVE: AtomicBool = AtomicBool::new(true);
 static FRAMES: AtomicI32 = AtomicI32::new(0);
 static FPS_LIMIT: AtomicI32 = AtomicI32::new(60);
+static FIRST_PERSON: AtomicBool = AtomicBool::new(false);
 static FOV_OFFSET: AtomicU32 = AtomicU32::new(0);
 static UI_SCALE: AtomicU32 = AtomicU32::new(0x3F80_0000); // 1.0
 static SAVED: AtomicI32 = AtomicI32::new(0);
@@ -94,6 +95,11 @@ pub fn set_in_menu(open: bool) {
 }
 
 /// A cutscene holds the player: the touch controls offer Skip and stop steering.
+/// True while the game runs a cutscene.
+pub fn in_cutscene() -> bool {
+    CUTSCENE.load(Ordering::Relaxed)
+}
+
 pub fn set_cutscene(on: bool) {
     CUTSCENE.store(on, Ordering::Relaxed);
 }
@@ -163,7 +169,6 @@ native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeOnBroom, false
 
 native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetDebugMode, _on: u8);
 native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetAutoJump, _on: u8);
-native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetFirstPerson, _on: u8);
 native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetPerfLog, _on: u8);
 native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetTouch, _x: f32, _y: f32, _down: u8);
 native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeMenuAdjust, _index: i32, _dir: i32);
@@ -172,6 +177,16 @@ native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetLessonTimeS
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_github_flipendo_spike_FlipendoActivity_nativeSetUiScale(_env: Env, _class: *mut c_void, scale: f32) {
     UI_SCALE.store(scale.clamp(0.3, 3.0).to_bits(), Ordering::Relaxed);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_flipendo_spike_FlipendoActivity_nativeSetFirstPerson(_env: Env, _class: *mut c_void, on: u8) {
+    FIRST_PERSON.store(on != 0, Ordering::Relaxed);
+}
+
+/// Settings > First person: the camera sits in the player's head.
+pub fn first_person() -> bool {
+    FIRST_PERSON.load(Ordering::Relaxed)
 }
 
 #[unsafe(no_mangle)]
