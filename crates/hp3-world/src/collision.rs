@@ -63,6 +63,9 @@ pub struct Collision {
     /// Static meshes that have a simple collision model, already placed in the world, and the cells they cover.
     mesh_models: Vec<MeshModel>,
     modeled: HashMap<ObjId, (bool, bool)>,
+    /// Actors whose static triangles, volumes or models are baked into the level but whose collision the game has
+    /// turned off since (`SetCollision`, a destroyed actor): they are not traced against until it is on again.
+    inactive: std::collections::HashSet<ObjId>,
     model_grid: HashMap<(i32, i32), Vec<u32>>,
 }
 
@@ -374,7 +377,7 @@ impl Collision {
                 if t.actor.is_some() && t.actor == ignore {
                     continue;
                 }
-                if t.actor.is_some_and(|a| self.uses_model(a, extent)) {
+                if t.actor.is_some_and(|a| self.inactive.contains(&a) || self.uses_model(a, extent)) {
                     continue;
                 }
                 if let Some(h) = tri_trace(t, start, end, extent) {
@@ -391,7 +394,7 @@ impl Collision {
                     continue;
                 }
                 let m = &self.mesh_models[i as usize];
-                if Some(m.actor) == ignore || !self.uses_model(m.actor, extent) {
+                if Some(m.actor) == ignore || self.inactive.contains(&m.actor) || !self.uses_model(m.actor, extent) {
                     continue;
                 }
                 let mut out = None;
@@ -439,6 +442,22 @@ impl Collision {
         self.movers.iter().find(|m| m.actor == actor)
     }
 
+    /// The actors that own baked triangles or models.
+    pub fn baked_owners(&self) -> Vec<ObjId> {
+        let mut seen = std::collections::HashSet::new();
+        let tris = self.tris.iter().filter_map(|t| t.actor);
+        tris.chain(self.mesh_models.iter().map(|m| m.actor)).filter(|a| seen.insert(*a)).collect()
+    }
+
+    /// Turns the baked collision of an actor off or on.
+    pub fn set_active(&mut self, actor: ObjId, active: bool) {
+        if active {
+            self.inactive.remove(&actor);
+        } else {
+            self.inactive.insert(actor);
+        }
+    }
+
     /// Whether a box (center, half size) overlaps a triangle of the static meshes (not the level's BSP).
     pub fn box_overlaps_triangles(&self, center: Vec3, half: Vec3, ignore: Option<ObjId>) -> bool {
         let swept = cells_swept(center, center, half);
@@ -450,7 +469,7 @@ impl Collision {
                     continue;
                 }
                 let t = &self.tris[i as usize];
-                if t.actor.is_some() && t.actor == ignore {
+                if t.actor.is_some() && t.actor == ignore || t.actor.is_some_and(|a| self.inactive.contains(&a)) {
                     continue;
                 }
                 if tri_box_overlap(&t.v, t.normal, center, half) {

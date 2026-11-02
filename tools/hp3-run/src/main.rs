@@ -312,7 +312,8 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                     let at = hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "Location"));
                     let rot: Vec<i32> = hp3_world::get(&mut vm, a, "Rotation").fields().iter().map(hp3_script::Value::as_int).collect();
                     println!(
-                        "watch {frame} {path} at {at} rot {rot:?} state {state} phys {:?} hidden {:?} draw {:?} mesh {:?} vel {:?} accel {:?}",
+                        "watch {frame} {path} label {:?} at {at} rot {rot:?} state {state} phys {:?} hidden {:?} draw {:?} mesh {:?} vel {:?} accel {:?}",
+                        { let t = hp3_world::get(&mut vm, a, "Tag").as_name(); format!("{:?} tag {}", hp3_world::get(&mut vm, a, "Label"), vm.db.names.get(t)) },
                         hp3_world::get(&mut vm, a, "Physics"),
                         hp3_world::get(&mut vm, a, "bHidden"),
                         hp3_world::get(&mut vm, a, "DrawType"),

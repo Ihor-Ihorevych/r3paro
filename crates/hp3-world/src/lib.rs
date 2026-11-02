@@ -17,6 +17,7 @@ pub mod movie;
 pub mod interactions;
 pub mod natives;
 pub mod particles;
+mod perception;
 pub mod physics;
 pub mod save;
 pub mod touch;
@@ -507,6 +508,15 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
             world(vm).url_options = options;
         }
     }
+    // The level's scripts find actors by `Label` (`GetActorFromLabel`: a crab's patrol points, for one); the editor stored
+    // that name in the actor's `Tag`, so an actor with no label of its own is labelled with its tag.
+    for &a in &actors {
+        let tag = get(vm, a, "Tag").as_name();
+        if tag != Name::NONE && get(vm, a, "Label").as_str().is_empty() {
+            let text = vm.db.names.get(tag).to_string();
+            set(vm, a, "Label", Value::Str(text));
+        }
+    }
     // Actors that do not belong to the current game state are hidden and stop colliding.
     for &a in &actors {
         fire(vm, a, "FilterForCurrentGameState", &mut []);
@@ -722,6 +732,18 @@ fn start_book_fights(vm: &mut Vm<'_>) {
 }
 
 /// Advances the level by `dt` seconds: actor ticks, timers, then state code.
+/// The level's static meshes and volumes are baked into the collision when it loads; a script can turn an actor's collision
+/// off (or on) later, or destroy it. Every so often the baked shapes are made to follow the actors' current flags.
+fn sync_baked_collision(vm: &mut Vm<'_>) {
+    let owners = world(vm).collision.baked_owners();
+    for a in owners {
+        let active = !vm.db.objects.get(a).deleted
+            && get(vm, a, "bCollideActors").as_bool()
+            && (get(vm, a, "bBlockActors").as_bool() || get(vm, a, "bBlockPlayers").as_bool());
+        world(vm).collision.set_active(a, active);
+    }
+}
+
 pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     // The step is scaled by the level's time dilation; while someone has paused the game only the menus run.
     let dilation = world(vm).level_info.map(|li| get(vm, li, "TimeDilation").as_float()).filter(|d| *d > 0.0).unwrap_or(1.0);
@@ -739,6 +761,10 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     };
     if world(vm).frame % 30 == 0 {
         start_book_fights(vm);
+    }
+    perception::tick(vm);
+    if world(vm).frame % 10 == 3 {
+        sync_baked_collision(vm);
     }
     if let Some(li) = world(vm).level_info {
         let t = world(vm).time;
