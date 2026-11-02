@@ -26,14 +26,28 @@ mod gamelog;
 mod levelmenu;
 use hp3_script::Value;
 
-/// Tells the Android touch controls whether a menu is open (they step aside for it); nothing on the desktop.
+/// What the platform layer needs to know about the game and tells it: on Android Flipendo's touch controls ask through JNI
+/// (`android`), elsewhere nothing happens.
 #[cfg(target_os = "android")]
-fn publish_menu(open: bool) {
-    android::set_in_menu(open);
-}
+use android as platform;
 
 #[cfg(not(target_os = "android"))]
-fn publish_menu(_open: bool) {}
+mod platform {
+    pub fn set_in_menu(_open: bool) {}
+    pub fn set_cutscene(_on: bool) {}
+    pub fn set_level(_name: &str) {}
+    pub fn surface_alive() -> bool {
+        true
+    }
+    pub fn tick_frame() {}
+    pub fn frame_budget() -> Option<f32> {
+        None
+    }
+    pub fn fov_offset() -> f32 {
+        0.0
+    }
+    pub fn note_saved() {}
+}
 
 /// The ini's name for a key.
 fn key_name(sc: Scancode) -> Option<String> {
@@ -102,6 +116,13 @@ fn mouse_name(b: MouseButton) -> Option<&'static str> {
 const CAMERA_PULL_BACK: f32 = 24.0;
 
 /// The game's view: the player controller's `PlayerCalcView`.
+/// Whether something other than the player's own controller holds the player's pawn (a cutscene's controller).
+fn player_in_cutscene(vm: &mut Vm<'_>) -> bool {
+    let Some(pc) = hp3_world::world(vm).player else { return false };
+    let Some(pawn) = hp3_world::get(vm, pc, "Pawn").as_obj() else { return false };
+    hp3_world::get(vm, pawn, "Controller").as_obj().is_some_and(|c| c != pc)
+}
+
 fn game_camera(vm: &mut Vm<'_>) -> Option<Camera> {
     if let Some((mut position, rotation, fov)) = hp3_world::player_view(vm) {
         if let Some(pawn) = hp3_world::world(vm).player.and_then(|pc| hp3_world::get(vm, pc, "Pawn").as_obj()) {
@@ -115,7 +136,7 @@ fn game_camera(vm: &mut Vm<'_>) -> Option<Camera> {
             let forward = Vec3::new(pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), pitch.sin());
             position -= forward * CAMERA_PULL_BACK;
         }
-        return Some(Camera { position, rotation, fov_degrees: fov });
+        return Some(Camera { position, rotation, fov_degrees: fov + platform::fov_offset() });
     }
     // The game's camera is not running: follow the pawn from behind instead.
     let pc = hp3_world::world(vm).player?;
@@ -230,11 +251,13 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
     // F11 level list; G ghost, F fly, H walk (debug movement).
     let mut levels = levelmenu::LevelMenu::new(root);
     let mut current_map = map.clone();
+    platform::set_level(&current_map);
     // HP3_OPEN_LEVELS=1 starts with the list open (for screenshots).
     if std::env::var_os("HP3_OPEN_LEVELS").is_some() {
         levels.toggle(&current_map);
     }
     let mut pending_level: Option<String> = None;
+    let mut surface_was_gone = false;
     let mut game_log = gamelog::GameLog::new(root);
     let particle_renderer = hp3_render::particles::ParticleRenderer::new(&renderer);
     let mut particle_cache = hp3_engine::ParticleCache::default();
@@ -243,7 +266,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         let menu = hp3_world::gui::menu_open(&mut vm);
         if menu != in_menu {
             in_menu = menu;
-            publish_menu(menu);
+            platform::set_in_menu(menu);
             sdl.mouse().set_relative_mouse_mode(&window, !menu);
         }
         for event in events.poll_iter() {
@@ -343,6 +366,29 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         for command in commands::take() {
             commands::run(&mut vm, &command, &mut pending_level);
         }
+        if hp3_world::world(&mut vm).frame % 6 == 0 {
+            platform::set_cutscene(player_in_cutscene(&mut vm));
+        }
+        // The window's surface is gone (the app is in the background): nothing is drawn until it is back.
+        if !platform::surface_alive() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            surface_was_gone = true;
+            last = Instant::now();
+            continue;
+        }
+        if surface_was_gone {
+            surface_was_gone = false;
+            (width, height) = window.size_in_pixels();
+            configure(width, height);
+            depth = renderer.depth_target(width.max(1), height.max(1));
+        }
+        // Settings > FPS limit: a frame takes at least that long.
+        if let Some(budget) = platform::frame_budget() {
+            let spent = last.elapsed().as_secs_f32();
+            if spent < budget {
+                std::thread::sleep(std::time::Duration::from_secs_f32(budget - spent));
+            }
+        }
         let now = Instant::now();
         let dt = (now - last).as_secs_f32().min(0.1);
         last = now;
@@ -407,6 +453,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             mesh_cache = hp3_engine::MeshCache::default();
             particle_cache = hp3_engine::ParticleCache::default();
             current_map = pkg.name.to_string();
+            platform::set_level(&current_map);
             let _ = window.set_title(&format!("hp3 - {}", pkg.name));
             eprintln!("travelled to {} in {:?}", pkg.name, t.elapsed());
             accumulator = 0.0;
@@ -460,6 +507,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         renderer.queue.submit([cmd, hud]);
         stages.push(("submit", frame_start.elapsed().as_secs_f32() * 1000.0));
         frame.present();
+        platform::tick_frame();
         stages.push(("present", frame_start.elapsed().as_secs_f32() * 1000.0));
         if stages.last().is_some_and(|s| s.1 > 200.0) {
             eprintln!("slow frame (cumulative ms): {stages:?}");

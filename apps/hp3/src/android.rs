@@ -5,7 +5,9 @@ use std::ffi::{CStr, CString, c_char, c_int};
 use std::io::{BufRead, BufReader};
 use std::os::fd::FromRawFd;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::ffi::c_void;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
 unsafe extern "C" {
     fn __android_log_write(priority: c_int, tag: *const c_char, text: *const c_char) -> c_int;
@@ -67,29 +69,154 @@ pub extern "C" fn SDL_main(argc: c_int, argv: *mut *mut c_char) -> c_int {
     }
 }
 
-/// Whether a menu (rather than play) is on screen; the touch controls read it through JNI.
-static IN_MENU: AtomicBool = AtomicBool::new(true);
+// What the Java side asks about the game and tells it: Flipendo's touch controls (FlipendoActivity.Overlay) poll these
+// through JNI natives declared in `io.github.flipendo.spike.FlipendoActivity`, which this library answers.
 
+static IN_MENU: AtomicBool = AtomicBool::new(true);
+static CUTSCENE: AtomicBool = AtomicBool::new(false);
+static SURFACE_ALIVE: AtomicBool = AtomicBool::new(true);
+static FRAMES: AtomicI32 = AtomicI32::new(0);
+static FPS_LIMIT: AtomicI32 = AtomicI32::new(60);
+static FOV_OFFSET: AtomicU32 = AtomicU32::new(0);
+static SAVED: AtomicI32 = AtomicI32::new(0);
+static LEVEL: Mutex<String> = Mutex::new(String::new());
+
+/// A menu (rather than play) is on screen: the touch controls hide their buttons.
 pub fn set_in_menu(open: bool) {
     IN_MENU.store(open, Ordering::Relaxed);
 }
 
-/// `GameActivity.nativeInMenu()`: true while a menu takes the touches.
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_com_ut2004_android_GameActivity_nativeInMenu(_env: *mut std::ffi::c_void, _class: *mut std::ffi::c_void) -> u8 {
-    IN_MENU.load(Ordering::Relaxed) as u8
+/// A cutscene holds the player: the touch controls offer Skip and stop steering.
+pub fn set_cutscene(on: bool) {
+    CUTSCENE.store(on, Ordering::Relaxed);
 }
 
-/// `GameActivity.nativeCommand(String)`: a command from the touch menus, for the game loop (see `commands`).
+pub fn set_level(name: &str) {
+    if let Ok(mut l) = LEVEL.lock()
+        && *l != name
+    {
+        *l = name.to_string();
+    }
+}
+
+/// Whether the window's surface exists (the activity says when it is destroyed or made).
+pub fn surface_alive() -> bool {
+    SURFACE_ALIVE.load(Ordering::Relaxed)
+}
+
+/// One more frame drawn (the FPS counter).
+pub fn tick_frame() {
+    FRAMES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The longest a frame may take, from Settings > FPS limit; None when the limit is the display's own.
+pub fn frame_budget() -> Option<f32> {
+    let fps = FPS_LIMIT.load(Ordering::Relaxed);
+    (fps > 0 && fps < 120).then(|| 1.0 / fps as f32)
+}
+
+/// Degrees the player added to the field of view (Settings > Field of view).
+pub fn fov_offset() -> f32 {
+    f32::from_bits(FOV_OFFSET.load(Ordering::Relaxed))
+}
+
+/// A quick save was written: the activity shows a toast.
+pub fn note_saved() {
+    SAVED.fetch_add(1, Ordering::Relaxed);
+}
+
+type Env = *mut *const *const c_void;
+
+macro_rules! native_bool {
+    ($name:ident, $value:expr) => {
+        #[unsafe(no_mangle)]
+        pub extern "system" fn $name(_env: Env, _class: *mut c_void) -> u8 {
+            $value as u8
+        }
+    };
+}
+
+macro_rules! native_unit {
+    ($name:ident $(, $arg:ident : $ty:ty)*) => {
+        #[unsafe(no_mangle)]
+        pub extern "system" fn $name(_env: Env, _class: *mut c_void $(, $arg: $ty)*) {}
+    };
+}
+
+native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeMenuActive, IN_MENU.load(Ordering::Relaxed));
+native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeCutsceneActive, CUTSCENE.load(Ordering::Relaxed));
+native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeLessonDrawing, false);
+native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeVendorActive, false);
+native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeOnBroom, false);
+
+native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetUiScale, _scale: f32);
+native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetDebugMode, _on: u8);
+native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetAutoJump, _on: u8);
+native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetFirstPerson, _on: u8);
+native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetPerfLog, _on: u8);
+native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetTouch, _x: f32, _y: f32, _down: u8);
+native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeMenuAdjust, _index: i32, _dir: i32);
+native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetLessonTimeScale, _scale: f32);
+
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_ut2004_android_GameActivity_nativeCommand(env: *mut *const *const std::ffi::c_void, _class: *mut std::ffi::c_void, text: *mut std::ffi::c_void) {
+pub extern "system" fn Java_io_github_flipendo_spike_FlipendoActivity_nativeSetFovOffset(_env: Env, _class: *mut c_void, degrees: f32) {
+    FOV_OFFSET.store(degrees.to_bits(), Ordering::Relaxed);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_flipendo_spike_FlipendoActivity_nativeSetFpsLimit(_env: Env, _class: *mut c_void, fps: i32) {
+    FPS_LIMIT.store(fps, Ordering::Relaxed);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_flipendo_spike_FlipendoActivity_nativeSetSurfaceAlive(_env: Env, _class: *mut c_void, alive: u8) {
+    SURFACE_ALIVE.store(alive != 0, Ordering::Relaxed);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_flipendo_spike_FlipendoActivity_nativeFrameCount(_env: Env, _class: *mut c_void) -> i32 {
+    FRAMES.load(Ordering::Relaxed)
+}
+
+/// The game's own menu items for the gamepad: none (the engine draws its menus itself).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_flipendo_spike_FlipendoActivity_nativeMenuItems(_env: Env, _class: *mut c_void) -> *mut c_void {
+    std::ptr::null_mut()
+}
+
+/// The quick save the touch controls' Save button asks for.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_flipendo_spike_FlipendoActivity_nativeRequestSave(_env: Env, _class: *mut c_void) {
+    crate::commands::push("quicksave");
+}
+
+/// The map being played, for the controls' prompts.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_flipendo_spike_FlipendoActivity_nativeLevelName(env: Env, _class: *mut c_void) -> *mut c_void {
+    if env.is_null() {
+        return std::ptr::null_mut();
+    }
+    let name = LEVEL.lock().map(|l| l.clone()).unwrap_or_default();
+    let Ok(name) = CString::new(name) else { return std::ptr::null_mut() };
+    // JNI's function table: NewStringUTF is entry 167.
+    type NewString = unsafe extern "system" fn(Env, *const c_char) -> *mut c_void;
+    // SAFETY: `env` is the JNIEnv the VM passed in; its table has this entry at this index.
+    unsafe {
+        let new_string: NewString = std::mem::transmute(*(*env).add(167));
+        new_string(env, name.as_ptr())
+    }
+}
+
+/// A debug command from the settings panel's debug menu: `level <map>`, `cheat <name>` (see `commands`).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_flipendo_spike_FlipendoActivity_nativeDebugCommand(env: Env, _class: *mut c_void, text: *mut c_void) {
     if env.is_null() || text.is_null() {
         return;
     }
     // JNI's function table: GetStringUTFChars is entry 169 and ReleaseStringUTFChars entry 170.
-    type GetChars = unsafe extern "system" fn(*mut *const *const std::ffi::c_void, *mut std::ffi::c_void, *mut u8) -> *const c_char;
-    type ReleaseChars = unsafe extern "system" fn(*mut *const *const std::ffi::c_void, *mut std::ffi::c_void, *const c_char);
-    // SAFETY: `env` is the JNIEnv pointer the VM passes in; its table has these entries at these indices.
+    type GetChars = unsafe extern "system" fn(Env, *mut c_void, *mut u8) -> *const c_char;
+    type ReleaseChars = unsafe extern "system" fn(Env, *mut c_void, *const c_char);
+    // SAFETY: as above.
     unsafe {
         let table = *env;
         let get: GetChars = std::mem::transmute(*table.add(169));
@@ -102,4 +229,10 @@ pub extern "system" fn Java_com_ut2004_android_GameActivity_nativeCommand(env: *
         release(env, text, chars);
         crate::commands::push(command);
     }
+}
+
+/// `GameActivity.nativeSavedCount()`: how many quick saves have been written.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_ut2004_android_GameActivity_nativeSavedCount(_env: Env, _class: *mut c_void) -> i32 {
+    SAVED.load(Ordering::Relaxed)
 }

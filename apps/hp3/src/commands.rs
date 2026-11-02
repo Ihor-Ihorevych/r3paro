@@ -31,6 +31,9 @@ pub fn run(vm: &mut Vm<'_>, command: &str, level: &mut Option<String>) {
         "quicksave" => {
             let ok = hp3_world::save::write(vm, QUICK_SLOT);
             eprintln!("quick save: {}", if ok { "written" } else { "failed" });
+            if ok {
+                crate::platform::note_saved();
+            }
         }
         "quickload" => {
             if hp3_world::save::exists(vm, QUICK_SLOT) {
