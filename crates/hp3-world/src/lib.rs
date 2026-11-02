@@ -733,11 +733,17 @@ fn start_book_fights(vm: &mut Vm<'_>) {
 
 /// Advances the level by `dt` seconds: actor ticks, timers, then state code.
 /// The level's static meshes and volumes are baked into the collision when it loads; a script can turn an actor's collision
-/// off (or on) later, or destroy it. Every so often the baked shapes are made to follow the actors' current flags.
+/// off (or on) later, or destroy it. Every tick the baked shapes are made to follow the actors' current flags, which is what the
+/// original's live collision hash amounts to: a trace made after a script's change sees it.
 fn sync_baked_collision(vm: &mut Vm<'_>) {
     let owners = world(vm).collision.baked_owners();
+    let slots = (actor_slot(vm, "bCollideActors"), actor_slot(vm, "bBlockActors"), actor_slot(vm, "bBlockPlayers"));
     for a in owners {
-        refresh_baked_collision(vm, a);
+        let (collide, actors, players) = (read(vm, a, slots.0).as_bool(), read(vm, a, slots.1).as_bool(), read(vm, a, slots.2).as_bool());
+        let active = !vm.db.objects.get(a).deleted && collide && (actors || players);
+        let c = &mut world(vm).collision;
+        c.set_blocks(a, actors, players);
+        c.set_active(a, active);
     }
 }
 
@@ -769,7 +775,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         start_book_fights(vm);
     }
     perception::tick(vm);
-    if world(vm).frame % 10 == 3 {
+    {
         sync_baked_collision(vm);
     }
     if let Some(li) = world(vm).level_info {
