@@ -988,7 +988,7 @@ fn mover_shape(vm: &mut Vm<'_>, a: ObjId) -> Option<collision::MoverShape> {
         let Some(Asset::StaticMesh(sm)) = native_asset(&p, index, &chain) else { return None };
         let pos: Vec<Vec3> = sm.vertices.iter().map(|v| Vec3::new(v.position.x, v.position.y, v.position.z) * s3 * scale).collect();
         if std::env::var("HP3_MOVER_MESH").is_ok_and(|n| hp3_script::natives::object_path(vm, a).ends_with(&n)) {
-            eprintln!("mover mesh: {} vertices, {} render triangles, {} collision triangles, scale {s3} {scale}", pos.len(), sm.indices.len() / 3, sm.collision_triangles.len());
+            eprintln!("mover mesh {}: {} vertices, {} render triangles, {} collision triangles, scale {s3} {scale}", hp3_script::natives::object_path(vm, mesh), pos.len(), sm.indices.len() / 3, sm.collision_triangles.len());
             for t in sm.indices.chunks_exact(3) {
                 let [a0, b0, c0] = [t[0], t[1], t[2]].map(|i| pos.get(i as usize).copied().unwrap_or(Vec3::ZERO));
                 eprintln!("render tri ({:.0},{:.0},{:.0}) ({:.0},{:.0},{:.0}) ({:.0},{:.0},{:.0})", a0.x, a0.y, a0.z, b0.x, b0.y, b0.z, c0.x, c0.y, c0.z);
@@ -1002,6 +1002,13 @@ fn mover_shape(vm: &mut Vm<'_>, a: ObjId) -> Option<collision::MoverShape> {
             for t in sm.indices.chunks_exact(3) {
                 tris.push([t[0], t[1], t[2]].map(|i| pos.get(i as usize).copied().unwrap_or(Vec3::ZERO)));
             }
+        }
+        // The Carpe block's pattern face has a groove along its base (8 high, 6 deep) that is only for the eye: a pawn
+        // that climbs the face has to find it solid, so a flat strip closes it for collision.
+        if vm.db.objects.get(mesh).key.is_some() && hp3_script::natives::object_path(vm, mesh).to_ascii_lowercase().ends_with(".cr_block_sm") {
+            let p = |x: f32, y: f32, z: f32| Vec3::new(x, y, z) * s3 * scale;
+            tris.push([p(0.0, -9.0, 8.0), p(0.0, -120.0, 8.0), p(0.0, -9.0, 0.0)]);
+            tris.push([p(0.0, -120.0, 8.0), p(0.0, -120.0, 0.0), p(0.0, -9.0, 0.0)]);
         }
     } else if get(vm, a, "Brush").as_obj().is_some() {
         tris = brush_triangles(vm, a, s3, scale)?;
