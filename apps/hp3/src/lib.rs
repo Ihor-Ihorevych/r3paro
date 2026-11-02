@@ -194,6 +194,9 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
     let mut lighting = inputs.lighting;
     eprintln!("{map}: scene built in {:?} ({:?})", t.elapsed(), scene.stats);
 
+    // On a phone the game is played with the screen on its side, whichever way it is held.
+    #[cfg(target_os = "android")]
+    sdl3::hint::set("SDL_ORIENTATIONS", "LandscapeLeft LandscapeRight");
     let sdl = sdl3::init()?;
     let video = sdl.video()?;
     // No audio device is not fatal: the game runs silent.
