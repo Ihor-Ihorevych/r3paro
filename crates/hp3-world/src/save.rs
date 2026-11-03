@@ -716,6 +716,39 @@ fn resync(vm: &mut Vm<'_>) {
 }
 
 // ---------------------------------------------------------------------------------------------------------
+// The persistent store
+
+/// The store's slots: `Keys` is a table of upper-case names in order, `Values` the table of their values beside it.
+/// `FindSlot(name)` gives a slot's place (-1: none), `CreateSlot(name)` the place of the slot, made in its order when it
+/// is not there yet.
+pub fn register(vm: &mut Vm<'_>) {
+    vm.register("PersistentStore.FindSlot", |vm, this, a| {
+        let Some(store) = this else { return Ok(Value::Int(-1)) };
+        let key = a.first().map(|v| v.as_str().to_uppercase()).unwrap_or_default();
+        let at = match get(vm, store, "Keys") {
+            Value::Array(keys) => keys.iter().rposition(|k| k.as_str() == key),
+            _ => None,
+        };
+        Ok(Value::Int(at.map_or(-1, |i| i as i32)))
+    });
+    vm.register("PersistentStore.CreateSlot", |vm, this, a| {
+        let Some(store) = this else { return Ok(Value::Int(-1)) };
+        let key = a.first().map(|v| v.as_str().to_uppercase()).unwrap_or_default();
+        let (Value::Array(mut keys), Value::Array(mut values)) = (get(vm, store, "Keys"), get(vm, store, "Values")) else { return Ok(Value::Int(-1)) };
+        let at = keys.iter().position(|k| k.as_str() >= key.as_str()).unwrap_or(keys.len());
+        if keys.get(at).is_some_and(|k| k.as_str() == key) {
+            return Ok(Value::Int(at as i32));
+        }
+        keys.insert(at, Value::Str(key));
+        values.resize(keys.len() - 1, Value::Str(String::new()));
+        values.insert(at, Value::Str(String::new()));
+        set(vm, store, "Keys", Value::Array(keys));
+        set(vm, store, "Values", Value::Array(values));
+        Ok(Value::Int(at as i32))
+    });
+}
+
+// ---------------------------------------------------------------------------------------------------------
 // The game asks
 
 /// After a frame's tick: a save the player's controller queued is written, and the command that came with it runs.

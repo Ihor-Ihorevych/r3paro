@@ -407,6 +407,14 @@ pub fn travel(vm: &mut Vm<'_>, url: &str) -> Result<Rc<Package>, VmError> {
             }
         }
     }
+    // The values the scripts saved into the game's store (`SavePersistentData`, when the level asks for items to travel) go
+    // to the world info, which outlives the level, and the next level's store takes them from there.
+    if !restart
+        && world(vm).level_info.is_some_and(|li| get(vm, li, "bNextItems").as_bool())
+        && let Some(store) = world(vm).game.and_then(|g| get(vm, g, "PersistentStore").as_obj())
+    {
+        fire(vm, store, "TravelExporting", &mut []);
+    }
     // The old level goes: its actors are dropped from the VM's per-object state.
     let old = vm.ext.take().and_then(|e| e.downcast::<World>().ok()).ok_or_else(|| VmError::Runtime("no world".into()))?;
     for a in &old.actors {
@@ -440,6 +448,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
     canvas::register(vm);
     interactions::register(vm);
     gui::register(vm);
+    save::register(vm);
     let configured = config::apply(vm, &config);
     if std::env::var_os("HP3_CONFIG_DEBUG").is_some() {
         eprintln!("config: {configured} class default values read from the ini files");
@@ -559,6 +568,17 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
             let options = take_world_options();
             fire(vm, g, "InitGame", &mut [Value::Str(options.clone()), Value::Str(String::new())]);
             world(vm).url_options = options;
+            // The game keeps what the player has done (stars, finds, pickups taken) in a store its scripts expect to exist;
+            // a level that came by travel gets back the values the last level handed over (`WorldInfo.TempPers*`).
+            if get(vm, g, "PersistentStore").as_obj().is_none()
+                && let Some(sc) = find_object(vm, "KWGame.PersistentStore")
+                && let Some(store) = natives::spawn(vm, level_info, &[Value::Object(Some(sc))])?.as_obj()
+            {
+                set(vm, g, "PersistentStore", Value::Object(Some(store)));
+                if travel.is_some() && world_info.is_some() {
+                    fire(vm, store, "TravelPostAccept", &mut []);
+                }
+            }
         }
     }
     // The level's scripts find actors by `Label` (`GetActorFromLabel`: a crab's patrol points, for one); the editor stored
@@ -600,7 +620,10 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
     for &a in &actors {
         fire(vm, a, "SetInitialState", &mut []);
     }
-    // The persistent store has given the level its saved state (none yet): actors apply it.
+    // The persistent store has the saved state of the earlier levels: every actor takes what is its own from it, then settles.
+    for &a in &actors {
+        fire(vm, a, "RestorePersistentData", &mut []);
+    }
     for &a in &actors {
         fire(vm, a, "PostPersistentDataRestored", &mut []);
     }

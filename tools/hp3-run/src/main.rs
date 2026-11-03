@@ -530,6 +530,10 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             && tick.parse::<u32>() == Ok(frame)
             && let Some(li) = hp3_world::world(&mut vm).level_info
         {
+            // ServerTravel(URL, true) has every actor save what it keeps across levels first.
+            for a in hp3_world::world(&mut vm).actors.clone() {
+                hp3_world::fire(&mut vm, a, "SavePersistentData", &mut []);
+            }
             hp3_world::set(&mut vm, li, "bNextItems", hp3_script::Value::Bool(true));
             hp3_world::set(&mut vm, li, "NextURL", hp3_script::Value::Str(url.to_string()));
             hp3_world::set(&mut vm, li, "NextSwitchCountdown", hp3_script::Value::Float(0.0));
@@ -538,7 +542,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
         if let Ok(spec) = std::env::var("HP3_GIVE_BEANS")
             && let Some((n, tick)) = spec.split_once('@')
             && let (Ok(n), Ok(tick)) = (n.parse::<i32>(), tick.parse::<u32>())
-            && (frame == tick || frame == tick + 5)
+            && (frame == tick || frame == tick + 5 || (frame > tick && frame % 100 == 0))
             && let Some(pc) = hp3_world::world(&mut vm).player
         {
             if frame == tick {
