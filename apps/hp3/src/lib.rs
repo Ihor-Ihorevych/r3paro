@@ -111,7 +111,7 @@ fn key_name(sc: Scancode) -> Option<String> {
 fn menu_key(sc: Scancode) -> Option<u8> {
     Some(match sc {
         Scancode::Return | Scancode::KpEnter => 0x0d,
-        Scancode::Escape => 0x1b,
+        Scancode::Escape | Scancode::AcBack => 0x1b,
         Scancode::Space => 0x20,
         Scancode::Left => 0x25,
         Scancode::Up => 0x26,

@@ -381,6 +381,19 @@ pub fn mouse_button(vm: &mut Vm<'_>, pressed: bool) {
 /// A key for the top page (its `OnKeyEvent` delegate). Returns whether it was used.
 pub fn key(vm: &mut Vm<'_>, key: u8, action: u8, delta: f32) -> bool {
     let Some(page) = top_page(vm) else { return false };
+    // The trade page has no key handling: it closes only through its Yes and No buttons, which the page draws itself, and a
+    // finger or a key that does not land on No leaves it up for good. Escape (the phone's menu and Back buttons send it) says No.
+    if key == 0x1b && action == 1 && is_a(vm, page, "HPPageVendor") {
+        if let Some(no) = get(vm, page, "btnNo").as_obj() {
+            let name = vm.db.names.intern("InternalOnClick");
+            if let Some(f) = vm.find_function(Some(page), None, name)
+                && let Err(e) = vm.invoke(f, Some(page), &mut [Value::Object(Some(no))])
+            {
+                world(vm).errors.push(format!("trade page Escape: {e}"));
+            }
+            return true;
+        }
+    }
     let mut args = [Value::Byte(key), Value::Byte(action), Value::Float(delta)];
     call_delegate(vm, page, "OnKeyEvent", &mut args).as_bool()
 }

@@ -767,6 +767,27 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
         let pawn = hp3_world::get(&mut vm, pc, "Pawn").as_obj();
         let state = vm.state_of(pc).map(|s| vm.db.names.get(vm.db.get(s).name).to_string());
         println!("player controller {class:?} in state {state:?}");
+        // HP3_OPEN_PAGE=Package.Class opens that menu page; HP3_MENU_KEYS=27,... then presses those keys (27 = Escape) on it
+        // and says whether the menu is still up (the trade page must close on Escape).
+        if let Ok(page) = std::env::var("HP3_OPEN_PAGE") {
+            let opened = hp3_world::interactions::open_menu(&mut vm, &page);
+            for _ in 0..10 {
+                hp3_world::tick(&mut vm, 1.0 / 60.0);
+            }
+            let _ = hp3_world::canvas::render(&mut vm, 1280, 720);
+            println!("  opened {page}: {opened}, menu up {}", hp3_world::gui::menu_open(&mut vm));
+            for key in std::env::var("HP3_MENU_KEYS").unwrap_or_default().split(',').filter_map(|k| k.trim().parse::<u8>().ok()) {
+                hp3_world::gui::key(&mut vm, key, 1, 0.0);
+                hp3_world::gui::key(&mut vm, key, 3, 0.0);
+                for _ in 0..10 {
+                    hp3_world::tick(&mut vm, 1.0 / 60.0);
+                }
+                println!("  key {key}: menu up {}", hp3_world::gui::menu_open(&mut vm));
+            }
+            for e in hp3_world::world(&mut vm).errors.iter().rev().take(5) {
+                println!("    error: {e}");
+            }
+        }
         for n in ["aBaseY", "aForward", "aStrafe", "bMovePawn", "bUpdatePosition", "bCanMove", "Pawn"] {
             println!("  pc.{n} = {:?}", hp3_world::get(&mut vm, pc, n));
         }
