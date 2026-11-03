@@ -498,11 +498,12 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                 }
             }
         }
-        // HP3_TELEPORT=<x>,<y>,<z>@<tick>: moves the player's pawn there (as SetLocation does), to walk into a trigger.
-        if let Ok(spec) = std::env::var("HP3_TELEPORT")
-            && let Some((at, tick)) = spec.split_once('@')
-            && tick.parse::<u32>() == Ok(frame)
-        {
+        // HP3_TELEPORT=<x>,<y>,<z>@<tick>[;<x>,<y>,<z>@<tick>...]: moves the player's pawn there (as SetLocation does), to walk into a trigger.
+        for spec in std::env::var("HP3_TELEPORT").unwrap_or_default().split(';') {
+            let Some((at, tick)) = spec.split_once('@') else { continue };
+            if tick.parse::<u32>() != Ok(frame) {
+                continue;
+            }
             let c: Vec<f32> = at.split(',').filter_map(|v| v.parse().ok()).collect();
             if let (&[x, y, z], Some(pc)) = (c.as_slice(), hp3_world::world(&mut vm).player)
                 && let Some(pawn) = hp3_world::get(&mut vm, pc, "Pawn").as_obj()
@@ -638,7 +639,8 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             let cutscene = pc.map(|p| hp3_world::get(&mut vm, p, "bInCutScene").as_bool());
             let ignore = pc.map(|p| (hp3_world::get(&mut vm, p, "bIgnoreMoveInput").as_bool(), hp3_world::get(&mut vm, p, "bIgnoreLookInput").as_bool()));
             let own = pawn.map(|p| hp3_world::get(&mut vm, p, "Controller").as_obj() == pc);
-            println!("status {frame}: pawn controlled by the player {own:?}; pawn {} controller state {state:?} menu {menu} bInCutScene {cutscene:?} ignore(move,look) {ignore:?}", pawn.is_some());
+            let who = pawn.map(|p| { let l = hp3_world::physics::vec(&hp3_world::get(&mut vm, p, "Location")); format!("{} at ({:.0},{:.0},{:.0})", hp3_script::natives::object_path(&vm, p), l.x, l.y, l.z) });
+            println!("status {frame}: {who:?} controlled by the player {own:?}; pawn {} controller state {state:?} menu {menu} bInCutScene {cutscene:?} ignore(move,look) {ignore:?}", pawn.is_some());
         }
         if let Some(t) = cast.as_mut() {
             casttest::step(&mut vm, t, frame);
