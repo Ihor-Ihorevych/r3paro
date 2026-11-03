@@ -102,6 +102,8 @@ pub struct World {
     /// Where each pawn was when its physics volume was last worked out, and the volume it had after.
     volume_checked: hp3_script::fx::FxHashMap<ObjId, ([u32; 3], Option<ObjId>)>,
     ambient_classes: HashMap<hp3_script::StructId, bool>,
+    /// Since when each student has been in the trade's camera-setup state (game time), for `vendor_watchdog`.
+    vendor_setup_since: HashMap<ObjId, f32>,
     /// Time an NPC ticked less often has not been given yet.
     far_owed: HashMap<ObjId, f32>,
     /// Actors that something has been put on (their `Base` for someone), for `riders_of`: only those can carry anything. Filled
@@ -522,6 +524,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         scenery_classes: Default::default(),
         volume_checked: Default::default(),
         ambient_classes: Default::default(),
+        vendor_setup_since: Default::default(),
         far_owed: Default::default(),
         ever_base: Default::default(),
         ever_base_valid: false,
@@ -999,8 +1002,42 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     mark(vm, "movement anims");
     anim::update_attachments(vm);
     mark(vm, "animation");
+    vendor_watchdog(vm);
     // A save the game queued is written once the frame's tick is done, as the original does.
     save::run_queued(vm);
+}
+
+/// How long a student may stay in the camera-setup state of a trade before it goes on to the trade itself (seconds).
+const VENDOR_SETUP_LIMIT: f32 = 8.0;
+
+/// A student who is selling something first turns the camera to herself (`SetupForTransaction`) and waits, in 0.3 second steps, until
+/// the camera has stopped turning (two samples of its rotation equal) before she starts the trade. How exactly the turn comes to a
+/// stop depends on arithmetic and on what else moves the camera, and when it never does the whole trade hangs with Harry unable to
+/// move or cast. Past the limit she goes on to the trade, which needs nothing from the camera.
+fn vendor_watchdog(vm: &mut Vm<'_>) {
+    if world(vm).frame % 20 != 0 {
+        return;
+    }
+    let now = world(vm).time;
+    let target = vm.db.names.intern("DoingVendorTransaction");
+    let waiting = vm.db.names.intern("SetupForTransaction");
+    let actors = world(vm).actors.clone();
+    let mut still: Vec<ObjId> = Vec::new();
+    for a in actors {
+        let Some(state) = vm.state_of(a) else { continue };
+        if vm.db.get(state).name != waiting || vm.db.objects.get(a).deleted {
+            continue;
+        }
+        still.push(a);
+        let since = *world(vm).vendor_setup_since.entry(a).or_insert(now);
+        let limit = crate::envc::var("HP3_VENDOR_SETUP_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(VENDOR_SETUP_LIMIT);
+        if now - since > limit {
+            vm.log.push(format!("trade: {} waited {:.0} s for the camera, going on", vm.db.names.get(vm.db.objects.get(a).name), now - since));
+            let _ = vm.goto_state(a, target, hp3_script::Name::NONE);
+            world(vm).vendor_setup_since.remove(&a);
+        }
+    }
+    world(vm).vendor_setup_since.retain(|k, _| still.contains(k));
 }
 
 /// While profiling: adds the time since `start` to the actor's class under `phase`.
