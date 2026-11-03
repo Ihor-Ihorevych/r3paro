@@ -7,7 +7,7 @@ puzzles, cutscenes, voices and music are the retail game's, not a remake.
 **It ships no game data.** You need your own retail copy of the PC game. R3paro is written clean-room
 (`CLEANROOM.md`) and licensed GPLv3. It supports Harry Potter 3 only.
 
-Version **0.5.2**. It is the engine behind Harry Potter 3 in
+Version **0.5.3**. It is the engine behind Harry Potter 3 in
 [Flipendo Droid](https://github.com/Ihor-Ihorevych/flipendo-droid) (Android), and it also runs on Windows.
 
 ## What works
