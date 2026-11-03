@@ -62,6 +62,11 @@ pub extern "C" fn SDL_main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         // SAFETY: nothing else is running yet; this is the first thing the game thread does.
         unsafe { std::env::set_var("HP3_TICK_PROFILE", "1") };
     }
+    // A file named `states.flag` asks for every script state change in the log (who went from which state to which).
+    if args.get(1).is_some_and(|root| std::path::Path::new(root).join("states.flag").exists()) {
+        // SAFETY: as above.
+        unsafe { std::env::set_var("HP3_TRACE_STATES", "1") };
+    }
     let Some(root) = args.get(1).map(PathBuf::from) else {
         log_line("no game folder given");
         return 2;

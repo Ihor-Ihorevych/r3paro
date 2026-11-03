@@ -291,6 +291,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
     let mut db = ClassDb::new(&set);
     db.load_all_classes();
     let mut vm = Vm::new(db);
+    vm.trace_states = std::env::var_os("HP3_TRACE_STATES").is_some();
     let t = Instant::now();
     hp3_world::load(&mut vm, &pkg, config)?;
     eprintln!("world loaded in {:?}", t.elapsed());
