@@ -551,6 +551,10 @@ fn report_result(vm: &mut Vm<'_>, t: &CastTest, target: ObjId) {
     let mut kinds: BTreeMap<String, usize> = Default::default();
     for a in now.into_iter().filter(|a| !t.start_actors.contains(a)) {
         let n = name_of(vm, a);
+        // What the spell made, with its tag (cutscenes find the dragon and the rabbit by it).
+        if let Value::Name(tag) = get(vm, a, "Tag") {
+            println!("cast: made {n} with tag {}", vm.db.names.get(tag));
+        }
         *kinds.entry(n.trim_end_matches(|c: char| c.is_ascii_digit()).to_string()).or_default() += 1;
     }
     let deleted = vm.db.objects.get(target).deleted;

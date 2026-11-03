@@ -192,7 +192,10 @@ pub fn spawn(vm: &mut Vm<'_>, spawner: Option<ObjId>, a: &[Value]) -> Result<Val
     set(vm, obj, "Location", if given(a, 3) { a[3].clone() } else { loc });
     set(vm, obj, "Rotation", if given(a, 4) { a[4].clone() } else { rot });
     set(vm, obj, "Owner", Value::Object(obj_arg(a, 1)));
-    set(vm, obj, "Tag", Value::Name(if given(a, 2) { a[2].as_name() } else { class_name }));
+    // A tag that is none (a script's `FancySpawn` passes its own optional tag on) means the class's name, as when it is left out:
+    // cutscenes find the dragon and the rabbit by that tag.
+    let tag = if given(a, 2) { a[2].as_name() } else { hp3_script::Name::NONE };
+    set(vm, obj, "Tag", Value::Name(if tag == hp3_script::Name::NONE { class_name } else { tag }));
     set(vm, obj, "Level", Value::Object(level));
     let instigator = spawner.map(|s| get(vm, s, "Instigator")).unwrap_or_default();
     set(vm, obj, "Instigator", instigator);
