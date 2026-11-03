@@ -19,7 +19,9 @@ use hp3_script::{Name, ObjId, Value, Vm};
 
 use crate::{fire, get, set, world};
 
-const MAGIC: &[u8; 8] = b"HP3SAVE1";
+const MAGIC: &[u8; 8] = b"HP3SAVE2";
+/// The first format: no objects made while running.
+const MAGIC_V1: &[u8; 8] = b"HP3SAVE1";
 
 /// Where slots live: the `Save` folder next to the game's data.
 fn save_dir(vm: &Vm<'_>) -> PathBuf {
@@ -58,6 +60,8 @@ enum Ref {
     Package(String, u32),
     /// An object made while running (a menu, an input handler): not saved, the slot keeps the loaded level's own.
     Runtime,
+    /// An object made while running that the slot keeps (a cutscene's command): its number in the slot's objects.
+    Object(u32),
 }
 
 #[derive(Clone, Debug)]
@@ -90,6 +94,13 @@ struct SavedActor {
     animation: Option<(String, f32, f32, bool)>,
 }
 
+/// An object made while running, saved with the level: its class and values.
+#[derive(Clone, Debug, Default)]
+struct SavedObject {
+    class: String,
+    values: Vec<Saved>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Slot {
     /// The map the level was (`HP3_Adv1Express`).
@@ -100,6 +111,7 @@ pub struct Slot {
     player: String,
     world_info: Vec<Saved>,
     actors: Vec<SavedActor>,
+    objects: Vec<SavedObject>,
 }
 
 // -- bytes ------------------------------------------------------------------------------------------------
@@ -136,6 +148,10 @@ impl Out {
                 self.u32(*i);
             }
             Ref::Runtime => self.u8(3),
+            Ref::Object(n) => {
+                self.u8(4);
+                self.u32(*n);
+            }
         }
     }
     fn value(&mut self, v: &Saved) {
@@ -234,6 +250,7 @@ impl<'a> In<'a> {
             1 => Ref::Actor(self.str()?),
             2 => Ref::Package(self.str()?, self.u32()?),
             3 => Ref::Runtime,
+            4 => Ref::Object(self.u32()?),
             _ => return None,
         })
     }
@@ -311,11 +328,18 @@ fn encode(slot: &Slot) -> Vec<u8> {
             None => o.u8(0),
         }
     }
+    o.u32(slot.objects.len() as u32);
+    for obj in &slot.objects {
+        o.str(&obj.class);
+        o.values(&obj.values);
+    }
     o.0
 }
 
 fn decode(data: &[u8]) -> Option<Slot> {
-    if data.get(..8)? != MAGIC {
+    let magic = data.get(..8)?;
+    let v1 = magic == MAGIC_V1;
+    if magic != MAGIC && !v1 {
         return None;
     }
     let mut r = In { data, at: 8 };
@@ -337,7 +361,16 @@ fn decode(data: &[u8]) -> Option<Slot> {
         let animation = if r.u8()? == 1 { Some((r.str()?, r.f32()?, r.f32()?, r.u8()? != 0)) } else { None };
         actors.push(SavedActor { name, class, values, state, resume, sleep, timer, animation });
     }
-    Some(Slot { map, time, spawned, player, world_info, actors })
+    let mut objects = Vec::new();
+    if !v1 {
+        let count = r.u32()? as usize;
+        for _ in 0..count {
+            let class = r.str()?;
+            let values = r.values()?;
+            objects.push(SavedObject { class, values });
+        }
+    }
+    Some(Slot { map, time, spawned, player, world_info, actors, objects })
 }
 
 /// The slot's contents, or None when there is no such save (or it is not one of ours).
@@ -352,18 +385,40 @@ fn name_of(vm: &Vm<'_>, a: ObjId) -> String {
     vm.db.names.get(vm.db.objects.get(a).name).to_string()
 }
 
-fn reference_of(vm: &Vm<'_>, actors: &HashMap<ObjId, String>, o: Option<ObjId>) -> Ref {
-    let Some(o) = o else { return Ref::None };
-    if let Some(n) = actors.get(&o) {
-        return Ref::Actor(n.clone());
-    }
-    match &vm.db.objects.get(o).key {
-        Some((pkg, index)) => Ref::Package(pkg.to_string(), *index as u32),
-        None => Ref::Runtime,
-    }
+/// What a level's values point at while it is taken apart: its actors by name, and the objects made while running that
+/// the slot keeps (numbered as they are met, saved after the actors).
+struct Refs<'a> {
+    actors: &'a HashMap<ObjId, String>,
+    objects: HashMap<ObjId, u32>,
+    order: Vec<ObjId>,
+    /// Objects made while running that descend from this class are kept (a cutscene's commands).
+    kept: Option<hp3_script::StructId>,
 }
 
-fn save_value(vm: &Vm<'_>, actors: &HashMap<ObjId, String>, v: &Value) -> Saved {
+fn reference_of(vm: &Vm<'_>, actors: &mut Refs, o: Option<ObjId>) -> Ref {
+    let Some(o) = o else { return Ref::None };
+    if let Some(n) = actors.actors.get(&o) {
+        return Ref::Actor(n.clone());
+    }
+    let entry = vm.db.objects.get(o);
+    if let Some((pkg, index)) = &entry.key {
+        return Ref::Package(pkg.to_string(), *index as u32);
+    }
+    let kept = !entry.deleted
+        && matches!(entry.kind, hp3_script::objects::ObjKind::Instance { .. })
+        && matches!((entry.class, actors.kept), (Some(c), Some(k)) if vm.is_child_of(c, k));
+    if !kept {
+        return Ref::Runtime;
+    }
+    let next = actors.order.len() as u32;
+    let n = *actors.objects.entry(o).or_insert(next);
+    if n == next {
+        actors.order.push(o);
+    }
+    Ref::Object(n)
+}
+
+fn save_value(vm: &Vm<'_>, actors: &mut Refs, v: &Value) -> Saved {
     match v {
         Value::Empty => Saved::Empty,
         Value::Byte(b) => Saved::Byte(*b),
@@ -388,10 +443,11 @@ fn capture(vm: &mut Vm<'_>) -> Slot {
     }
     let live: Vec<ObjId> = live.into_iter().filter(|&a| !vm.db.objects.get(a).deleted).collect();
     let names: HashMap<ObjId, String> = live.iter().map(|&a| (a, name_of(vm, a))).collect();
+    let mut refs = Refs { actors: &names, objects: HashMap::new(), order: Vec::new(), kept: vm.db.find("KWScriptedAction") };
     let mut actors = Vec::with_capacity(live.len());
     for &a in &live {
         let Some(class) = vm.db.objects.get(a).class else { continue };
-        let values = vm.db.objects.values(a).map(|v| v.iter().map(|x| save_value(vm, &names, x)).collect()).unwrap_or_default();
+        let values = vm.db.objects.values(a).map(|v| v.iter().map(|x| save_value(vm, &mut refs, x)).collect()).unwrap_or_default();
         let state = vm.state_of(a).map(|s| vm.db.names.get(vm.db.get(s).name).to_string());
         let resume = vm.state_pc.get(&a).map(|&(owner, pc)| (vm.db.names.get(vm.db.get(owner).name).to_string(), pc as u32));
         let sleep = match vm.latent.get(&a) {
@@ -411,12 +467,20 @@ fn capture(vm: &mut Vm<'_>) -> Slot {
         });
     }
     let world_info = match world(vm).world_info {
-        Some(w) => vm.db.objects.values(w).map(|v| v.iter().map(|x| save_value(vm, &names, x)).collect()).unwrap_or_default(),
+        Some(w) => vm.db.objects.values(w).map(|v| v.iter().map(|x| save_value(vm, &mut refs, x)).collect()).unwrap_or_default(),
         None => Vec::new(),
     };
+    // The objects made while running that the values met (which may meet more as they are written).
+    let mut objects = Vec::new();
+    while objects.len() < refs.order.len() {
+        let o = refs.order[objects.len()];
+        let class = vm.db.objects.get(o).class.map(|c| vm.db.names.get(vm.db.get(c).name).to_string()).unwrap_or_default();
+        let values = vm.db.objects.values(o).map(|v| v.iter().map(|x| save_value(vm, &mut refs, x)).collect()).unwrap_or_default();
+        objects.push(SavedObject { class, values });
+    }
     let player = world(vm).player.and_then(|p| names.get(&p).cloned()).unwrap_or_default();
     let w = world(vm);
-    Slot { map: w.map.name.to_string(), time: w.time, spawned: w.spawned as u32, player, world_info, actors }
+    Slot { map: w.map.name.to_string(), time: w.time, spawned: w.spawned as u32, player, world_info, actors, objects }
 }
 
 /// Writes the level to a slot.
@@ -430,8 +494,15 @@ pub fn write(vm: &mut Vm<'_>, slot: i32) -> bool {
     let path = slot_path(vm, slot);
     let part = path.with_extension("tmp");
     let ok = std::fs::write(&part, encode(&saved)).and_then(|_| std::fs::rename(&part, &path)).is_ok();
+    if std::env::var_os("HP3_SAVE_DEBUG").is_some() {
+        let mut by_class: std::collections::BTreeMap<&str, usize> = Default::default();
+        for o in &saved.objects {
+            *by_class.entry(o.class.as_str()).or_default() += 1;
+        }
+        eprintln!("save: slot {slot}, {} actors, {} objects {by_class:?}", saved.actors.len(), saved.objects.len());
+    }
     if ok {
-        vm.log.push(format!("engine: saved game to slot {slot} ({} actors)", saved.actors.len()));
+        vm.log.push(format!("engine: saved game to slot {slot} ({} actors, {} objects)", saved.actors.len(), saved.objects.len()));
     }
     ok
 }
@@ -448,7 +519,13 @@ fn load_ref(vm: &mut Vm<'_>, ids: &HashMap<String, ObjId>, r: &Ref) -> Option<Op
             ((*index as usize) < p.exports.len()).then(|| Some(vm.db.obj_for(&p, *index as usize)))
         }
         Ref::Runtime => None,
+        Ref::Object(n) => Some(ids.get(&object_key(*n)).copied()),
     }
+}
+
+/// The name a slot's object number goes by among the actors' names (which no actor has).
+fn object_key(n: u32) -> String {
+    format!("#{n}")
 }
 
 /// A saved value as a live one; None when it holds something that is not saved.
@@ -524,6 +601,21 @@ pub fn restore(vm: &mut Vm<'_>, slot: &Slot) {
         let obj = vm.new_object_in(class, name, level_info);
         world(vm).actors.push(obj);
         ids.insert(saved.name.clone(), obj);
+    }
+    // The objects made while running are made again (all of them before any values, as they point at each other).
+    let mut made = Vec::new();
+    for (n, saved) in slot.objects.iter().enumerate() {
+        let Some(class) = vm.db.find(&saved.class) else {
+            vm.log.push(format!("load: no class {} for saved object {n}", saved.class));
+            continue;
+        };
+        let name = vm.db.names.intern(&saved.class);
+        let obj = vm.new_object_in(class, name, level_info);
+        ids.insert(object_key(n as u32), obj);
+        made.push((obj, &saved.values));
+    }
+    for (obj, values) in made {
+        apply_values(vm, &ids, obj, values);
     }
     // Values first (references between actors resolve through `ids`), then what depends on them.
     for saved in &slot.actors {
@@ -614,6 +706,12 @@ fn resync(vm: &mut Vm<'_>) {
             shape.place(t);
         }
     }
+    // Pawns that were saved a little inside the floor stand on it again.
+    for &a in &actors {
+        if !vm.db.objects.get(a).deleted {
+            crate::physics::lift_out_of_floor(vm, a);
+        }
+    }
     crate::follow_player(vm);
 }
 
@@ -680,7 +778,17 @@ pub fn option_slot(url: &str) -> Option<i32> {
 /// A level just loaded for `?load=<slot>` gets the saved level put over it.
 pub fn finish_load(vm: &mut Vm<'_>, slot: i32) {
     match read(vm, slot) {
-        Some(saved) => restore(vm, &saved),
+        Some(saved) => {
+            restore(vm, &saved);
+            world(vm).loaded_from_save = true;
+            // Every actor hears that it was loaded (a pawn puts its shadow back, the game its music).
+            let live: Vec<ObjId> = world(vm).actors.clone();
+            for a in live {
+                if !vm.db.objects.get(a).deleted {
+                    fire(vm, a, "PostLoadGame", &mut [Value::Bool(true)]);
+                }
+            }
+        }
         None => vm.log.push(format!("load: slot {slot} cannot be read")),
     }
 }

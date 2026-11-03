@@ -75,6 +75,8 @@ pub struct World {
     pub world_info: Option<ObjId>,
     /// A save was asked for last frame (performed, then the level action cleared, this frame).
     pub save_requested: bool,
+    /// The level was put back from a saved game (the player's controller hears it before the first tick).
+    pub loaded_from_save: bool,
     /// Sounds and music the game asked for, for the platform to play.
     pub audio: audio::Audio,
     pub movies: movie::Movies,
@@ -514,6 +516,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         url_options: String::new(),
         world_info: None,
         save_requested: false,
+        loaded_from_save: false,
         audio: Default::default(),
         movies: Default::default(),
         particles: Default::default(),
@@ -892,7 +895,9 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         && let Some(pc) = world(vm).player
     {
         // The engine tells the player's controller before the level's first tick.
-        fire(vm, pc, "OnEnginePreFirstTick", &mut []);
+        // A level put back from a save says so, which keeps the game from saving over the slot it was loaded from.
+        let loaded = world(vm).loaded_from_save;
+        fire(vm, pc, "OnEnginePreFirstTick", &mut [Value::Bool(loaded)]);
     }
     let profile = std::env::var_os("HP3_TICK_PROFILE").is_some();
     let mut t = std::time::Instant::now();

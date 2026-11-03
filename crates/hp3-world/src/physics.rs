@@ -355,6 +355,25 @@ fn floor_below(vm: &mut Vm<'_>, a: ObjId, depth: f32) -> Option<Hit> {
     (normal.z >= WALKABLE_Z).then_some(Hit { normal, ..hit })
 }
 
+/// Puts a walking pawn that sits a little inside the floor (a saved game can hold it so) back on top of it: with no floor
+/// under it, but one within a step's height above, it is lifted onto that floor. Without this its first look at the floor
+/// finds none and it falls out of the level.
+pub fn lift_out_of_floor(vm: &mut Vm<'_>, a: ObjId) {
+    if get(vm, a, "Physics").as_byte() != PHYS_WALKING || get(vm, a, "Controller").as_obj().is_none() || floor_below(vm, a, 50.0).is_some() {
+        return;
+    }
+    let start = get(vm, a, "Location");
+    let loc = vec(&start);
+    for lift in [4.0, 8.0, 16.0, MAX_STEP_HEIGHT] {
+        set(vm, a, "Location", value(loc + Vec3::Z * lift));
+        if let Some(floor) = floor_below(vm, a, lift + 2.0) {
+            set(vm, a, "Location", value(floor.location));
+            return;
+        }
+    }
+    set(vm, a, "Location", start);
+}
+
 /// The normal of the surface a pawn's box came down on. The box meets the edge or corner of a step or a bevelled
 /// tread as often as its flat top, and then reports a slanted normal; the surface it rests on is what lies under
 /// its middle, so a thin box dropped from `from` over the same depth tells it.
