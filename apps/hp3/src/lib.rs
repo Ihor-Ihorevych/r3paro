@@ -199,10 +199,11 @@ fn player_flying(vm: &mut Vm<'_>) -> bool {
     vm.state_of(pc).is_some_and(|st| vm.db.names.get(vm.db.get(st).name).starts_with("PlayerFlapping"))
 }
 
-/// Whether something other than the player's own controller holds the player's pawn (a cutscene's controller).
-fn player_in_cutscene(vm: &mut Vm<'_>) -> bool {
+/// Whether the player is in a cutscene: something other than the player's own controller holds the pawn (a cutscene's
+/// controller), or the player has no pawn at all while no menu is open (the opening of a new game is played that way).
+fn player_in_cutscene(vm: &mut Vm<'_>, menu_open: bool) -> bool {
     let Some(pc) = hp3_world::world(vm).player else { return false };
-    let Some(pawn) = hp3_world::get(vm, pc, "Pawn").as_obj() else { return false };
+    let Some(pawn) = hp3_world::get(vm, pc, "Pawn").as_obj() else { return !menu_open };
     hp3_world::get(vm, pawn, "Controller").as_obj().is_some_and(|c| c != pc)
 }
 
@@ -507,7 +508,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             commands::run(&mut vm, &command, &mut pending_level);
         }
         if hp3_world::world(&mut vm).frame % 6 == 0 {
-            platform::set_cutscene(player_in_cutscene(&mut vm));
+            platform::set_cutscene(player_in_cutscene(&mut vm, in_menu));
             platform::set_creature(player_controls_creature(&mut vm));
             FLYING.store(player_flying(&mut vm), std::sync::atomic::Ordering::Relaxed);
             CREATURE.store(player_is_creature(&mut vm), std::sync::atomic::Ordering::Relaxed);

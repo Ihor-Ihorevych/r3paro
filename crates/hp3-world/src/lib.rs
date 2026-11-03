@@ -173,6 +173,9 @@ fn instantiate(vm: &mut Vm<'_>, pkg: &Rc<Package>, index: usize) -> Option<ObjId
     let e = vm.db.objects.get_mut(id);
     e.class = Some(class);
     e.kind = ObjKind::Instance { values, state: None };
+    // A map loaded again (a saved game loaded in the same level, a hub visited twice) has the same objects as the last time,
+    // which `travel` marked deleted when the level was left: they are alive again.
+    e.deleted = false;
     let outer = pkg.exports[index].outer;
     let outer = if outer.is_none() { None } else { vm.db.resolve_obj(pkg, outer) };
     vm.set_intrinsics(id, outer);

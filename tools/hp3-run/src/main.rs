@@ -6,6 +6,7 @@
 mod casttest;
 mod langcheck;
 mod mounttest;
+mod saveload;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -626,6 +627,19 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                 vm.db.names.get(anim)
             );
         }
+        // HP3_STATUS_LOG=<every>: whether the player has a pawn, what state the controller is in and whether a menu holds the input.
+        if let Some(every) = std::env::var("HP3_STATUS_LOG").ok().and_then(|v| v.parse::<u32>().ok())
+            && frame % every == 0
+        {
+            let pc = hp3_world::world(&mut vm).player;
+            let pawn = pc.and_then(|p| hp3_world::get(&mut vm, p, "Pawn").as_obj());
+            let state = pc.and_then(|p| vm.state_of(p)).map(|s| vm.db.names.get(vm.db.get(s).name).to_string());
+            let menu = hp3_world::gui::menu_open(&mut vm);
+            let cutscene = pc.map(|p| hp3_world::get(&mut vm, p, "bInCutScene").as_bool());
+            let ignore = pc.map(|p| (hp3_world::get(&mut vm, p, "bIgnoreMoveInput").as_bool(), hp3_world::get(&mut vm, p, "bIgnoreLookInput").as_bool()));
+            let own = pawn.map(|p| hp3_world::get(&mut vm, p, "Controller").as_obj() == pc);
+            println!("status {frame}: pawn controlled by the player {own:?}; pawn {} controller state {state:?} menu {menu} bInCutScene {cutscene:?} ignore(move,look) {ignore:?}", pawn.is_some());
+        }
         if let Some(t) = cast.as_mut() {
             casttest::step(&mut vm, t, frame);
         }
@@ -638,6 +652,9 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
         // is placed by it).
         if std::env::var_os("HP3_CALC_VIEW").is_some() {
             let _ = hp3_world::player_view(&mut vm);
+        }
+        if std::env::var("HP3_SAVELOAD").ok().and_then(|v| v.parse::<u32>().ok()) == Some(frame) {
+            saveload::round_trip(&mut vm, map);
         }
         follow_travel(&mut vm);
         if let Some(start) = walkabout_from
