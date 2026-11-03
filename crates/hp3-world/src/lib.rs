@@ -90,6 +90,8 @@ pub struct World {
     pub quit_requested: bool,
     /// Walking pawns' view offsets while they ease onto a step (drawing only).
     pub step_smooth: std::collections::HashMap<ObjId, f32>,
+    /// Where each hero's floor was last drawn while it went over stairs (see `hero_stair_offset`).
+    pub stair_floor: std::collections::HashMap<ObjId, f32>,
     /// The physics volumes of the level with their brush planes (built the first time a pawn is checked).
     pub volume_hulls: Option<Vec<VolumeHull>>,
     /// What travelled in with the player (the level keeps it for a restart).
@@ -503,6 +505,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         pending_travel: None,
         quit_requested: false,
         step_smooth: Default::default(),
+        stair_floor: Default::default(),
         volume_hulls: None,
         travel_info: travel.clone().unwrap_or_default(),
         url_options: String::new(),

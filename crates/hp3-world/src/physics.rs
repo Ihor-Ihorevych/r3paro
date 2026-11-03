@@ -514,13 +514,13 @@ fn is_hero(vm: &mut Vm<'_>, a: ObjId) -> bool {
 /// instead of in steps, going up or down, and on flat ground or a real slope it is the floor itself. At rest the offset eases
 /// back to none. `None` when there is no clear reading (the pawn is in the air, or against a wall): the usual easing applies.
 fn hero_stair_offset(vm: &mut Vm<'_>, a: ObjId, dt: f32) -> Option<f32> {
-    const STAIR_WINDOW: f32 = 48.0;
     if get(vm, a, "Physics").as_byte() != PHYS_WALKING {
         return None;
     }
     let current = world(vm).step_smooth.get(&a).copied().unwrap_or(0.0);
     let heading = vec(&get(vm, a, "Velocity")).truncate();
     if heading.length() < 20.0 {
+        world(vm).stair_floor.remove(&a);
         return Some(current * (-10.0 * dt).exp());
     }
     let dir = heading.normalize();
@@ -531,25 +531,37 @@ fn hero_stair_offset(vm: &mut Vm<'_>, a: ObjId, dt: f32) -> Option<f32> {
         (hit.time > 0.0 && hit.normal.z >= WALKABLE_Z).then_some(hit.location.z)
     };
     let debug = crate::envc::var_os("HP3_STAIR_DEBUG").is_some() && is_player_pawn(vm, a);
-    let (mut sum, mut count) = (0.0, 0.0);
-    for k in [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0] {
-        if let Some(z) = probe(vm, k * STAIR_WINDOW / 6.0) {
-            sum += z;
-            count += 1.0;
+    // The player is sampled more finely and over a wider window (what is on screen), the companions more cheaply. The samples are
+    // weighted by a triangle, so the ramp has no corners where it starts and ends.
+    let (samples, window) = if is_player_pawn(vm, a) { (13usize, 64.0f32) } else { (7, 48.0) };
+    let half = (samples / 2) as f32;
+    let (mut sum, mut weights, mut found) = (0.0f32, 0.0f32, 0usize);
+    for i in 0..samples {
+        let k = i as f32 - half;
+        let weight = 1.0 - k.abs() / (half + 1.0);
+        if let Some(z) = probe(vm, k * window / (samples - 1) as f32) {
+            sum += z * weight;
+            weights += weight;
+            found += 1;
         }
     }
-    if count < 6.0 {
+    if found + 1 < samples {
         return None;
     }
+    let average = sum / weights;
+    // The average moves in small hops where a sample crosses a riser: a very short filter on the drawn floor (not on the offset,
+    // which jumps with the pawn) takes those out. It starts from where the pawn was last drawn.
+    let drawn_before = world(vm).stair_floor.get(&a).copied().unwrap_or(loc.z - ext.z + 0.5 + current);
+    let drawn = if (average - drawn_before).abs() < MAX_STEP_HEIGHT { drawn_before + (average - drawn_before) * (1.0 - (-dt / 0.025).exp()) } else { average };
+    world(vm).stair_floor.insert(a, drawn);
     if debug {
-        let all: Vec<Option<f32>> = [-24.0, -16.0, -8.0, 0.0, 8.0, 16.0, 24.0].iter().map(|&t| probe(vm, t)).collect();
-        eprintln!("stair: frame {} loc.z {:.1} dir ({:.2},{:.2}) samples {:?} avg {:.1}", world(vm).frame, loc.z, dir.x, dir.y, all, sum / count);
+        eprintln!("stair: frame {} loc.z {:.1} dir ({:.2},{:.2}) average {average:.2}", world(vm).frame, loc.z, dir.x, dir.y);
     }
     // Taken as it is: the average moves smoothly with the pawn, while the pawn's own height jumps a step at a time, so any lag
     // on top would show as a bump at each step.
     // Against where the pawn really stands (its box bottom), which rises a step before its middle reaches the riser.
     // (A pawn rests half a unit above its floor, which is taken out so that flat ground is drawn as it always was.)
-    Some((sum / count - (loc.z - ext.z) + 0.5).clamp(-MAX_STEP_HEIGHT, MAX_STEP_HEIGHT))
+    Some((drawn - (loc.z - ext.z) + 0.5).clamp(-MAX_STEP_HEIGHT, MAX_STEP_HEIGHT))
 }
 
 /// How far below (negative) or above where it is a walking pawn is drawn, while it eases onto a new step.
