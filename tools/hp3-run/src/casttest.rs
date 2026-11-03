@@ -553,7 +553,8 @@ fn report_result(vm: &mut Vm<'_>, t: &CastTest, target: ObjId) {
         let n = name_of(vm, a);
         // What the spell made, with its tag (cutscenes find the dragon and the rabbit by it).
         if let Value::Name(tag) = get(vm, a, "Tag") {
-            println!("cast: made {n} with tag {}", vm.db.names.get(tag));
+            let (br, bl, ra) = (get(vm, a, "bBlockActors").as_bool(), get(vm, a, "bBlockPlayers").as_bool(), get(vm, a, "CollisionRadius").as_float());
+            println!("cast: made {n} with tag {} blockactors {br} blockplayers {bl} radius {ra}", vm.db.names.get(tag));
         }
         *kinds.entry(n.trim_end_matches(|c: char| c.is_ascii_digit()).to_string()).or_default() += 1;
     }

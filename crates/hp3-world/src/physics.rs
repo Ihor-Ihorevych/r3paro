@@ -44,6 +44,14 @@ fn extent(vm: &mut Vm<'_>, a: ObjId) -> Vec3 {
     Vec3::new(r, r, h)
 }
 
+/// The widest a digable object blocks: the rabbit (radius 10) then stands at 40, inside the 45 (60 when facing it) that its `CanDigMe` allows.
+const DIG_BLOCK_RADIUS: f32 = 30.0;
+
+fn is_digable(vm: &mut Vm<'_>, a: ObjId) -> bool {
+    let class = vm.db.objects.get(a).class;
+    vm.db.find("LapiforDigableObject").zip(class).is_some_and(|(k, c)| vm.is_child_of(c, k))
+}
+
 /// Rebuilds the boxes of actors that block movement (static meshes collide by their triangles instead).
 fn refresh_actor_boxes(vm: &mut Vm<'_>) {
     let actors = std::mem::take(&mut world(vm).actors);
@@ -62,6 +70,8 @@ fn refresh_actor_boxes(vm: &mut Vm<'_>) {
         if r <= 0.0 || h <= 0.0 {
             continue;
         }
+        // A mound the rabbit digs is dug from up to 60 away, so its wall must let the rabbit within that (radius 72 would keep it at 82).
+        let r = if r > DIG_BLOCK_RADIUS && is_digable(vm, a) { DIG_BLOCK_RADIUS } else { r };
         boxes.push(ActorBox { actor: a, center: crate::read_vec(vm, a, s.location), extent: Vec3::new(r, r, h), blocks_actors, blocks_players, is_pawn: is_pawn(vm, a), owner: crate::read(vm, a, s.owner).as_obj() });
     }
     world(vm).actors = actors;
