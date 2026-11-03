@@ -137,29 +137,32 @@ struct LineFilter {
 fn line_hits(vm: &mut Vm<'_>, source: ObjId, start: glam::Vec3, end: glam::Vec3, extent: glam::Vec3, filter: &LineFilter) -> Vec<crate::collision::Hit> {
     let volume = vm.db.find("Volume");
     let own_pawn = get(vm, source, "Pawn").as_obj();
-    let flag = if extent == glam::Vec3::ZERO { "bBlockZeroExtentTraces" } else { "bBlockNonZeroExtentTraces" };
     let mut hits = Vec::new();
+    // Hundreds of actors are near a line in a busy level: their properties are read by slot, the cheap flags first.
+    let (collide, block_flag, owner) = (crate::actor_slot(vm, "bCollideActors"), crate::actor_slot(vm, if extent == glam::Vec3::ZERO { "bBlockZeroExtentTraces" } else { "bBlockNonZeroExtentTraces" }), crate::actor_slot(vm, "Owner"));
+    let (proj_target, block_actors, static_mesh, world_geometry) = (crate::actor_slot(vm, "bProjTarget"), crate::actor_slot(vm, "bBlockActors"), crate::actor_slot(vm, "StaticMesh"), crate::actor_slot(vm, "bWorldGeometry"));
+    let (radius, height, location) = (crate::actor_slot(vm, "CollisionRadius"), crate::actor_slot(vm, "CollisionHeight"), crate::actor_slot(vm, "Location"));
     for b in crate::touch::along(vm, start, end, extent.max_element()) {
         if b == source || Some(b) == own_pawn || vm.db.objects.get(b).deleted {
+            continue;
+        }
+        if !crate::read(vm, b, collide).as_bool() || !crate::read(vm, b, block_flag).as_bool() || crate::read(vm, b, owner).as_obj() == Some(source) {
             continue;
         }
         let Some(have) = vm.db.objects.get(b).class else { continue };
         if filter.class.is_some_and(|want| !vm.is_child_of(have, want)) || volume.is_some_and(|v| vm.is_child_of(have, v)) {
             continue;
         }
-        if !get(vm, b, "bCollideActors").as_bool() || !get(vm, b, flag).as_bool() || get(vm, b, "Owner").as_obj() == Some(source) {
-            continue;
-        }
-        if filter.projectile_targets && !get(vm, b, "bProjTarget").as_bool() && !get(vm, b, "bBlockActors").as_bool() {
+        if filter.projectile_targets && !crate::read(vm, b, proj_target).as_bool() && !crate::read(vm, b, block_actors).as_bool() {
             continue;
         }
         let hit = if let Some(m) = world(vm).collision.mover(b) {
             if filter.movers { m.hit(start, end, extent) } else { None }
-        } else if get(vm, b, "StaticMesh").as_obj().is_some() && get(vm, b, "bWorldGeometry").as_bool() {
+        } else if crate::read(vm, b, static_mesh).as_obj().is_some() && crate::read(vm, b, world_geometry).as_bool() {
             None
         } else {
-            let (r, h) = (get(vm, b, "CollisionRadius").as_float(), get(vm, b, "CollisionHeight").as_float());
-            let center = crate::physics::vec(&get(vm, b, "Location"));
+            let (r, h) = (crate::read(vm, b, radius).as_float(), crate::read(vm, b, height).as_float());
+            let center = crate::read_vec(vm, b, location);
             crate::collision::cylinder_trace(center, r, h, start, end, extent)
         };
         if let Some(mut h) = hit {

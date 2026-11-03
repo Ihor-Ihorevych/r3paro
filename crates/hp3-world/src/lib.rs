@@ -526,6 +526,16 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
             set(vm, a, "Label", Value::Str(text));
         }
     }
+    // The level has a default physics volume before anything begins play (a map may carry it as a deleted actor, so one is
+    // made); actors with none, or the deleted one the map placed them in (not one of the level's actors), are moved to it: gravity is read from it when a pawn works out its jump.
+    if let Some(default) = default_physics_volume(vm) {
+        let live: std::collections::HashSet<ObjId> = actors.iter().copied().collect();
+        for &a in &actors {
+            if get(vm, a, "PhysicsVolume").as_obj().is_none_or(|v| !live.contains(&v)) {
+                set(vm, a, "PhysicsVolume", Value::Object(Some(default)));
+            }
+        }
+    }
     // Actors that do not belong to the current game state are hidden and stop colliding.
     for &a in &actors {
         fire(vm, a, "FilterForCurrentGameState", &mut []);
@@ -745,7 +755,7 @@ fn start_book_fights(vm: &mut Vm<'_>) {
 /// off (or on) later, or destroy it. Every tick the baked shapes are made to follow the actors' current flags, which is what the
 /// original's live collision hash amounts to: a trace made after a script's change sees it.
 fn sync_baked_collision(vm: &mut Vm<'_>) {
-    let owners = world(vm).collision.baked_owners();
+    let owners = world(vm).collision.baked_owners().to_vec();
     if !world(vm).volumes_marked {
         world(vm).volumes_marked = true;
         let volumes: std::collections::HashSet<ObjId> = owners
@@ -792,15 +802,25 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     if world(vm).frame % 30 == 0 {
         start_book_fights(vm);
     }
+    let t_pre = std::time::Instant::now();
     perception::tick(vm);
+    let t_perception = t_pre.elapsed();
     if std::env::var_os("HP3_NO_BAKED_SYNC").is_none() {
         sync_baked_collision(vm);
     }
+    let t_sync = t_pre.elapsed() - t_perception;
     if let Some(li) = world(vm).level_info {
         let t = world(vm).time;
         set(vm, li, "TimeSeconds", Value::Float(t));
         movie::tick(vm);
+        let t_particles = std::time::Instant::now();
         particles::tick(vm, dt);
+        if std::env::var_os("HP3_TICK_PROFILE").is_some() {
+            let p = &mut world(vm).tick_profile;
+            *p.entry("pre: perception").or_default() += t_perception;
+            *p.entry("pre: baked collision sync").or_default() += t_sync;
+            *p.entry("pre: particles").or_default() += t_particles.elapsed();
+        }
         for a in particles::finished_actors(vm) {
             destroy_actor(vm, a);
         }
@@ -1304,7 +1324,14 @@ pub fn update_physics_volume(vm: &mut Vm<'_>, a: ObjId) {
 fn default_physics_volume(vm: &mut Vm<'_>) -> Option<ObjId> {
     let class = vm.db.find("DefaultPhysicsVolume")?;
     let actors = world(vm).actors.clone();
-    actors.into_iter().find(|&a| !vm.db.objects.get(a).deleted && vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, class)))
+    let found = actors.into_iter().find(|&a| !vm.db.objects.get(a).deleted && vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, class)));
+    if found.is_some() {
+        return found;
+    }
+    // A map can carry its default volume as a deleted actor (InsideHub): the engine makes one itself, with the class's gravity.
+    // Without it everything in the level has no gravity for the scripts, and a jump (sqrt(-2 * height * gravity)) has no speed.
+    let class_obj = vm.db.get(class).object;
+    natives::spawn(vm, None, &[Value::Object(Some(class_obj))]).ok().and_then(|v| v.as_obj())
 }
 
 /// A mover's placement: its location and rotation.

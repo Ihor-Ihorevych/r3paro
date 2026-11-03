@@ -75,6 +75,8 @@ pub struct Collision {
     model_grid: HashMap<(i32, i32), Vec<u32>>,
     /// World boxes of the volumes (blocking volumes): a mover that starts inside one is not held by it, so it can leave.
     volume_bounds: HashMap<ObjId, (Vec3, Vec3)>,
+    /// `baked_owners`, kept until a triangle or model is added.
+    owners_cache: Option<Vec<ObjId>>,
 }
 
 /// A static mesh's collision model placed in the world. It stands in for the mesh's triangles for the kinds of
@@ -305,6 +307,7 @@ impl Collision {
             return;
         }
         let index = self.mesh_models.len() as u32;
+        self.owners_cache = None;
         self.mesh_models.push(MeshModel { actor, model: std::rc::Rc::new(model) });
         self.modeled.insert(actor, (boxes, lines));
         for x in cell(lo.x)..=cell(hi.x) {
@@ -332,6 +335,7 @@ impl Collision {
             return;
         }
         let index = self.tris.len() as u32;
+        self.owners_cache = None;
         self.tris.push(Tri { v, normal: normal.normalize(), actor });
         let min = v[0].min(v[1]).min(v[2]);
         let max = v[0].max(v[1]).max(v[2]);
@@ -507,10 +511,13 @@ impl Collision {
     }
 
     /// The actors that own baked triangles or models.
-    pub fn baked_owners(&self) -> Vec<ObjId> {
-        let mut seen = std::collections::HashSet::new();
-        let tris = self.tris.iter().filter_map(|t| t.actor);
-        tris.chain(self.mesh_models.iter().map(|m| m.actor)).filter(|a| seen.insert(*a)).collect()
+    pub fn baked_owners(&mut self) -> &[ObjId] {
+        if self.owners_cache.is_none() {
+            let mut seen = hp3_script::fx::FxHashSet::default();
+            let tris = self.tris.iter().filter_map(|t| t.actor);
+            self.owners_cache = Some(tris.chain(self.mesh_models.iter().map(|m| m.actor)).filter(|a| seen.insert(*a)).collect());
+        }
+        self.owners_cache.as_deref().unwrap_or_default()
     }
 
     /// Whether the baked shapes of `actor` stop the mover being traced: a volume that blocks players only lets creatures
