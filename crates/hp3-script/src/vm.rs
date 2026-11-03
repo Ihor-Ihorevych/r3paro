@@ -147,6 +147,9 @@ pub struct Vm<'s> {
     pub ext: Option<Box<dyn std::any::Any>>,
     /// Resolved natives, indexed by function struct id (outer `None`: not looked up yet).
     native_cache: Vec<Option<Option<NativeFn>>>,
+    /// Script functions replaced by a native, by lower-case `Class.Function`, and the lookup of them by function struct id.
+    script_overrides: HashMap<String, NativeFn>,
+    override_cache: Vec<Option<Option<NativeFn>>>,
     trivial: HashMap<StructId, bool>,
     /// Count statements per function when set.
     pub profile: bool,
@@ -199,6 +202,8 @@ impl<'s> Vm<'s> {
             ext: None,
             last_state: HashMap::default(),
             native_cache: Vec::new(),
+            script_overrides: HashMap::default(),
+            override_cache: Vec::new(),
             trivial: HashMap::default(),
             profile: false,
             trace_states: false,
@@ -255,6 +260,12 @@ impl<'s> Vm<'s> {
     pub fn register(&mut self, path: &str, f: NativeFn) {
         self.native_cache.clear();
         self.natives.insert(path.to_ascii_lowercase(), f);
+    }
+
+    /// Replaces a script function (not a native) with a native that does the same, by `Class.Function`: for hot functions.
+    pub fn register_override(&mut self, path: &str, f: NativeFn) {
+        self.override_cache.clear();
+        self.script_overrides.insert(path.to_ascii_lowercase(), f);
     }
 
     /// Adds an iterator native, by `Class.Function`.
@@ -843,6 +854,24 @@ impl<'s> Vm<'s> {
                 return r;
             }
             return native(self, this, args);
+        }
+        if !self.script_overrides.is_empty() {
+            let replaced = match self.override_cache.get(f.0 as usize) {
+                Some(Some(n)) => *n,
+                _ => {
+                    let key = self.function_path(f).to_ascii_lowercase();
+                    let n = self.script_overrides.get(&key).copied();
+                    let i = f.0 as usize;
+                    if self.override_cache.len() <= i {
+                        self.override_cache.resize(i + 1, None);
+                    }
+                    self.override_cache[i] = Some(n);
+                    n
+                }
+            };
+            if let Some(native) = replaced {
+                return native(self, this, args);
+            }
         }
         let mut frame = Frame::new(f, this, def.defaults.clone());
         let info = self.func_info(f);

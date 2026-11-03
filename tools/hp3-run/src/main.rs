@@ -603,6 +603,21 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             }
             hp3_world::world(&mut vm).input.mouse_move(2.0, 0.0);
         }
+        // HP3_STATE_HASH=<every>: a hash of every live actor's place, to compare two runs.
+        if let Some(every) = std::env::var("HP3_STATE_HASH").ok().and_then(|v| v.parse::<u32>().ok())
+            && frame % every == 0
+        {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for a in hp3_world::world(&mut vm).actors.clone() {
+                if vm.db.objects.get(a).deleted {
+                    continue;
+                }
+                let at = hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "Location"));
+                (a.0, at.x.to_bits(), at.y.to_bits(), at.z.to_bits()).hash(&mut h);
+            }
+            println!("statehash {frame}: {:016x}", h.finish());
+        }
         // HP3_PAWN_LOG=<every>: the player pawn's heading, velocity direction and the controller's view yaw.
         if let Some(every) = std::env::var("HP3_PAWN_LOG").ok().and_then(|v| v.parse::<u32>().ok())
             && frame % every == 0

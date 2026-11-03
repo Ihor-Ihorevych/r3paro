@@ -722,6 +722,49 @@ pub fn register(vm: &mut Vm<'_>) {
         let start = if given(a, 1) { crate::physics::vec(&a[1]) } else { crate::physics::vec(&get(vm, o, "Location")) };
         Ok(Value::Bool(world(vm).collision.trace_static(start, end, glam::Vec3::ZERO).is_none_or(|h| h.actor == Some(o))))
     });
+    // KWAIController.FindClosestNavPoint, written out natively (the companions call it every tick and the script loop,
+    // a trace per nav point, was the biggest cost of a busy hub). The same steps as the script: the nav point nearest
+    // the pawn within 1500 (twice the distance for those behind the way to the hero) is the nearest one, but one that
+    // a line from the pawn to it (a box of 0.3 of the pawn's size, level geometry only) reaches is preferred.
+    if std::env::var_os("HP3_NO_NAV_OVERRIDE").is_none() {
+    vm.register_override("KWAIController.FindClosestNavPoint", |vm, this, _a| {
+        let Some(c) = this else { return Ok(Value::Object(None)) };
+        let Some(pawn) = get(vm, c, "Pawn").as_obj() else { return Ok(Value::Object(None)) };
+        let Some(class) = vm.db.find("NavigationPoint") else { return Ok(Value::Object(None)) };
+        let at = |vm: &mut Vm<'_>, o: ObjId| crate::physics::vec(&get(vm, o, "Location"));
+        let from = at(vm, pawn);
+        let hero = world(vm).level_info.and_then(|li| get(vm, li, "PlayerHeroActor").as_obj());
+        let to_hero = hero.map_or(glam::Vec3::ZERO, |h| at(vm, h) - from).normalize_or_zero();
+        let (radius, height) = (get(vm, pawn, "CollisionRadius").as_float(), get(vm, pawn, "CollisionHeight").as_float());
+        let extent = glam::Vec3::new(radius * 0.3, radius * 0.3, height * 0.3);
+        let mut closest = 1500.0f32;
+        let mut closest_clear = closest;
+        let (mut best, mut best_clear): (Option<ObjId>, Option<ObjId>) = (None, None);
+        for a in world(vm).actors.clone() {
+            let e = vm.db.objects.get(a);
+            if e.deleted || !e.class.is_some_and(|k| vm.is_child_of(k, class)) {
+                continue;
+            }
+            let p = at(vm, a);
+            let mut d = (p - from).length();
+            if (p - from).dot(to_hero) < 0.0 {
+                d *= 2.0;
+            }
+            if d < closest {
+                closest = d;
+                best = Some(a);
+            }
+            if d < closest_clear {
+                let hit = world(vm).collision.trace_static(from, p, extent).filter(|h| h.actor != Some(pawn));
+                if hit.is_none_or(|h| h.actor == Some(a)) {
+                    closest_clear = d;
+                    best_clear = Some(a);
+                }
+            }
+        }
+        Ok(Value::Object(best_clear.or(best)))
+    });
+    }
     // TraceActors(BaseClass, out Actor, out HitLoc, out HitNorm, End, optional Start, optional Extent): every
     // colliding actor the swept segment crosses, nearest first, and the first thing of the level's geometry
     // (reported as the level itself for BSP and terrain). A trace without extent only meets actors that block
