@@ -654,7 +654,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             let cutscene = pc.map(|p| hp3_world::get(&mut vm, p, "bInCutScene").as_bool());
             let ignore = pc.map(|p| (hp3_world::get(&mut vm, p, "bIgnoreMoveInput").as_bool(), hp3_world::get(&mut vm, p, "bIgnoreLookInput").as_bool()));
             let own = pawn.map(|p| hp3_world::get(&mut vm, p, "Controller").as_obj() == pc);
-            let who = pawn.map(|p| { let l = hp3_world::physics::vec(&hp3_world::get(&mut vm, p, "Location")); format!("{} at ({:.0},{:.0},{:.0})", hp3_script::natives::object_path(&vm, p), l.x, l.y, l.z) });
+            let who = pawn.map(|p| { let l = hp3_world::physics::vec(&hp3_world::get(&mut vm, p, "Location")); let off = hp3_world::physics::view_offset(&mut vm, p); format!("{} at ({:.0},{:.0},{:.0}) drawn z {:.1}", hp3_script::natives::object_path(&vm, p), l.x, l.y, l.z, l.z + off) });
             println!("status {frame}: {who:?} controlled by the player {own:?}; pawn {} controller state {state:?} menu {menu} bInCutScene {cutscene:?} ignore(move,look) {ignore:?}", pawn.is_some());
         }
         if let Some(t) = cast.as_mut() {

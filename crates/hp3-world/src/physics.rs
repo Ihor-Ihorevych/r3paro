@@ -474,6 +474,18 @@ fn walk_smoothed(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     let before = vec(&get(vm, a, "Location")).z;
     let had_base = get(vm, a, "Base").as_obj();
     walk(vm, a, dt);
+    // The heroes slide over stairs as over a ramp (below); the others ease each step off as it comes.
+    if is_hero(vm, a)
+        && let Some(off) = hero_stair_offset(vm, a, dt)
+    {
+        let w = world(vm);
+        if off.abs() < 0.05 {
+            w.step_smooth.remove(&a);
+        } else {
+            w.step_smooth.insert(a, off);
+        }
+        return;
+    }
     let rise = vec(&get(vm, a, "Location")).z - before;
     let walking = get(vm, a, "Physics").as_byte() == PHYS_WALKING;
     let w = world(vm);
@@ -488,6 +500,56 @@ fn walk_smoothed(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     } else {
         w.step_smooth.insert(a, off);
     }
+}
+
+/// Harry, Ron and Hermione (the pawns that get the ramp-like stair view).
+fn is_hero(vm: &mut Vm<'_>, a: ObjId) -> bool {
+    let Some(hero) = vm.db.find("HPHeroPawn") else { return false };
+    vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, hero))
+}
+
+/// How far a hero on the ground is drawn above or below where it physically stands so that stairs read as a slide: the floor
+/// is sampled across `STAIR_WINDOW` along the way the hero goes, and the hero is drawn at the average of what is found. On a
+/// staircase whose treads are about as long as the window that average rises at a steady slope (a ramp through the nosings)
+/// instead of in steps, going up or down, and on flat ground or a real slope it is the floor itself. At rest the offset eases
+/// back to none. `None` when there is no clear reading (the pawn is in the air, or against a wall): the usual easing applies.
+fn hero_stair_offset(vm: &mut Vm<'_>, a: ObjId, dt: f32) -> Option<f32> {
+    const STAIR_WINDOW: f32 = 48.0;
+    if get(vm, a, "Physics").as_byte() != PHYS_WALKING {
+        return None;
+    }
+    let current = world(vm).step_smooth.get(&a).copied().unwrap_or(0.0);
+    let heading = vec(&get(vm, a, "Velocity")).truncate();
+    if heading.length() < 20.0 {
+        return Some(current * (-10.0 * dt).exp());
+    }
+    let dir = heading.normalize();
+    let (loc, ext) = (vec(&get(vm, a, "Location")), extent(vm, a));
+    let probe = |vm: &mut Vm<'_>, t: f32| -> Option<f32> {
+        let at = loc + Vec3::new(dir.x, dir.y, 0.0) * t;
+        let hit = world(vm).collision.trace_static(at, at - Vec3::Z * (ext.z + MAX_STEP_HEIGHT + 8.0), Vec3::ZERO)?;
+        (hit.time > 0.0 && hit.normal.z >= WALKABLE_Z).then_some(hit.location.z)
+    };
+    let debug = crate::envc::var_os("HP3_STAIR_DEBUG").is_some() && is_player_pawn(vm, a);
+    let (mut sum, mut count) = (0.0, 0.0);
+    for k in [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0] {
+        if let Some(z) = probe(vm, k * STAIR_WINDOW / 6.0) {
+            sum += z;
+            count += 1.0;
+        }
+    }
+    if count < 6.0 {
+        return None;
+    }
+    if debug {
+        let all: Vec<Option<f32>> = [-24.0, -16.0, -8.0, 0.0, 8.0, 16.0, 24.0].iter().map(|&t| probe(vm, t)).collect();
+        eprintln!("stair: frame {} loc.z {:.1} dir ({:.2},{:.2}) samples {:?} avg {:.1}", world(vm).frame, loc.z, dir.x, dir.y, all, sum / count);
+    }
+    // Taken as it is: the average moves smoothly with the pawn, while the pawn's own height jumps a step at a time, so any lag
+    // on top would show as a bump at each step.
+    // Against where the pawn really stands (its box bottom), which rises a step before its middle reaches the riser.
+    // (A pawn rests half a unit above its floor, which is taken out so that flat ground is drawn as it always was.)
+    Some((sum / count - (loc.z - ext.z) + 0.5).clamp(-MAX_STEP_HEIGHT, MAX_STEP_HEIGHT))
 }
 
 /// How far below (negative) or above where it is a walking pawn is drawn, while it eases onto a new step.
