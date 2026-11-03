@@ -1125,6 +1125,7 @@ pub fn register(vm: &mut Vm<'_>) {
             return Ok(Value::Bool(false));
         }
         set(vm, child, "Base", Value::Object(Some(o)));
+        world(vm).ever_base.insert(o);
         set(vm, child, "AttachmentBone", Value::Name(a[1].as_name()));
         world(vm).anim.attachments.insert(child, (o, bone));
         update_attachments(vm);

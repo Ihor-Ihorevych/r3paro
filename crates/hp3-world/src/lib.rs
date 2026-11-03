@@ -95,6 +95,10 @@ pub struct World {
     /// What travelled in with the player (the level keeps it for a restart).
     pub travel_info: TravelInfo,
     actor_slots: HashMap<&'static str, Option<usize>>,
+    /// Actors that something has been put on (their `Base` for someone), for `riders_of`: only those can carry anything. Filled
+    /// from the level when first asked for, then by the places that set a base; `false` after a load, to be filled again.
+    pub ever_base: hp3_script::fx::FxHashSet<ObjId>,
+    pub ever_base_valid: bool,
     /// Time per tick phase, when `HP3_TICK_PROFILE` is set.
     pub tick_profile: std::collections::BTreeMap<&'static str, std::time::Duration>,
     /// While profiling: per class, how many `Tick` events ran, how many were non-trivial, and the time they took.
@@ -487,6 +491,8 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         phys_slots: None,
         controller_classes: Default::default(),
         tick_profile: Default::default(),
+        ever_base: Default::default(),
+        ever_base_valid: false,
         tick_classes: Default::default(),
         volumes_marked: false,
         tick_skipped: Default::default(),

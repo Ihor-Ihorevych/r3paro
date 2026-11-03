@@ -47,6 +47,9 @@ pub fn set_base(vm: &mut Vm<'_>, o: ObjId, new_base: Option<ObjId>, notify: bool
             fire(vm, b, "Detach", &mut [Value::Object(Some(o))]);
         }
         set(vm, o, "Base", Value::Object(new_base));
+        if let Some(b) = new_base {
+            world(vm).ever_base.insert(b);
+        }
         if world(vm).anim.attachments.get(&o).map(|(parent, _)| Some(*parent)) != Some(new_base) {
             world(vm).anim.attachments.remove(&o);
         }

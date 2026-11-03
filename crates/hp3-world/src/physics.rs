@@ -1297,6 +1297,21 @@ fn clear_way(vm: &mut Vm<'_>, a: ObjId, from: Vec3, to: Vec3, rot: [i32; 3]) -> 
 /// The actors standing on (based on) `a`: found by reading the `Base` slot of every actor directly, not by name.
 fn riders_of(vm: &mut Vm<'_>, a: ObjId) -> Vec<ObjId> {
     let base = crate::actor_slot(vm, "Base");
+    if !world(vm).ever_base_valid {
+        let mut found = hp3_script::fx::FxHashSet::default();
+        let all = world(vm).actors.clone();
+        for r in all {
+            if let Some(b) = crate::read(vm, r, base).as_obj() {
+                found.insert(b);
+            }
+        }
+        let w = world(vm);
+        w.ever_base.extend(found);
+        w.ever_base_valid = true;
+    }
+    if !world(vm).ever_base.contains(&a) {
+        return Vec::new();
+    }
     let actors = std::mem::take(&mut world(vm).actors);
     let riders = actors.iter().copied().filter(|&r| r != a && crate::read(vm, r, base).as_obj() == Some(a)).collect();
     world(vm).actors = actors;

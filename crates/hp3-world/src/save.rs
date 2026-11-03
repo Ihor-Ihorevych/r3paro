@@ -498,6 +498,8 @@ fn drop_quietly(vm: &mut Vm<'_>, a: ObjId) {
 /// are only in the save are made (without beginning play), and every actor gets its values, state, timer and
 /// animation back. Nothing begins play again.
 pub fn restore(vm: &mut Vm<'_>, slot: &Slot) {
+    // The saved values put bases back as they were: who carries whom is worked out again.
+    world(vm).ever_base_valid = false;
     let level_info = world(vm).level_info;
     let mut ids: HashMap<String, ObjId> = HashMap::new();
     for &a in &world(vm).actors.clone() {
