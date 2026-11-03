@@ -213,6 +213,15 @@ impl<'s> Loader<'s> {
             // A procedural texture of the Fire package (wet, water, fire, ice...) has no pixels of its own; the
             // image it works on (`SourceTexture`) stands in for it, without the animation.
             let procedural = chain.iter().any(|c| c.eq_ignore_ascii_case("FractalTexture"));
+            // A cubemap has no picture, only six faces (+x, -x, +y, -y, +z, -z): the +z one, facing up, is what
+            // a lake reflects.
+            if chain.iter().any(|c| c.eq_ignore_ascii_case("Cubemap")) {
+                let up = self.with_tags(&p, i, |tags, _| props::find(&p, tags, "Faces", 4).and_then(|t| t.as_obj())).flatten()?;
+                let (np, ni) = self.set.resolve(&p, up)?;
+                p = np;
+                i = ni;
+                continue;
+            }
             if !procedural && chain.iter().any(|c| c.eq_ignore_ascii_case("Texture")) {
                 return Some((p, i));
             }

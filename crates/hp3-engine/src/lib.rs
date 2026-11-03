@@ -9,7 +9,7 @@ use hp3_package::{ObjRef, Package};
 use hp3_render::dynamic::{Dynamic, GpuMesh};
 use hp3_render::gpu::Renderer;
 use hp3_render::meshes::{self, MeshGeom};
-use hp3_render::scene::{rotation_matrix, LightSource, Lighting, MapInputs, TerrainLayer};
+use hp3_render::scene::{rotation_matrix, FluidSurface, LightSource, Lighting, MapInputs, TerrainLayer};
 use hp3_script::{ObjId, Value, Vm};
 use hp3_world::{get, world};
 
@@ -108,8 +108,37 @@ fn texture_key(vm: &Vm<'_>, loader: &Loader<'_>, material: ObjId) -> Option<ObjK
 pub fn map_inputs(vm: &mut Vm<'_>, loader: &Loader<'_>, map: &Package, lit: bool) -> MapInputs {
     let mut out = MapInputs { lighting: lit.then(|| lighting(vm, map)), ..Default::default() };
     let map_name = map.name.to_ascii_lowercase();
-    let Some(terrain_class) = vm.db.find("TerrainInfo") else { return out };
     let actors = world(vm).actors.clone();
+    if let Some(fluid_class) = vm.db.find("FluidSurfaceInfo") {
+        for &a in &actors {
+            let Some(class) = vm.db.objects.get(a).class else { continue };
+            if !vm.is_child_of(class, fluid_class) || vm.db.objects.get(a).deleted || hp3_world::get(vm, a, "bHidden").as_bool() {
+                continue;
+            }
+            let skin = match hp3_world::get(vm, a, "Skins") {
+                Value::Array(v) => v.first().and_then(Value::as_obj),
+                _ => None,
+            };
+            let Some(texture) = skin.and_then(|s| texture_key(vm, loader, s)) else { continue };
+            let at = hp3_world::physics::vec(&hp3_world::get(vm, a, "Location"));
+            let yaw = hp3_world::get(vm, a, "Rotation").fields().get(1).map_or(0, Value::as_int);
+            let size = |vm: &mut Vm<'_>, n: &str| hp3_world::get(vm, a, n).as_int().max(0) as usize;
+            let tile = |vm: &mut Vm<'_>, n: &str| match hp3_world::get(vm, a, n).as_float() {
+                t if t > 0.0 => t,
+                _ => 1.0,
+            };
+            out.fluids.push(FluidSurface {
+                texture,
+                at: at.to_array(),
+                yaw,
+                nx: size(vm, "FluidXSize"),
+                ny: size(vm, "FluidYSize"),
+                spacing: hp3_world::get(vm, a, "FluidGridSpacing").as_float(),
+                tiles: [tile(vm, "UTiles"), tile(vm, "VTiles")],
+            });
+        }
+    }
+    let Some(terrain_class) = vm.db.find("TerrainInfo") else { return out };
     for a in actors {
         let Some(class) = vm.db.objects.get(a).class else { continue };
         let Some((pkg, index)) = vm.db.objects.get(a).key.clone() else { continue };

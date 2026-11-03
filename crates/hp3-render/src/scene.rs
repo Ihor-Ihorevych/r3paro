@@ -82,6 +82,21 @@ pub struct TerrainLayer {
 pub struct MapInputs {
     pub lighting: Option<Lighting>,
     pub terrain_layers: HashMap<usize, Vec<TerrainLayer>>,
+    /// Water surfaces (`FluidSurfaceInfo`): lakes drawn as a flat grid.
+    pub fluids: Vec<FluidSurface>,
+}
+
+/// A water surface as the running world has it: a `nx` by `ny` grid of vertices `spacing` apart, centred on `at` and turned
+/// by `yaw` (a script rotation), with its skin stretched over the whole grid `tiles` times.
+#[derive(Clone, Debug)]
+pub struct FluidSurface {
+    pub texture: ObjKey,
+    pub at: [f32; 3],
+    pub yaw: i32,
+    pub nx: usize,
+    pub ny: usize,
+    pub spacing: f32,
+    pub tiles: [f32; 2],
 }
 
 /// The map's lights, by export index in the map package, and its ambient light.
@@ -255,7 +270,39 @@ pub fn build_map(loader: &Loader<'_>, map: &Rc<Package>, include: &dyn Fn(usize)
     let mut scene = build_with(loader, map, include, inputs.lighting.as_ref());
     let mut b = Batcher { loader, by_texture: HashMap::new(), last_pan: None, scene: std::mem::take(&mut scene) };
     add_terrain(&mut b, map, inputs);
+    add_fluids(&mut b, inputs);
     b.scene
+}
+
+/// Water: each surface as a flat grid at its height (the waves are not simulated).
+fn add_fluids(b: &mut Batcher<'_, '_>, inputs: &MapInputs) {
+    for f in &inputs.fluids {
+        if f.nx < 2 || f.ny < 2 {
+            continue;
+        }
+        let Some(texture) = b.texture_key(&f.texture) else { continue };
+        let (sin, cos) = (f.yaw as f32 * std::f32::consts::TAU / 65536.0).sin_cos();
+        let at = GVec3::from(f.at);
+        // Unlit: the reflection is its own light (the surroundings are too dark for it).
+        let color = [0.5, 0.5, 0.5];
+        let mut batch = Batch { texture: Some(texture), lightmap: None, blend: None, pan: None, vertices: Vec::with_capacity(f.nx * f.ny), indices: Vec::new() };
+        for j in 0..f.ny {
+            for i in 0..f.nx {
+                let (lx, ly) = ((i as f32 - (f.nx - 1) as f32 / 2.0) * f.spacing, (j as f32 - (f.ny - 1) as f32 / 2.0) * f.spacing);
+                let p = at + GVec3::new(lx * cos - ly * sin, lx * sin + ly * cos, 0.0);
+                let uv = [i as f32 / (f.nx - 1) as f32 * f.tiles[0], j as f32 / (f.ny - 1) as f32 * f.tiles[1]];
+                batch.vertices.push(Vertex { position: p.to_array(), uv, light_uv: [0.0, 0.0], color });
+            }
+        }
+        for j in 0..f.ny - 1 {
+            for i in 0..f.nx - 1 {
+                let (a, bb, c, d) = ((j * f.nx + i) as u32, (j * f.nx + i + 1) as u32, ((j + 1) * f.nx + i) as u32, ((j + 1) * f.nx + i + 1) as u32);
+                // Both faces: seen from above or, from a camera below the surface, from under it.
+                batch.indices.extend_from_slice(&[a, bb, d, a, d, c, a, d, bb, a, c, d]);
+            }
+        }
+        b.scene.batches.push(batch);
+    }
 }
 
 /// Terrain: each layer's triangles where its alpha map shows it, blended in order over the first.
