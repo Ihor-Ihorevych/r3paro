@@ -95,6 +95,7 @@ pub struct World {
     /// What travelled in with the player (the level keeps it for a restart).
     pub travel_info: TravelInfo,
     actor_slots: HashMap<&'static str, Option<usize>>,
+    scenery_classes: HashMap<hp3_script::StructId, bool>,
     /// Actors that something has been put on (their `Base` for someone), for `riders_of`: only those can carry anything. Filled
     /// from the level when first asked for, then by the places that set a base; `false` after a load, to be filled again.
     pub ever_base: hp3_script::fx::FxHashSet<ObjId>,
@@ -491,6 +492,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         phys_slots: None,
         controller_classes: Default::default(),
         tick_profile: Default::default(),
+        scenery_classes: Default::default(),
         ever_base: Default::default(),
         ever_base_valid: false,
         tick_classes: Default::default(),
@@ -881,8 +883,15 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     let player = world(vm).player;
     let controller_class = vm.db.find("Controller");
     let mut clock = std::time::Instant::now();
+    let is_static = actor_slot(vm, "bStatic");
+    let skip_static = std::env::var_os("HP3_TICK_STATICS").is_none();
     for &a in &actors {
         if vm.db.objects.get(a).deleted {
+            continue;
+        }
+        // A static actor that is only scenery (a mesh, a brush, a light, a marker) is never ticked, as in the original: no event,
+        // state code, timer or physics. The ones that do something (a door, a desk) are not in the list.
+        if skip_static && Some(a) != player && read(vm, a, is_static).as_bool() && is_scenery(vm, a) {
             continue;
         }
         if Some(a) == player {
@@ -970,6 +979,18 @@ fn tick_is_invisible(vm: &mut Vm<'_>, a: ObjId) -> bool {
     }
     let answer = vm.db.find("ShadowProjector").is_some_and(|p| vm.is_child_of(class, p));
     world(vm).tick_skipped.insert(class, answer);
+    answer
+}
+
+/// Whether an actor is scenery that does nothing when ticked; answers are remembered per class.
+fn is_scenery(vm: &mut Vm<'_>, a: ObjId) -> bool {
+    let Some(class) = vm.db.objects.get(a).class else { return false };
+    if let Some(&known) = world(vm).scenery_classes.get(&class) {
+        return known;
+    }
+    const SCENERY: [&str; 9] = ["StaticMeshActor", "Brush", "Light", "PathNode", "CutKeyPointMark", "CutCamPosition", "CutMark", "AIMarker", "ZoneInfo"];
+    let answer = SCENERY.iter().any(|n| vm.db.find(n).is_some_and(|k| vm.is_child_of(class, k)));
+    world(vm).scenery_classes.insert(class, answer);
     answer
 }
 
