@@ -160,8 +160,8 @@ fn rasterize(vm: &mut Vm<'_>, family: &str, px: u32) -> Option<ObjId> {
 /// Whether the configured language draws its text with system fonts (its script is missing from HP3's
 /// bitmap fonts).
 pub fn need_sap_font(vm: &mut Vm<'_>) -> bool {
-    // The language is kept in lower case. Ukrainian, Belarusian, Georgian and Latvian are Flipendo's translations.
-    matches!(world(vm).config.language.as_str(), "rus" | "cze" | "pol" | "tha" | "jap" | "kor" | "sim" | "tra" | "ukr" | "bel" | "geo" | "lav")
+    // The language is kept in lower case. Ukrainian, Belarusian, Georgian, Latvian, German and Spanish (est) are Flipendo's translations.
+    matches!(world(vm).config.language.as_str(), "rus" | "cze" | "pol" | "tha" | "jap" | "kor" | "sim" | "tra" | "ukr" | "bel" | "geo" | "lav" | "ger" | "est")
 }
 
 /// The system font standing in for a bitmap font of the size class in `bitmap_name` (Tiny, Small, Med, Big,

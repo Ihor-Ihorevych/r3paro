@@ -70,7 +70,7 @@ pub fn check(root: &Path, language: &str, from: Option<&Path>) -> Result<ExitCod
                     "bel" => value.chars().any(|c| "иИщЩъЪ".contains(c)),
                     _ => false,
                 };
-                if (cyrillic(value) && matches!(language.as_str(), "int" | "geo" | "lav")) || russian_only {
+                if (cyrillic(value) && matches!(language.as_str(), "int" | "geo" | "lav" | "ger" | "est")) || russian_only {
                     report(format!("{package} [{section}] {key}: not translated: {value}"));
                 }
                 let bad: String = value.chars().filter(|c| !allowed.contains(c)).collect();
