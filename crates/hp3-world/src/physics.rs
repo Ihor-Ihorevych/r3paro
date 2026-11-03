@@ -18,6 +18,7 @@ pub const PHYS_FLYING: u8 = 4;
 pub const PHYS_ROTATING: u8 = 5;
 pub const PHYS_PROJECTILE: u8 = 6;
 pub const PHYS_TRAILER: u8 = 10;
+pub const PHYS_INTERPOLATING: u8 = 7;
 
 /// HP3's maximum step height.
 pub const MAX_STEP_HEIGHT: f32 = 24.0;
@@ -1537,6 +1538,13 @@ pub fn step_actor(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
             trailer(vm, a);
             return;
         }
+        // An interpolation manager moves its owner along a path of points.
+        PHYS_INTERPOLATING => {
+            if is_interpolation_manager(vm, a) {
+                crate::interpolation::step(vm, a, dt);
+            }
+            return;
+        }
         _ => return,
     }
     if is_pawn(vm, a) {
@@ -1599,6 +1607,11 @@ fn trailer(vm: &mut Vm<'_>, a: ObjId) {
         }
     };
     set(vm, a, "Rotation", rotation);
+}
+
+fn is_interpolation_manager(vm: &mut Vm<'_>, a: ObjId) -> bool {
+    let Some(manager) = vm.db.find("InterpolationManager") else { return false };
+    vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, manager))
 }
 
 fn is_pawn(vm: &mut Vm<'_>, a: ObjId) -> bool {

@@ -447,7 +447,13 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
             seen.push(key);
             let needs = world(vm).particles.states.get(&key).is_none_or(|s| frame.wrapping_sub(s.refreshed) >= REFRESH_FRAMES);
             if needs {
-                let config = Config::read(vm, obj);
+                let mut config = Config::read(vm, obj);
+                // The circle of fake dementors stands 700-900 units out as the level has it, which is beyond the standing stones
+                // and the trees, out of sight of the fight. Closer, they ring the arena.
+                if vm.db.objects.get(a).class.is_some_and(|c| vm.db.names.get(vm.db.get(c).name).eq_ignore_ascii_case("DementorsRing")) {
+                    const DEMENTOR_CIRCLE_SCALE: f32 = 0.6;
+                    config.polar.0[2] = Range(config.polar.0[2].0 * DEMENTOR_CIRCLE_SCALE, config.polar.0[2].1 * DEMENTOR_CIRCLE_SCALE);
+                }
                 let w = world(vm);
                 match w.particles.states.get_mut(&key) {
                     Some(s) => {

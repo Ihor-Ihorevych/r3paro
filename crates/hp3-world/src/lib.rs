@@ -15,6 +15,7 @@ pub mod gui;
 pub mod input;
 pub mod movie;
 pub mod interactions;
+pub mod interpolation;
 pub mod natives;
 pub mod particles;
 mod perception;
