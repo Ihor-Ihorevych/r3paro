@@ -47,8 +47,9 @@ mod platform {
         let fps = std::env::var("HP3_FPS").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(60.0);
         (fps > 0.0).then(|| 1.0 / fps)
     }
+    /// Degrees added to the game's field of view: 20 by default (as on the phone), `HP3_FOV_OFFSET=<degrees>` changes it.
     pub fn fov_offset() -> f32 {
-        0.0
+        std::env::var("HP3_FOV_OFFSET").ok().and_then(|v| v.parse().ok()).unwrap_or(20.0)
     }
     pub fn in_cutscene() -> bool {
         false

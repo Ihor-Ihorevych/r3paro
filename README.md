@@ -117,6 +117,7 @@ Environment variables (set them before starting, e.g. `$env:HP3_FPS = 0` in Powe
 | Variable | |
 |---|---|
 | `HP3_FPS=<n>` | frame rate limit (60 by default, `0` for none) |
+| `HP3_FOV_OFFSET=<degrees>` | degrees added to the game's field of view (20 by default, as on the phone) |
 | `HP3_FIRST_PERSON=1` | camera in the character's head |
 | `HP3_LANGUAGE=<ext>` | interface language: `int` (English), `ukr`, `bel`, `geo`, `lav`; also read from a `.flipendo-language` file next to the game (the Android launcher writes it). Menus and loading tips only: subtitles stay in the edition's language |
 | `HP3_HIT_LOG=1` | prints what blocks a character (for collision bugs) |
