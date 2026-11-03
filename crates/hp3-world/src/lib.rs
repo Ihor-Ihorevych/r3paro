@@ -96,6 +96,8 @@ pub struct World {
     pub travel_info: TravelInfo,
     actor_slots: HashMap<&'static str, Option<usize>>,
     scenery_classes: HashMap<hp3_script::StructId, bool>,
+    /// Where each pawn was when its physics volume was last worked out, and the volume it had after.
+    volume_checked: hp3_script::fx::FxHashMap<ObjId, ([u32; 3], Option<ObjId>)>,
     ambient_classes: HashMap<hp3_script::StructId, bool>,
     /// Time an NPC ticked less often has not been given yet.
     far_owed: HashMap<ObjId, f32>,
@@ -496,6 +498,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         controller_classes: Default::default(),
         tick_profile: Default::default(),
         scenery_classes: Default::default(),
+        volume_checked: Default::default(),
         ambient_classes: Default::default(),
         far_owed: Default::default(),
         ever_base: Default::default(),
@@ -1380,6 +1383,18 @@ fn build_volume_hulls(vm: &mut Vm<'_>) -> Vec<VolumeHull> {
 /// the level's default. A change is told to the volumes, the pawn and its controller (`NotifyPhysicsVolumeChange`),
 /// which is how a sliding volume puts the player into its sliding state.
 pub fn update_physics_volume(vm: &mut Vm<'_>, a: ObjId) {
+    // The volumes do not move: a pawn standing where it was last looked at, in the volume it was then left in, is in the right one.
+    let at = vec_of(&get(vm, a, "Location"));
+    let current = get(vm, a, "PhysicsVolume").as_obj();
+    if world(vm).volume_checked.get(&a) == Some(&(at.to_array().map(f32::to_bits), current)) {
+        return;
+    }
+    update_physics_volume_now(vm, a);
+    let after = get(vm, a, "PhysicsVolume").as_obj();
+    world(vm).volume_checked.insert(a, (at.to_array().map(f32::to_bits), after));
+}
+
+fn update_physics_volume_now(vm: &mut Vm<'_>, a: ObjId) {
     if world(vm).volume_hulls.is_none() {
         let hulls = build_volume_hulls(vm);
         world(vm).volume_hulls = Some(hulls);

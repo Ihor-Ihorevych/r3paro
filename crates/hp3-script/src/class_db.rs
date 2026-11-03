@@ -131,6 +131,8 @@ pub struct ClassDb<'s> {
     pub set: &'s PackageSet,
     pub names: Names,
     pub structs: Vec<StructDef>,
+    /// `find`'s index: how many structs it has seen, and the first class or struct of each name.
+    find_index: std::cell::RefCell<(usize, HashMap<Name, StructId>)>,
     by_key: HashMap<(Rc<str>, usize), StructId>,
     package_names: HashMap<String, Rc<str>>,
     native_classes: HashMap<String, Option<StructId>>,
@@ -144,6 +146,7 @@ impl<'s> ClassDb<'s> {
             set,
             names: Names::default(),
             structs: Vec::new(),
+            find_index: Default::default(),
             by_key: HashMap::default(),
             package_names: HashMap::default(),
             native_classes: HashMap::default(),
@@ -198,10 +201,16 @@ impl<'s> ClassDb<'s> {
     /// Finds a loaded class or struct by name.
     pub fn find(&self, name: &str) -> Option<StructId> {
         let n = self.names.find(name)?;
-        self.structs
-            .iter()
-            .position(|s| s.name == n && matches!(s.kind, StructKind::Class | StructKind::Struct))
-            .map(|i| StructId(i as u32))
+        let mut index = self.find_index.borrow_mut();
+        // Structs are only ever added, so what is new since the last call is added to the index (the first of a name wins).
+        for i in index.0..self.structs.len() {
+            let s = &self.structs[i];
+            if matches!(s.kind, StructKind::Class | StructKind::Struct) {
+                index.1.entry(s.name).or_insert(StructId(i as u32));
+            }
+        }
+        index.0 = self.structs.len();
+        index.1.get(&n).copied()
     }
 
     /// Loads every class in every script package.
