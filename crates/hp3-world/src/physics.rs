@@ -535,7 +535,7 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         let before = vec(&get(vm, a, "Location"));
         if delta.length_squared() > 1e-8 {
             let hit = move_actor(vm, a, delta);
-            if std::env::var_os("HP3_WALK_DEBUG").is_some_and(|v| human || v == "all") {
+            if crate::envc::var_os("HP3_WALK_DEBUG").is_some_and(|v| human || v == "all") {
                 eprintln!("walk: {} step {delta} from {before} hit {:?}", hp3_script::natives::object_path(vm, a), hit.map(|h| (h.time, h.normal, h.actor.map(|o| o.0))));
             }
             if let Some(hit) = hit
@@ -570,7 +570,7 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
             }
         }
         let floor_found = floor_below(vm, a, MAX_STEP_HEIGHT + 2.0);
-        if std::env::var("HP3_FLOOR_DEBUG").is_ok_and(|n| hp3_script::natives::object_path(vm, a).ends_with(&n)) {
+        if crate::envc::var("HP3_FLOOR_DEBUG").is_ok_and(|n| hp3_script::natives::object_path(vm, a).ends_with(&n)) {
             let at = vec(&get(vm, a, "Location"));
             let ext = extent(vm, a);
             let raw = world(vm).collision.trace_as(false, at, at - Vec3::Z * (MAX_STEP_HEIGHT + 2.0), ext, Some(a));
@@ -645,7 +645,7 @@ fn log_block(vm: &mut Vm<'_>, a: ObjId, hit: &Hit) {
     if world(vm).frame % 30 != 0 {
         return;
     }
-    let wanted = std::env::var_os("HP3_HIT_LOG").is_some() || std::path::Path::new("/sdcard/FlipendoHP3/hit.flag").exists();
+    let wanted = crate::envc::var_os("HP3_HIT_LOG").is_some() || std::path::Path::new("/sdcard/FlipendoHP3/hit.flag").exists();
     if !wanted {
         return;
     }
@@ -873,7 +873,7 @@ fn mount_note(vm: &mut Vm<'_>, line: String) {
 /// Where a pawn that met a wall at `hit` would climb to, if the wall is a ledge it can mount (see `try_mount`).
 pub fn mount_destination(vm: &mut Vm<'_>, a: ObjId, up: Vec3, hit: &Hit) -> Option<Vec3> {
     let max_height = get(vm, a, "MaxMountHeight").as_float();
-    let debug = std::env::var_os("HP3_MOUNT_DEBUG").is_some() && is_player_pawn(vm, a);
+    let debug = crate::envc::var_os("HP3_MOUNT_DEBUG").is_some() && is_player_pawn(vm, a);
     let player = blocked_as_player(vm, a);
     if max_height <= 0.0 || hit.normal.z <= -0.1 || hit.normal.z >= 0.17 {
         if debug {
@@ -1049,12 +1049,12 @@ fn fall(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         }
         set(vm, a, "Velocity", value(vel));
         let Some(hit) = move_and_slide(vm, a, vel * tick) else { continue };
-        if std::env::var_os("HP3_FALL_DEBUG").is_some() {
+        if crate::envc::var_os("HP3_FALL_DEBUG").is_some() {
             eprintln!("fall: {} vel {vel} step {} hit time {} normal {} actor {:?}", hp3_script::natives::object_path(vm, a), vel * tick, hit.time, hit.normal, hit.actor.map(|o| hp3_script::natives::object_path(vm, o)));
         }
         // Coming down on the edge of a step counts as landing on the step when its top lies under the middle.
         let landing = surface_normal(vm, a, &hit, hit.location, 24.0);
-        if std::env::var_os("HP3_FALL_DEBUG").is_some() {
+        if crate::envc::var_os("HP3_FALL_DEBUG").is_some() {
             eprintln!("fall: landing normal {landing} at {}", vec(&get(vm, a, "Location")));
         }
         // A bouncing actor (a bean tossed out of a chest) does not land: it hears `HitWall`, turns its velocity round
@@ -1395,7 +1395,7 @@ fn moving_brush(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         carry_riders(vm, a, here, to - here, here_rot, rot);
         if first_step && to != here {
             first_step = false;
-            if std::env::var_os("HP3_MOVER_LOG").is_some() {
+            if crate::envc::var_os("HP3_MOVER_LOG").is_some() {
                 let riders = riders_of(vm, a).len();
                 let name = hp3_script::natives::object_path(vm, a);
                 vm.log.push(format!("mover {name} moves with {riders} riders"));
@@ -1436,7 +1436,7 @@ pub fn step_actor(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     if crate::read(vm, a, s.physics).as_byte() == PHYS_NONE || crate::read(vm, a, s.is_static).as_bool() {
         return;
     }
-    if std::env::var("HP3_STEP_DEBUG").is_ok_and(|n| hp3_script::natives::object_path(vm, a).ends_with(&n)) {
+    if crate::envc::var("HP3_STEP_DEBUG").is_ok_and(|n| hp3_script::natives::object_path(vm, a).ends_with(&n)) {
         let at = vec(&get(vm, a, "Location"));
         let ext = extent(vm, a);
         let down = world(vm).collision.trace_as(false, at, at - Vec3::Z * 30.0, ext, Some(a));
@@ -1606,7 +1606,7 @@ pub fn step(vm: &mut Vm<'_>, dt: f32) {
         .filter(|&a| crate::read(vm, a, s.physics).as_byte() != PHYS_NONE && !crate::read(vm, a, s.is_static).as_bool())
         .collect();
     world(vm).actors = actors;
-    if std::env::var_os("HP3_MOVERS").is_some() && world(vm).frame == 100 {
+    if crate::envc::var_os("HP3_MOVERS").is_some() && world(vm).frame == 100 {
         let mut by: std::collections::BTreeMap<(u8, String), usize> = Default::default();
         for &a in &movers {
             let class = vm.db.objects.get(a).class.map(|c| vm.db.names.get(vm.db.get(c).name).to_string()).unwrap_or_default();
@@ -1697,7 +1697,7 @@ mod mount_tests {
 fn overlaps_world(col: &crate::collision::Collision, at: Vec3, extent: Vec3) -> bool {
     // A box that has sunk into a surface is behind its face, where a sweep finds nothing: the triangles are tested for
     // overlap as well.
-    col.trace_static(at + Vec3::Z * 0.1, at, extent).is_some_and(|h| h.time <= 0.0) || (std::env::var_os("HP3_NO_OVERLAP_TRI").is_none() && col.box_overlaps_triangles(at, extent, None))
+    col.trace_static(at + Vec3::Z * 0.1, at, extent).is_some_and(|h| h.time <= 0.0) || (crate::envc::var_os("HP3_NO_OVERLAP_TRI").is_none() && col.box_overlaps_triangles(at, extent, None))
 }
 
 /// A place close to `want` where a box of `extent` fits in the level: `want` itself, or a nudge out of the floor,
@@ -1787,7 +1787,7 @@ pub fn far_move(vm: &mut Vm<'_>, a: ObjId, to: Vec3, test: bool, attached_move: 
         return true;
     }
     let mut at = to;
-    if std::env::var_os("HP3_FAR_DEBUG").is_some() {
+    if crate::envc::var_os("HP3_FAR_DEBUG").is_some() {
         let ext = extent(vm, a);
         eprintln!("far_move {} to {to} collideworld {} ext {ext} overlaps {}", hp3_script::natives::object_path(vm, a), get(vm, a, "bCollideWorld").as_bool(), overlaps_world(&world(vm).collision, to, ext));
     }

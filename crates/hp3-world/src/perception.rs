@@ -21,9 +21,9 @@ pub fn tick(vm: &mut Vm<'_>) {
         return;
     }
     let Some(player_pawn) = world(vm).player.and_then(|pc| get(vm, pc, "Pawn").as_obj()) else { return };
-    let debug = std::env::var_os("HP3_SEE_DEBUG").is_some();
+    let debug = crate::envc::var_os("HP3_SEE_DEBUG").is_some();
     if get(vm, player_pawn, "Health").as_int() <= 0 || get(vm, player_pawn, "bHidden").as_bool() {
-        if std::env::var_os("HP3_SEE_DEBUG").is_some() {
+        if crate::envc::var_os("HP3_SEE_DEBUG").is_some() {
             eprintln!("see: player pawn health {} hidden {}", get(vm, player_pawn, "Health").as_int(), get(vm, player_pawn, "bHidden").as_bool());
         }
         return;
@@ -48,7 +48,7 @@ pub fn tick(vm: &mut Vm<'_>) {
         if let Some(state) = vm.state_of(c) {
             let (probes, not_ignored) = (vm.db.get(state).state_info.0, vm.db.get(state).state_info.1);
             let mask = (probes | vm.db.get(class).state_info.0) & not_ignored;
-            if std::env::var_os("HP3_SEE_DEBUG").is_some() {
+            if crate::envc::var_os("HP3_SEE_DEBUG").is_some() {
                 eprintln!("see: state {} mask {:#x}", vm.db.names.get(vm.db.get(state).name), mask);
             }
             if mask & (1u64 << SEE_PLAYER_PROBE) == 0 {

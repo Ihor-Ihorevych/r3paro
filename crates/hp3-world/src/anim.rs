@@ -422,17 +422,17 @@ fn channel_mut<'a>(vm: &'a mut Vm<'_>, actor: ObjId, index: usize) -> &'a mut Ch
 /// Starts a sequence on a channel. Returns false when the actor has no such sequence.
 fn play(vm: &mut Vm<'_>, actor: ObjId, seq: Name, rate: f32, tween: f32, channel: usize, looping: bool) -> bool {
     let Some(set) = set_of(vm, actor) else {
-        if std::env::var("HP3_ANIM_TRACE").is_ok() {
+        if crate::envc::var("HP3_ANIM_TRACE").is_ok() {
             eprintln!("anim: {actor:?} has no animation set for {}", vm.db.names.get(seq));
         }
         return false;
     };
     let name = vm.db.names.get(seq).to_string();
-    if std::env::var("HP3_ANIM_TRACE").is_ok() {
+    if crate::envc::var("HP3_ANIM_TRACE").is_ok() {
         eprintln!("anim: play {actor:?} {name} channel {channel} looping {looping}");
     }
     let Some(si) = set.find(&name) else {
-        if std::env::var("HP3_ANIM_TRACE").is_ok() {
+        if crate::envc::var("HP3_ANIM_TRACE").is_ok() {
             eprintln!("anim: {actor:?} has no sequence {name}");
         }
         return false;
@@ -444,7 +444,7 @@ fn play(vm: &mut Vm<'_>, actor: ObjId, seq: Name, rate: f32, tween: f32, channel
         let registered: Vec<String> = list.iter().map(|(t, e)| format!("{:.1}->{}", t * set.sequences[si].frames as f32, vm.db.names.get(*e))).collect();
         vm.log.push(format!("anim: play {name} rate {rate} channel {channel} frames {} notifies {registered:?}", set.sequences[si].frames));
     }
-    if std::env::var_os("HP3_NO_CHEST_PROBE").is_none() && vm.db.objects.get(actor).class.is_some_and(|c| vm.db.names.get(vm.db.get(c).name).to_ascii_lowercase().contains("chest")) {
+    if crate::envc::var_os("HP3_NO_CHEST_PROBE").is_none() && vm.db.objects.get(actor).class.is_some_and(|c| vm.db.names.get(vm.db.get(c).name).to_ascii_lowercase().contains("chest")) {
         chest_probe(vm, actor, &set, si);
     }
     let ch = channel_mut(vm, actor, channel);
@@ -545,7 +545,7 @@ pub fn tick_actor(vm: &mut Vm<'_>, actor: ObjId, dt: f32) {
                         for &(at, event) in list {
                             let f = at * frames;
                             if f > from && f <= to {
-                                if std::env::var_os("HP3_NOTIFY_DEBUG").is_some() {
+                                if crate::envc::var_os("HP3_NOTIFY_DEBUG").is_some() {
                                     eprintln!("notify: seq #{si} {:?} frames {frames} channel {ci} from {from:.2} to {to:.2} at {f:.2}", anims.sequences[si].name);
                                 }
                                 raised.push((event, ci));
@@ -582,13 +582,13 @@ pub fn tick_actor(vm: &mut Vm<'_>, actor: ObjId, dt: f32) {
                 vm.log.push(format!("anim: notify {name} raised on channel {channel}"));
             }
             world(vm).anim.actors.entry(a).or_default().last_notify_channel = channel;
-            if std::env::var("HP3_ANIM_TRACE").is_ok() {
+            if crate::envc::var("HP3_ANIM_TRACE").is_ok() {
                 eprintln!("anim: notify {name} on {a:?} channel {channel}");
             }
             fire(vm, a, &name, &mut []);
         }
         for ci in ended {
-            if std::env::var("HP3_ANIM_TRACE").is_ok() {
+            if crate::envc::var("HP3_ANIM_TRACE").is_ok() {
                 let c = get(vm, a, "Controller").as_obj();
                 eprintln!("anim: AnimEnd {a:?} channel {ci} controller {c:?}");
             }
@@ -978,7 +978,7 @@ pub fn register(vm: &mut Vm<'_>) {
         let Some(o) = this else { return Ok(Value::Bool(false)) };
         let name = vm.db.names.get(a[0].as_name()).to_string();
         let has = set_of(vm, o).is_some_and(|s| s.find(&name).is_some());
-        if std::env::var("HP3_ANIM_TRACE").is_ok() {
+        if crate::envc::var("HP3_ANIM_TRACE").is_ok() {
             let mesh = get(vm, o, "Mesh").as_obj().map(|m| hp3_script::natives::object_path(vm, m));
             eprintln!("anim: HasAnim {o:?} {name} -> {has} (mesh {mesh:?})");
         }
@@ -1118,7 +1118,7 @@ pub fn register(vm: &mut Vm<'_>) {
         let bone = vm.db.names.get(a[1].as_name()).to_ascii_lowercase();
         let found = get(vm, o, "Mesh").as_obj().and_then(|m| skeleton_of(vm, m)).is_some_and(|s| s.skeleton.find(&bone).is_some());
         if !found {
-            if std::env::var("HP3_ANIM_TRACE").is_ok() {
+            if crate::envc::var("HP3_ANIM_TRACE").is_ok() {
                 let mesh = get(vm, o, "Mesh").as_obj().map(|m| hp3_script::natives::object_path(vm, m));
                 eprintln!("anim: AttachToBone {bone} failed on {o:?} with mesh {mesh:?}");
             }
@@ -1207,7 +1207,7 @@ pub fn register(vm: &mut Vm<'_>) {
     // LinkMesh(NewMesh, optional bKeepAnim)
     vm.register("Actor.LinkMesh", |vm, this, a| {
         if let Some(o) = this {
-            if std::env::var("HP3_ANIM_TRACE").is_ok() {
+            if crate::envc::var("HP3_ANIM_TRACE").is_ok() {
                 let m = a.first().and_then(Value::as_obj).map(|m| hp3_script::natives::object_path(vm, m));
                 eprintln!("anim: LinkMesh {o:?} -> {m:?}");
             }
@@ -1237,7 +1237,7 @@ pub fn register(vm: &mut Vm<'_>) {
         let list = world(vm).anim.notifies.entry((set_key(&set), si)).or_default();
         if !list.iter().any(|&(t, e)| e == event && (t - at).abs() < 0.0001) {
             list.push((at, event));
-            if std::env::var("HP3_ANIM_TRACE").is_ok() {
+            if crate::envc::var("HP3_ANIM_TRACE").is_ok() {
                 eprintln!("anim: notify {name} at {at:.3} -> {} (set {:#x})", vm.db.names.get(event), set_key(&set));
             }
         }

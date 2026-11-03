@@ -1697,3 +1697,32 @@ pub fn map_object(vm: &mut Vm<'_>, r: ObjRef) -> Option<ObjId> {
     let map = world(vm).map.clone();
     vm.db.resolve_obj(&map, r)
 }
+
+/// Environment variables read once: the debug switches are asked for in code that runs for every actor every tick, and a read
+/// of the process environment is a scan (a few hundred nanoseconds on a phone).
+pub(crate) mod envc {
+    use std::cell::RefCell;
+    use std::ffi::OsString;
+
+    thread_local! {
+        static CACHE: RefCell<hp3_script::fx::FxHashMap<String, Option<OsString>>> = RefCell::new(Default::default());
+    }
+
+    pub fn var_os(name: &str) -> Option<OsString> {
+        CACHE.with(|c| {
+            if let Some(v) = c.borrow().get(name) {
+                return v.clone();
+            }
+            let v = std::env::var_os(name);
+            c.borrow_mut().insert(name.to_string(), v.clone());
+            v
+        })
+    }
+
+    pub fn var(name: &str) -> Result<String, std::env::VarError> {
+        match var_os(name) {
+            Some(v) => v.into_string().map_err(std::env::VarError::NotUnicode),
+            None => Err(std::env::VarError::NotPresent),
+        }
+    }
+}

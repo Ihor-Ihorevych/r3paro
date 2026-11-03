@@ -732,7 +732,7 @@ pub fn register(vm: &mut Vm<'_>) {
     // a trace per nav point, was the biggest cost of a busy hub). The same steps as the script: the nav point nearest
     // the pawn within 1500 (twice the distance for those behind the way to the hero) is the nearest one, but one that
     // a line from the pawn to it (a box of 0.3 of the pawn's size, level geometry only) reaches is preferred.
-    if std::env::var_os("HP3_NO_NAV_OVERRIDE").is_none() {
+    if crate::envc::var_os("HP3_NO_NAV_OVERRIDE").is_none() {
     vm.register_override("KWAIController.FindClosestNavPoint", |vm, this, _a| {
         let Some(c) = this else { return Ok(Value::Object(None)) };
         let Some(pawn) = get(vm, c, "Pawn").as_obj() else { return Ok(Value::Object(None)) };

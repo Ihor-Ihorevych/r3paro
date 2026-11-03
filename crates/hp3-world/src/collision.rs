@@ -322,7 +322,7 @@ impl Collision {
     fn uses_model(&self, actor: ObjId, extent: Vec3) -> bool {
         // Read once: this runs for many triangles in every trace.
         static NO_MODELS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *NO_MODELS.get_or_init(|| std::env::var_os("HP3_NO_MODELS").is_some()) {
+        if *NO_MODELS.get_or_init(|| crate::envc::var_os("HP3_NO_MODELS").is_some()) {
             return false;
         }
         self.modeled.get(&actor).is_some_and(|&(boxes, lines)| if extent == Vec3::ZERO { lines } else { boxes })
