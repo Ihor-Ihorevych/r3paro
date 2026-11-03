@@ -688,8 +688,8 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             let fps = frames as f32 / fps_timer.elapsed().as_secs_f32();
             if std::env::var_os("HP3_PERF").is_some() || cfg!(target_os = "android") {
                 eprintln!("perf: {fps:.0} fps, {}", perf.report());
-                let (skinned, plain, drawn) = hp3_engine::take_instance_times();
-                eprintln!("perf: instances: skinned meshes {skinned:.0} ms/s ({} per frame), other meshes {plain:.0} ms/s", drawn / perf.frames.max(1) as u64);
+                let (skinned, plain, drawn, transform, total) = hp3_engine::take_instance_times();
+                eprintln!("perf: instances: skinned meshes {skinned:.0} ms/s ({} per frame), other meshes {plain:.0} ms/s, placing drawn actors {transform:.0} ms/s, whole function {total:.0} ms/s", drawn / perf.frames.max(1) as u64);
                 // Where the world's ticks spent their time this second (ms per second), biggest first.
                 let mut phases: Vec<_> = std::mem::take(&mut hp3_world::world(&mut vm).tick_profile).into_iter().collect();
                 phases.sort_by(|a, b| b.1.cmp(&a.1));

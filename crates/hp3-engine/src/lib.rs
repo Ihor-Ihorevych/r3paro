@@ -424,12 +424,13 @@ fn vec3(v: &Value) -> Vec3 {
 
 /// Time spent this second making skinned meshes and plain ones for the frame, and how many skinned ones there were
 /// (nanoseconds, nanoseconds, count): read and cleared by `take_instance_times`.
-static INSTANCE_NS: [std::sync::atomic::AtomicU64; 3] = [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
+static INSTANCE_NS: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
 
-/// (skinned ms, plain ms, skinned actors drawn) since the last call.
-pub fn take_instance_times() -> (f32, f32, u64) {
+/// (skinned ms, plain ms, skinned actors drawn, placing the drawn actors ms, the whole function ms) since the last call.
+pub fn take_instance_times() -> (f32, f32, u64, f32, f32) {
     use std::sync::atomic::Ordering::Relaxed;
-    (INSTANCE_NS[0].swap(0, Relaxed) as f32 / 1e6, INSTANCE_NS[1].swap(0, Relaxed) as f32 / 1e6, INSTANCE_NS[2].swap(0, Relaxed))
+    let ms = |i: usize| INSTANCE_NS[i].swap(0, Relaxed) as f32 / 1e6;
+    (ms(0), ms(1), INSTANCE_NS[2].swap(0, Relaxed), ms(3), ms(4))
 }
 
 /// What the camera sees, to leave out skeletal meshes that are surely out of view.
@@ -469,6 +470,7 @@ pub fn actor_instances(
     view: Option<View>,
     hidden_pawn: Option<ObjId>,
 ) -> Vec<(Rc<GpuMesh>, Mat4, Vec3)> {
+    let t_total = std::time::Instant::now();
     let actors = world(vm).actors.clone();
     let mut out = Vec::new();
     // Most of a level's actors draw nothing (volumes, triggers, baked static meshes): they are told apart by reading
@@ -524,6 +526,7 @@ pub fn actor_instances(
             INSTANCE_NS[2].fetch_add(was_skinned as u64, Relaxed);
         }
         let Some(gpu) = found else { continue };
+        let t_rest = std::time::Instant::now();
         let loc = vec3(&get(vm, a, "Location")) + Vec3::Z * hp3_world::physics::view_offset(vm, a);
         let rot: Vec<i32> = get(vm, a, "Rotation").fields().iter().map(Value::as_int).collect();
         let rot = [rot.first().copied().unwrap_or(0), rot.get(1).copied().unwrap_or(0), rot.get(2).copied().unwrap_or(0)];
@@ -543,7 +546,9 @@ pub fn actor_instances(
         // Capped, so an actor next to a strong light is bright but not washed out.
         let light = lighting.map(|l| l.actor_light(loc).min(Vec3::splat(1.25)) * 0.5).unwrap_or(Vec3::splat(0.5));
         out.push((gpu, transform, light));
+        INSTANCE_NS[3].fetch_add(t_rest.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     }
+    INSTANCE_NS[4].fetch_add(t_total.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     out
 }
 
