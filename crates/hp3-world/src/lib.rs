@@ -96,6 +96,9 @@ pub struct World {
     pub travel_info: TravelInfo,
     actor_slots: HashMap<&'static str, Option<usize>>,
     scenery_classes: HashMap<hp3_script::StructId, bool>,
+    ambient_classes: HashMap<hp3_script::StructId, bool>,
+    /// Time an NPC ticked less often has not been given yet.
+    far_owed: HashMap<ObjId, f32>,
     /// Actors that something has been put on (their `Base` for someone), for `riders_of`: only those can carry anything. Filled
     /// from the level when first asked for, then by the places that set a base; `false` after a load, to be filled again.
     pub ever_base: hp3_script::fx::FxHashSet<ObjId>,
@@ -493,6 +496,8 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         controller_classes: Default::default(),
         tick_profile: Default::default(),
         scenery_classes: Default::default(),
+        ambient_classes: Default::default(),
+        far_owed: Default::default(),
         ever_base: Default::default(),
         ever_base_valid: false,
         tick_classes: Default::default(),
@@ -885,6 +890,9 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     let mut clock = std::time::Instant::now();
     let is_static = actor_slot(vm, "bStatic");
     let skip_static = std::env::var_os("HP3_TICK_STATICS").is_none();
+    // Where the player is (none while no pawn is controlled, as in a cutscene: then everyone ticks every frame).
+    let player_at = player.and_then(|pc| get(vm, pc, "Pawn").as_obj()).map(|p| physics::vec(&get(vm, p, "Location")));
+    let player_at = player_at.filter(|_| std::env::var_os("HP3_NO_FAR_THROTTLE").is_none() && !player_is_scripted(vm));
     for &a in &actors {
         if vm.db.objects.get(a).deleted {
             continue;
@@ -894,6 +902,15 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         if skip_static && Some(a) != player && read(vm, a, is_static).as_bool() && is_scenery(vm, a) {
             continue;
         }
+        // Ambient NPCs far from the player are ticked every few frames, with the time that passed meanwhile.
+        let dt = match far_period(vm, a, player_at, controller_class) {
+            1 => dt,
+            period if (world(vm).frame + far_key(vm, a) as u64) % period as u64 != 0 => {
+                *world(vm).far_owed.entry(a).or_default() += dt;
+                continue;
+            }
+            _ => dt + world(vm).far_owed.remove(&a).unwrap_or(0.0),
+        };
         if Some(a) == player {
             input::apply(vm, a, dt);
             fire(vm, a, "PlayerTick", &mut [Value::Float(dt)]);
@@ -992,6 +1009,62 @@ fn is_scenery(vm: &mut Vm<'_>, a: ObjId) -> bool {
     let answer = SCENERY.iter().any(|n| vm.db.find(n).is_some_and(|k| vm.is_child_of(class, k)));
     world(vm).scenery_classes.insert(class, answer);
     answer
+}
+
+/// Whether something other than the player's own controller has the player's pawn (a cutscene), or it has none.
+fn player_is_scripted(vm: &mut Vm<'_>) -> bool {
+    let Some(pc) = world(vm).player else { return true };
+    let Some(pawn) = get(vm, pc, "Pawn").as_obj() else { return true };
+    get(vm, pawn, "Controller").as_obj().is_some_and(|c| c != pc)
+}
+
+/// Whether a class is one of the ambient pawns that are ticked less often when far from the player: the hub's students and
+/// the spawners and books around them. Answers are remembered per class.
+fn is_ambient_pawn(vm: &mut Vm<'_>, class: hp3_script::StructId) -> bool {
+    if let Some(&known) = world(vm).ambient_classes.get(&class) {
+        return known;
+    }
+    const AMBIENT: [&str; 6] = ["HPGenericStudent", "HPGenericStudentSpawner", "KnightSpawner", "SaveBook", "MonsterBook", "FlyingBook"];
+    let answer = AMBIENT.iter().any(|n| vm.db.find(n).is_some_and(|k| vm.is_child_of(class, k)));
+    world(vm).ambient_classes.insert(class, answer);
+    answer
+}
+
+/// The pawn whose distance decides how often `a` is ticked: an ambient pawn itself, or the controller of one.
+fn far_owner(vm: &mut Vm<'_>, a: ObjId, controller_class: Option<hp3_script::StructId>) -> Option<ObjId> {
+    let class = vm.db.objects.get(a).class?;
+    if is_ambient_pawn(vm, class) {
+        return Some(a);
+    }
+    if is_controller(vm, controller_class, a) {
+        let pawn = get(vm, a, "Pawn").as_obj()?;
+        let pawn_class = vm.db.objects.get(pawn).class?;
+        return is_ambient_pawn(vm, pawn_class).then_some(pawn);
+    }
+    None
+}
+
+/// Every how many frames `a` is ticked: 1 for most; an ambient NPC (or its controller) is ticked every 2nd frame past
+/// `FAR_NEAR` from the player and every 4th past `FAR_FAR`.
+fn far_period(vm: &mut Vm<'_>, a: ObjId, player_at: Option<glam::Vec3>, controller_class: Option<hp3_script::StructId>) -> u32 {
+    const FAR_NEAR: f32 = 900.0;
+    const FAR_FAR: f32 = 1800.0;
+    let Some(from) = player_at else { return 1 };
+    let Some(owner) = far_owner(vm, a, controller_class) else { return 1 };
+    let d = (physics::vec(&get(vm, owner, "Location")) - from).length();
+    if d > FAR_FAR {
+        4
+    } else if d > FAR_NEAR {
+        2
+    } else {
+        1
+    }
+}
+
+/// The id the frame count is offset by for `a`, so an NPC and its controller are ticked in the same frames.
+fn far_key(vm: &mut Vm<'_>, a: ObjId) -> u32 {
+    let cc = vm.db.find("Controller");
+    far_owner(vm, a, cc).map_or(a.0 as u32, |o| o.0 as u32)
 }
 
 /// Whether an actor is a controller; answers are remembered per class.
