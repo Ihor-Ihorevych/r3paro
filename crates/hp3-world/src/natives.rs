@@ -211,6 +211,13 @@ pub fn spawn(vm: &mut Vm<'_>, spawner: Option<ObjId>, a: &[Value]) -> Result<Val
         let at = crate::physics::vec(&get(vm, obj, "Location"));
         crate::physics::far_move(vm, obj, at, false, false);
     }
+    // Before the game and its mutators exist (the game spawns its managers in its own PreBeginPlay) there is no one to ask whether
+    // an actor is relevant, and `Actor.PreBeginPlay` would take the missing answer for "no" and destroy it: the vendor, wizard card
+    // and bump line managers died at birth, and trading never ran. Such an actor is taken as game-relevant, which skips the question.
+    let game_ready = level.and_then(|li| get(vm, li, "Game").as_obj()).is_some_and(|g| get(vm, g, "BaseMutator").as_obj().is_some());
+    if !game_ready {
+        set(vm, obj, "bGameRelevant", Value::Bool(true));
+    }
     world(vm).actors.push(obj);
     {
         let class_text = vm.db.names.get(class_name).to_string();
