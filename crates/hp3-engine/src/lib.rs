@@ -287,6 +287,27 @@ pub struct MeshCache {
     pub uploads: usize,
 }
 
+/// What `Skinned::last` holds for an actor's animation state: its first channel's sequence and frame (with the bone
+/// controllers folded in), and a hash of the tween and the blended channels. The same value `skinned` works out when it poses.
+fn pose_key(anim: Option<&hp3_world::anim::ActorAnim>) -> (Option<usize>, u32, u64) {
+    let Some(a) = anim else { return (None, 0, 0) };
+    let first = a.channels.first();
+    let (seq, frame) = first.map(|c| (c.sequence, c.frame)).unwrap_or((None, 0.0));
+    let tween_bits = first.map_or(0, |c| if c.from.filter(|_| c.tween_t < c.tween_total).is_some() { c.tween_weight().to_bits() as u64 + 1 } else { 0 });
+    let mut layer_hash: u64 = 0;
+    for c in a.channels.iter().skip(1) {
+        if c.sequence.is_some() && c.alpha > 0.001 {
+            layer_hash = layer_hash
+                .wrapping_mul(1_000_003)
+                .wrapping_add(c.sequence.unwrap_or(0) as u64 + 1)
+                .wrapping_mul(31)
+                .wrapping_add(c.frame.to_bits() as u64 ^ (((c.alpha * c.tween_weight()).to_bits() as u64) << 20));
+        }
+    }
+    let turn_sum: i64 = a.bone_turns.iter().map(|t| t.1.iter().map(|&v| v as i64).sum::<i64>() + (t.2 * 1000.0) as i64).sum();
+    (seq, frame.to_bits() ^ (turn_sum as u32), layer_hash ^ tween_bits.wrapping_mul(0x9E37_79B9))
+}
+
 fn skin_refs(vm: &Vm<'_>, mp: &Rc<Package>, skins: &[Option<ObjId>]) -> Vec<(Rc<Package>, ObjRef)> {
     skins
         .iter()
@@ -332,6 +353,13 @@ impl MeshCache {
                 actor,
                 Skinned { mesh, skins: skins.to_vec(), gpu, geom, asset: asset.clone(), skeleton, bone_maps: HashMap::new(), last: None },
             );
+        }
+        // Most actors stand as they did last frame: that is found from the animation state in place, without copying it.
+        let key_now = pose_key(hp3_world::world(vm).anim.actors.get(&actor));
+        if let Some(s) = self.skinned.get(&actor)
+            && s.last == Some(key_now)
+        {
+            return Some(s.gpu.clone());
         }
         let state = hp3_world::world(vm)
             .anim
@@ -527,20 +555,19 @@ pub fn actor_instances(
         }
         let Some(gpu) = found else { continue };
         let t_rest = std::time::Instant::now();
-        let loc = vec3(&get(vm, a, "Location")) + Vec3::Z * hp3_world::physics::view_offset(vm, a);
-        let rot: Vec<i32> = get(vm, a, "Rotation").fields().iter().map(Value::as_int).collect();
-        let rot = [rot.first().copied().unwrap_or(0), rot.get(1).copied().unwrap_or(0), rot.get(2).copied().unwrap_or(0)];
-        let scale = match get(vm, a, "DrawScale").as_float() {
+        let loc = hp3_world::rd_vec(vm, a, "Location") + Vec3::Z * hp3_world::physics::view_offset(vm, a);
+        let rot = hp3_world::rd_rot(vm, a, "Rotation");
+        let scale = match hp3_world::rd(vm, a, "DrawScale").as_float() {
             0.0 => 1.0,
             s => s,
         };
-        let s3 = match get(vm, a, "DrawScale3D") {
-            v @ Value::Struct(_) => vec3(&v),
+        let s3 = match hp3_world::rd(vm, a, "DrawScale3D") {
+            v @ Value::Struct(_) => vec3(v),
             _ => Vec3::ONE,
         };
         let s3 = if s3 == Vec3::ZERO { Vec3::ONE } else { s3 };
         // Skeletal meshes stand on their feet; static meshes are placed at the actor's location.
-        let prepivot = if draw_type == DT_MESH { hp3_world::mesh_offset(vm, a) } else { vec3(&get(vm, a, "PrePivot")) };
+        let prepivot = if draw_type == DT_MESH { hp3_world::mesh_offset(vm, a) } else { hp3_world::rd_vec(vm, a, "PrePivot") };
         let transform = hp3_world::anim::hang_correction(vm, a) * Mat4::from_translation(loc + prepivot) * rotation_matrix(rot) * Mat4::from_scale(s3 * scale);
         // Actors are lit as a whole by the lights around them (half: the shader doubles it).
         // Capped, so an actor next to a strong light is bright but not washed out.

@@ -169,6 +169,24 @@ pub fn get(vm: &mut Vm<'_>, obj: ObjId, name: &str) -> Value {
     vm.db.objects.values(obj).and_then(|v| v.get(s).cloned()).unwrap_or_default()
 }
 
+/// A property's value looked at in place: like `get`, without copying it (a vector's copy is an allocation), for code that
+/// reads many properties of many actors every frame. The slot is found first, then the value borrowed.
+pub fn rd<'v>(vm: &'v mut Vm<'_>, obj: ObjId, name: &str) -> &'v Value {
+    let s = slot(vm, obj, name);
+    read(&*vm, obj, s)
+}
+
+/// `rd` of a vector property.
+pub fn rd_vec(vm: &mut Vm<'_>, obj: ObjId, name: &str) -> glam::Vec3 {
+    vec_of(rd(vm, obj, name))
+}
+
+/// `rd` of a rotator property, as its three angles.
+pub fn rd_rot(vm: &mut Vm<'_>, obj: ObjId, name: &str) -> [i32; 3] {
+    let f = rd(vm, obj, name).fields();
+    [f.first().map_or(0, Value::as_int), f.get(1).map_or(0, Value::as_int), f.get(2).map_or(0, Value::as_int)]
+}
+
 pub fn set(vm: &mut Vm<'_>, obj: ObjId, name: &str, value: Value) {
     let Some(s) = slot(vm, obj, name) else { return };
     if let Some(v) = vm.db.objects.values_mut(obj).and_then(|v| v.get_mut(s)) {
@@ -1144,10 +1162,10 @@ pub(crate) fn native_asset(map: &Package, index: usize, chain: &[String]) -> Opt
 /// `bCollideWorld`) a drop by the collision height, five more units while the actor has physics. Characters
 /// that do not align (Harry, Ron, Hermione) get the same drop from their `PrePivot` of -42.
 pub fn mesh_offset(vm: &mut Vm<'_>, a: ObjId) -> glam::Vec3 {
-    let mut offset = vec_of(&get(vm, a, "PrePivot")) + vec_of(&get(vm, a, "SavedPrePivot"));
-    let align = get(vm, a, "bAlignBottomAlways").as_bool() || (get(vm, a, "bAlignBottom").as_bool() && get(vm, a, "bCollideWorld").as_bool());
+    let mut offset = rd_vec(vm, a, "PrePivot") + rd_vec(vm, a, "SavedPrePivot");
+    let align = rd(vm, a, "bAlignBottomAlways").as_bool() || (rd(vm, a, "bAlignBottom").as_bool() && rd(vm, a, "bCollideWorld").as_bool());
     if align {
-        let scale = match get(vm, a, "DrawScale").as_float() {
+        let scale = match rd(vm, a, "DrawScale").as_float() {
             0.0 => 1.0,
             s => s,
         };
