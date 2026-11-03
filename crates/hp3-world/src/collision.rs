@@ -103,6 +103,8 @@ pub struct MoverShape {
     to_local: glam::Mat4,
     /// Radius of the triangles around the mover's origin, to skip far traces.
     radius: f32,
+    /// `world_bounds` for the current placement, kept up to date by `place`.
+    bounds: (Vec3, Vec3),
 }
 
 impl MoverShape {
@@ -117,7 +119,9 @@ impl MoverShape {
             radius = radius.max(v[0].length()).max(v[1].length()).max(v[2].length());
             tris.push(Tri { v: *v, normal: normal.normalize(), actor: Some(actor) });
         }
-        MoverShape { actor, tris, to_world: glam::Mat4::IDENTITY, to_local: glam::Mat4::IDENTITY, radius }
+        let mut shape = MoverShape { actor, tris, to_world: glam::Mat4::IDENTITY, to_local: glam::Mat4::IDENTITY, radius, bounds: (Vec3::ZERO, Vec3::ZERO) };
+        shape.bounds = shape.world_bounds();
+        shape
     }
 
     /// The box around the mover's triangles in the world as it is now.
@@ -141,6 +145,7 @@ impl MoverShape {
     pub fn place(&mut self, to_world: glam::Mat4) {
         self.to_world = to_world;
         self.to_local = to_world.inverse();
+        self.bounds = self.world_bounds();
     }
 
     /// Where a box swept from `start` to `end` first meets the mover's triangles.
@@ -162,6 +167,11 @@ impl MoverShape {
         let origin = self.to_world.w_axis.truncate();
         let reach = self.radius + extent.length() + start.distance(end);
         if origin.distance(start) > reach + 1.0 {
+            return None;
+        }
+        // The box around the move against the mover's box as it stands (a big, thin mover is mostly empty sphere).
+        let pad = extent.length() + 1.0;
+        if (start.min(end) - pad).cmpgt(self.bounds.1).any() || (start.max(end) + pad).cmplt(self.bounds.0).any() {
             return None;
         }
         let (ls, le) = (self.to_local.transform_point3(start), self.to_local.transform_point3(end));
@@ -240,6 +250,11 @@ pub fn cylinder_trace(center: Vec3, radius: f32, half_height: f32, start: Vec3, 
     Some(Hit { time: t0, location: start + d * t0, normal, actor: None })
 }
 
+thread_local! {
+    /// Per triangle, the stamp of the last trace that tried it, and the last stamp given out.
+    static TRI_STAMPS: std::cell::Cell<(Vec<u32>, u32)> = const { std::cell::Cell::new((Vec::new(), 0)) };
+}
+
 fn cell(v: f32) -> i32 {
     (v / CELL).floor() as i32
 }
@@ -302,7 +317,9 @@ impl Collision {
     /// Whether a trace with this extent uses `actor`'s collision model instead of its triangles: boxes when the
     /// extent is not zero, lines when it is.
     fn uses_model(&self, actor: ObjId, extent: Vec3) -> bool {
-        if std::env::var_os("HP3_NO_MODELS").is_some() {
+        // Read once: this runs for many triangles in every trace.
+        static NO_MODELS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *NO_MODELS.get_or_init(|| std::env::var_os("HP3_NO_MODELS").is_some()) {
             return false;
         }
         self.modeled.get(&actor).is_some_and(|&(boxes, lines)| if extent == Vec3::ZERO { lines } else { boxes })
@@ -373,7 +390,17 @@ impl Collision {
             }
         }
         // Triangles in the cells the swept box covers.
-        let mut seen = hp3_script::fx::FxHashSet::default();
+        // A triangle in several cells is tried once: marked with this trace's stamp in a table kept between traces.
+        let mut stamps = TRI_STAMPS.take();
+        if stamps.0.len() < self.tris.len() {
+            stamps.0.resize(self.tris.len(), 0);
+        }
+        stamps.1 = stamps.1.wrapping_add(1);
+        if stamps.1 == 0 {
+            stamps.0.fill(0);
+            stamps.1 = 1;
+        }
+        let stamp = stamps.1;
         let swept = cells_swept(start, end, extent);
         for key in &swept {
             let Some(list) = self.grid.get(key) else { continue };
@@ -381,21 +408,23 @@ impl Collision {
                 if self.passes_world {
                     break;
                 }
-                if !seen.insert(i) {
+                if std::mem::replace(&mut stamps.0[i as usize], stamp) == stamp {
                     continue;
                 }
                 let t = &self.tris[i as usize];
                 if t.actor.is_some() && t.actor == ignore {
                     continue;
                 }
+                // The triangle's own test first: most candidates are nowhere near the move, and the per-actor lookups
+                // below only ever skip a triangle that would be hit.
+                let Some(h) = tri_trace(t, start, end, extent) else { continue };
                 if t.actor.is_some_and(|a| self.inactive.contains(&a) || !self.blocks_mover(a) || self.uses_model(a, extent) || self.starts_in_volume(a, start)) {
                     continue;
                 }
-                if let Some(h) = tri_trace(t, start, end, extent) {
-                    keep(h);
-                }
+                keep(h);
             }
         }
+        TRI_STAMPS.set(stamps);
         // Static meshes traced through their collision models.
         let mut seen_models = hp3_script::fx::FxHashSet::default();
         for key in &swept {
