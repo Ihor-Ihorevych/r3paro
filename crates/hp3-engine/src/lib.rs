@@ -479,21 +479,24 @@ pub fn actor_instances(
         hp3_world::actor_slot(vm, "DrawType"),
         hp3_world::actor_slot(vm, "bStatic"),
     );
+    let (owner_slot, base_slot) = (hp3_world::actor_slot(vm, "Owner"), hp3_world::actor_slot(vm, "Base"));
     for a in actors {
         if vm.db.objects.get(a).deleted {
             continue;
         }
-        if let Some(pawn) = hidden_pawn
-            && (a == pawn || get(vm, a, "Owner").as_obj() == Some(pawn) || get(vm, a, "Base").as_obj() == Some(pawn))
-        {
-            continue;
-        }
+        // What cannot draw is ruled out first, by plain reads: most of a level's actors are such, and the pawn check below
+        // would otherwise look two properties up by name for each.
         let draw_type = hp3_world::read(vm, a, draw_slot).as_byte();
         if draw_type != DT_MESH && (draw_type != DT_STATIC_MESH || hp3_world::read(vm, a, static_slot).as_bool()) {
             continue;
         }
         // `bSpecialHidden` keeps an actor out of the normal view (the animation helper of a ledge climb has it).
         if hp3_world::read(vm, a, hidden).as_bool() || hp3_world::read(vm, a, special_hidden).as_bool() {
+            continue;
+        }
+        if let Some(pawn) = hidden_pawn
+            && (a == pawn || hp3_world::read(vm, a, owner_slot).as_obj() == Some(pawn) || hp3_world::read(vm, a, base_slot).as_obj() == Some(pawn))
+        {
             continue;
         }
         let mesh = if draw_type == DT_MESH { get(vm, a, "Mesh").as_obj() } else { get(vm, a, "StaticMesh").as_obj() };
