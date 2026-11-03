@@ -107,23 +107,62 @@ pub struct Lighting {
     pub ambient: GVec3,
     /// Ambient light of each zone, by the zone actor's export index in the map.
     pub zone_ambient: HashMap<usize, GVec3>,
+    /// The lights found by place, for `actor_light`: made when first asked for (the lights are not changed after that).
+    actor_grid: std::cell::OnceCell<ActorLightGrid>,
 }
 
+/// The lights that reach each square of the ground plane (each light by its place in `Lighting::lights`' order), and the
+/// lights that reach everywhere (sunlight).
+struct ActorLightGrid {
+    cells: HashMap<(i32, i32), Vec<u32>>,
+    everywhere: Vec<u32>,
+    lights: Vec<LightSource>,
+}
+
+const ACTOR_LIGHT_CELL: f32 = 512.0;
+
 impl Lighting {
+    fn build_actor_grid(&self) -> ActorLightGrid {
+        let lights: Vec<LightSource> = self.lights.values().copied().collect();
+        let mut cells: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
+        let mut everywhere = Vec::new();
+        let cell = |v: f32| (v / ACTOR_LIGHT_CELL).floor() as i32;
+        for (i, l) in lights.iter().enumerate() {
+            if l.direction.is_some() {
+                everywhere.push(i as u32);
+                continue;
+            }
+            for x in cell(l.position.x - l.radius)..=cell(l.position.x + l.radius) {
+                for y in cell(l.position.y - l.radius)..=cell(l.position.y + l.radius) {
+                    cells.entry((x, y)).or_default().push(i as u32);
+                }
+            }
+        }
+        ActorLightGrid { cells, everywhere, lights }
+    }
+
     /// Light on an actor at `p`, from every direction (no surface angle): one level for the whole actor.
     pub fn actor_light(&self, p: GVec3) -> GVec3 {
-        self.ambient
-            + self
-                .lights
-                .values()
-                .map(|l| match l.direction {
-                    Some(_) => l.color * 0.5,
-                    None => {
-                        let d = l.position.distance(p);
-                        if d >= l.radius { GVec3::ZERO } else { l.color * (1.0 - (d / l.radius).powi(2)) }
-                    }
-                })
-                .sum::<GVec3>()
+        let grid = self.actor_grid.get_or_init(|| self.build_actor_grid());
+        // Only the lights whose reach covers p's square can add anything (the rest add exactly zero), in the order
+        // of the full list so that the sum comes out the same.
+        let mut near: Vec<u32> = grid.everywhere.clone();
+        if let Some(list) = grid.cells.get(&((p.x / ACTOR_LIGHT_CELL).floor() as i32, (p.y / ACTOR_LIGHT_CELL).floor() as i32)) {
+            near.extend_from_slice(list);
+        }
+        near.sort_unstable();
+        let mut sum = GVec3::ZERO;
+        for i in near {
+            let l = &grid.lights[i as usize];
+            sum += match l.direction {
+                Some(_) => l.color * 0.5,
+                None => {
+                    let d = l.position.distance(p);
+                    if d >= l.radius { GVec3::ZERO } else { l.color * (1.0 - (d / l.radius).powi(2)) }
+                }
+            };
+        }
+        self.ambient + sum
     }
 
     /// Light at a point from every light in range (no shadows), plus ambient.
@@ -681,5 +720,46 @@ fn add_actors(b: &mut Batcher<'_, '_>, map: &Rc<Package>, include: &dyn Fn(usize
             b.scene.stats.mesh_triangles += section.num_faces as usize;
         }
         b.scene.stats.static_meshes += 1;
+    }
+}
+
+#[cfg(test)]
+mod actor_light_tests {
+    use super::*;
+
+    /// The light on an actor as the plain loop over every light gives it.
+    fn plain(lighting: &Lighting, p: GVec3) -> GVec3 {
+        lighting.ambient
+            + lighting
+                .lights
+                .values()
+                .map(|l| match l.direction {
+                    Some(_) => l.color * 0.5,
+                    None => {
+                        let d = l.position.distance(p);
+                        if d >= l.radius { GVec3::ZERO } else { l.color * (1.0 - (d / l.radius).powi(2)) }
+                    }
+                })
+                .sum::<GVec3>()
+    }
+
+    #[test]
+    fn grid_matches_the_plain_loop() {
+        let mut seed = 12345u32;
+        let mut next = |range: f32| {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 8) as f32 / (1u32 << 24) as f32 * range
+        };
+        let mut lighting = Lighting { ambient: GVec3::new(0.1, 0.1, 0.1), ..Default::default() };
+        for i in 0..400 {
+            let position = GVec3::new(next(8000.0) - 4000.0, next(8000.0) - 4000.0, next(600.0));
+            let direction = (i % 97 == 0).then(|| GVec3::new(0.0, 0.0, -1.0));
+            lighting.lights.insert(i, LightSource { position, color: GVec3::new(next(1.0), next(1.0), next(1.0)), radius: 100.0 + next(1500.0), direction });
+        }
+        for _ in 0..2000 {
+            let p = GVec3::new(next(9000.0) - 4500.0, next(9000.0) - 4500.0, next(600.0));
+            let (a, b) = (lighting.actor_light(p), plain(&lighting, p));
+            assert!((a - b).abs().max_element() < 1e-4, "{a} vs {b} at {p}");
+        }
     }
 }
