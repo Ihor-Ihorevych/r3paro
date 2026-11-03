@@ -329,10 +329,11 @@ fn spawn(config: &Config, rng: &mut Rng, origin: Vec3, rot: Mat3, fill_age: f32,
             }
             if all || shape == 2 {
                 let p = config.polar.pick(rng);
-                let (around, down) = (p.x * std::f32::consts::PI / 32768.0, p.y * std::f32::consts::PI / 32768.0);
-                // With the first angle near 0 and the second sweeping all the way round, as the hippogriff rings have them, the
-                // points make a circle standing across the actor's forward axis, which a flight goes through.
-                at += Vec3::new(p.z * around.sin() * down.sin(), p.z * around.cos() * down.sin(), p.z * down.cos());
+                // The first angle is the elevation above the horizon and the second the heading around it (65536ths of a turn), so
+                // a fixed first angle and a sweeping second one is a flat ring or arc on the ground: the dementors' circle, the ground
+                // halo, the mist rings. (They were once taken the other way round, which stood all of those up like hoops.)
+                let (pitch, yaw) = (p.x * std::f32::consts::PI / 32768.0, p.y * std::f32::consts::PI / 32768.0);
+                at += Vec3::new(p.z * pitch.cos() * yaw.cos(), p.z * pitch.cos() * yaw.sin(), p.z * pitch.sin());
             }
             at
         }
@@ -475,6 +476,9 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
                     c.beam, c.disabled, c.max_particles, c.pps, c.initial_pps, c.auto_initial, c.lifetime.0, c.lifetime.1,
                     c.start_size.0[0].0, c.start_size.0[0].1, c.material, c.blend, c.coordinates, s.particles.len()
                 );
+                for p in s.particles.iter().take(3) {
+                    eprintln!("   particle at {:?} (emitter origin {:?}) size {:?} age {:.1}/{:.1}", p.pos, origin, p.size, p.age, p.life);
+                }
                 eprintln!(
                     "   size scale {:?} x{} colour scale {:?} opacity {} fade in {:?} out {:?} mult {:?}",
                     c.size_scale, c.size_repeats, c.color_scale, c.opacity, c.fade_in, c.fade_out, c.color_mult.0.map(|r| (r.0, r.1))

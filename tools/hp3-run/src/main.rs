@@ -85,6 +85,13 @@ fn list_class(vm: &mut hp3_script::Vm<'_>) {
                             format!("{} ({class})", hp3_script::natives::object_path(vm, t))
                         });
                         println!("      emitter {i}: texture {tex_desc:?} blend {:?}", hp3_world::get(vm, eo, "ColorMultiplierRange"));
+                        if std::env::var_os("HP3_LIST_EMITTER_PROPS").is_some() {
+                            let mut line = String::new();
+                            for n in ["MaxParticles", "InitialParticlesPerSecond", "ParticlesPerSecond", "AutomaticInitialSpawning", "StartLocationShape", "SphereRadiusRange", "StartLocationRange", "LifetimeRange", "StartLocationPolarRange", "ColorScale", "ColorMultiplierRange", "FadeOutStartTime", "FadeInEndTime", "StartSizeRange", "Opacity", "RespawnDeadParticles", "Disabled", "UseCollision", "SecondsBeforeInactive", "ParticleLifeTime"] {
+                                line.push_str(&format!(" {n}={:?}", hp3_world::get(vm, eo, n)));
+                            }
+                            println!("        {line}");
+                        }
                     }
                 }
             }
