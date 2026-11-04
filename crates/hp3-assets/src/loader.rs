@@ -32,6 +32,19 @@ pub struct Image {
     pub translucent: bool,
 }
 
+/// How a material uses its texture's alpha channel.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MaterialBlend {
+    #[default]
+    Opaque,
+    /// Pixels with alpha below one half are cut out.
+    Cutout,
+    /// Blended by the texture's alpha.
+    Alpha,
+    /// Added to what is behind, by the texture's alpha.
+    Additive,
+}
+
 /// A global identity for an export: package name (lower case) and export index.
 pub type ObjKey = (String, usize);
 
@@ -100,6 +113,65 @@ impl<'s> Loader<'s> {
             return i.clone();
         }
         let img = self.decode_image(pkg, index).map(Rc::new);
+        self.images.borrow_mut().insert(k, img.clone());
+        img
+    }
+
+    /// How the wrappers on the way from a material reference down to its texture use the texture's alpha channel:
+    /// a `FinalBlend` with `AlphaTest` (Harry's hair) or a `Shader` with masked output cuts the surface out; a `Shader`
+    /// with an `Opacity` map blends it (the salamanders' flame cards); translucent output adds it.
+    pub fn material_blend(&self, pkg: &Rc<Package>, r: ObjRef) -> MaterialBlend {
+        let Some((mut p, mut i)) = self.set.resolve(pkg, r) else { return MaterialBlend::Opaque };
+        for _ in 0..16 {
+            let chain = self.set.export_chain(&p, i);
+            if chain.iter().any(|c| c.eq_ignore_ascii_case("Texture")) {
+                return MaterialBlend::Opaque;
+            }
+            let kind = chain.first().map(String::as_str).unwrap_or("");
+            let (found, next) = self
+                .with_tags(&p, i, |tags, _| {
+                    let found = if kind.eq_ignore_ascii_case("FinalBlend") {
+                        props::find(&p, tags, "AlphaTest", 0).is_some_and(|t| t.bool_value).then_some(MaterialBlend::Cutout)
+                    } else if kind.eq_ignore_ascii_case("Shader") {
+                        let output = props::find(&p, tags, "OutputBlending", 0).and_then(|t| t.as_u8()).unwrap_or(0);
+                        let opacity = props::find(&p, tags, "Opacity", 0).is_some();
+                        match output {
+                            1 => Some(MaterialBlend::Cutout),
+                            3 | 5 => Some(MaterialBlend::Additive),
+                            0 if opacity => Some(MaterialBlend::Alpha),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    let next = ["Diffuse", "Material"].iter().find_map(|n| props::find(&p, tags, n, 0).and_then(|t| t.as_obj()));
+                    (found, next)
+                })
+                .unwrap_or((None, None));
+            if let Some(found) = found {
+                return found;
+            }
+            let Some(next) = next else { return MaterialBlend::Opaque };
+            let Some((np, ni)) = self.set.resolve(&p, next) else { return MaterialBlend::Opaque };
+            p = np;
+            i = ni;
+        }
+        MaterialBlend::Opaque
+    }
+
+    /// Like `image`, for a texture whose alpha channel is used (see `material_blend`): the alpha is kept.
+    pub fn cutout_image(&self, pkg: &Rc<Package>, index: usize) -> Option<Rc<Image>> {
+        let k = key(pkg, index);
+        if let Some(Some(i)) = self.images.borrow().get(&k)
+            && i.masked
+        {
+            return Some(i.clone());
+        }
+        let img = self.decode_image_alpha(pkg, index, true).map(|mut i| {
+            i.masked = true;
+            i.translucent = false;
+            Rc::new(i)
+        });
         self.images.borrow_mut().insert(k, img.clone());
         img
     }

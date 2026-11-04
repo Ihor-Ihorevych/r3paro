@@ -161,9 +161,11 @@ fn rasterize(vm: &mut Vm<'_>, family: &str, px: u32) -> Option<ObjId> {
 /// bitmap fonts).
 pub fn need_sap_font(vm: &mut Vm<'_>) -> bool {
     // The language is kept in lower case. Ukrainian, Belarusian, Georgian, Latvian, German and Spanish (est) are Flipendo's translations.
-    // The subtitles always stay in the edition language (Russian voices), so a Russian edition needs them whatever the menus speak.
+    // The subtitles stay in the language of the voices, so Russian voices need them whatever the menus speak (English voices do
+    // not: an install that has both draws English with HP3's own fonts).
+    let russian_voices = vm.db.set.language == "rus";
     let w = world(vm);
-    matches!(w.config.language.as_str(), "rus" | "cze" | "pol" | "tha" | "jap" | "kor" | "sim" | "tra" | "ukr" | "bel" | "geo" | "lav" | "ger" | "est") || matches!(w.config.edition.as_str(), "rus")
+    matches!(w.config.language.as_str(), "rus" | "cze" | "pol" | "tha" | "jap" | "kor" | "sim" | "tra" | "ukr" | "bel" | "geo" | "lav" | "ger" | "est") || russian_voices
 }
 
 /// The system font standing in for a bitmap font of the size class in `bitmap_name` (Tiny, Small, Med, Big,

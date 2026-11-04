@@ -795,7 +795,12 @@ pub fn console(vm: &mut Vm<'_>, command: &str) -> String {
                 world(vm).pending_travel = Some(format!("{}?load={slot}", saved.map));
             }
         }
-        _ => {}
+        // The option menus' commands (`GAMMA`, `set ini:...`, `get ...`): they answer with a value.
+        _ => {
+            if let Some(answer) = crate::settings::console(vm, verb, &rest) {
+                return answer;
+            }
+        }
     }
     String::new()
 }

@@ -4,7 +4,7 @@
 use std::rc::Rc;
 
 use glam::{Mat4, Vec3};
-use hp3_assets::loader::{self, Loader, ObjKey};
+use hp3_assets::loader::{self, Loader, MaterialBlend, ObjKey};
 use hp3_assets::Asset;
 use hp3_package::{ObjRef, Package};
 
@@ -13,6 +13,8 @@ use crate::scene::{rotation_matrix, Vertex};
 /// Triangles of one mesh section, with the texture its material resolves to.
 pub struct MeshBatch {
     pub texture: Option<ObjKey>,
+    /// How the section uses its texture's alpha channel.
+    pub blend: MaterialBlend,
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
     /// Skeletal meshes: the mesh point each vertex is placed at, for re-posing.
@@ -25,10 +27,16 @@ pub struct MeshGeom {
     pub local: Mat4,
 }
 
-fn texture(loader: &Loader<'_>, pkg: &Rc<Package>, material: ObjRef) -> Option<ObjKey> {
+fn texture(loader: &Loader<'_>, pkg: &Rc<Package>, material: ObjRef) -> Option<(ObjKey, MaterialBlend)> {
     let (tp, ti) = loader.base_texture(pkg, material)?;
-    loader.image(&tp, ti)?;
-    Some(loader::key(&tp, ti))
+    // A material that uses the texture's alpha channel (Harry's hair, the salamanders' flames) keeps it.
+    let blend = loader.material_blend(pkg, material);
+    if blend == MaterialBlend::Opaque {
+        loader.image(&tp, ti)?;
+    } else {
+        loader.cutout_image(&tp, ti)?;
+    }
+    Some((loader::key(&tp, ti), blend))
 }
 
 /// Builds the geometry of a static or skeletal mesh export; `skins` override section materials by index.
@@ -68,8 +76,8 @@ pub fn build_posed(
                     });
                     indices.push(out);
                 }
-                let tex = skin(si).or_else(|| materials.get(si).copied().and_then(|m| texture(loader, pkg, m)));
-                batches.push(MeshBatch { texture: tex, vertices, indices, points: Vec::new() });
+                let (tex, blend) = skin(si).or_else(|| materials.get(si).copied().and_then(|m| texture(loader, pkg, m))).unzip();
+                batches.push(MeshBatch { texture: tex, blend: blend.unwrap_or_default(), vertices, indices, points: Vec::new() });
             }
             Some(MeshGeom { batches, local: Mat4::IDENTITY })
         }
@@ -108,8 +116,8 @@ pub fn build_posed(
                 // A texture index past the mesh's textures takes the last one (Hermione's hair has ten material
                 // slots and nine textures; the last is the hair). A heuristic, not checked against HP3.
                 let tex_index = h.materials.get(mi).map(|m| m.1 as usize).unwrap_or(mi).min(h.textures.len().saturating_sub(1));
-                let tex = skin(mi).or_else(|| h.textures.get(tex_index).and_then(|t| texture(loader, pkg, *t)));
-                batches.push(MeshBatch { texture: tex, vertices, indices, points });
+                let (tex, blend) = skin(mi).or_else(|| h.textures.get(tex_index).and_then(|t| texture(loader, pkg, *t))).unzip();
+                batches.push(MeshBatch { texture: tex, blend: blend.unwrap_or_default(), vertices, indices, points });
             }
             let scale = Vec3::new(h.mesh_scale.x, h.mesh_scale.y, h.mesh_scale.z);
             let origin = Vec3::new(h.mesh_origin.x, h.mesh_origin.y, h.mesh_origin.z);

@@ -165,7 +165,17 @@ pub fn skeleton_of(vm: &mut Vm<'_>, mesh: ObjId) -> Option<Rc<MeshSkeleton>> {
         let to_actor = hp3_anim::mesh_to_actor(&m);
         let bottom = m.points.iter().map(|q| to_actor.transform_point3(glam::Vec3::new(q.x, q.y, q.z)).z).fold(f32::MAX, f32::min);
         let bottom = if bottom.is_finite() && bottom != f32::MAX { bottom } else { 0.0 };
-        Some(Rc::new(MeshSkeleton { skeleton: hp3_anim::Skeleton::from_mesh(&m, &p), to_actor, bottom }))
+        let skeleton = hp3_anim::Skeleton::from_mesh(&m, &p);
+        // A mesh stands on its feet in the pose it idles in, which need not be its bind pose (a hippogriff is modelled
+        // around its middle but animated from its hooves).
+        let idle = vm.db.resolve_obj(&p, m.default_anim).and_then(|anim| load_set(vm, anim)).and_then(|set| {
+            let seq = set.find("idle")?;
+            let map = set.bone_map(&skeleton);
+            let skin = hp3_anim::pose(&skeleton, Some((&*set, &map[..])), Some(seq), 0.0);
+            let low = hp3_anim::skin_points(&m, &skin).iter().map(|q| to_actor.transform_point3(*q).z).fold(f32::MAX, f32::min);
+            (low.is_finite() && low != f32::MAX).then_some(low)
+        });
+        Some(Rc::new(MeshSkeleton { skeleton, to_actor, bottom: idle.unwrap_or(bottom) }))
     })();
     world(vm).anim.skeletons.insert(mesh, s.clone());
     s
@@ -318,9 +328,23 @@ fn bone_matrix_in(vm: &mut Vm<'_>, a: ObjId, bone: &str, actor: glam::Mat4) -> O
 }
 
 fn bone_matrix_extra(vm: &mut Vm<'_>, a: ObjId, bone: &str, actor: glam::Mat4, extra: &[(usize, glam::Mat4)]) -> Option<glam::Mat4> {
+    let (skel, bones) = pose_bones(vm, a, extra)?;
+    let index = skel.skeleton.find(bone)?;
+    Some(actor * skel.to_actor * *bones.get(index)?)
+}
+
+/// Where the bones of an actor's current pose are in mesh space (the root bone left out when there are others): the
+/// places emitters on a skeletal mesh spawn their particles at.
+pub fn mesh_bone_origins(vm: &mut Vm<'_>, a: ObjId) -> Option<Vec<glam::Vec3>> {
+    let (_, bones) = pose_bones(vm, a, &[])?;
+    let skip = usize::from(bones.len() > 1);
+    Some(bones.iter().skip(skip).map(|m| m.w_axis.truncate()).collect())
+}
+
+/// An actor's skeleton and the mesh-space matrix of each bone in its current pose.
+fn pose_bones(vm: &mut Vm<'_>, a: ObjId, extra: &[(usize, glam::Mat4)]) -> Option<(Rc<MeshSkeleton>, Vec<glam::Mat4>)> {
     let mesh = get(vm, a, "Mesh").as_obj()?;
     let skel = skeleton_of(vm, mesh)?;
-    let index = skel.skeleton.find(bone)?;
     let set = set_of(vm, a);
     let channels = world(vm).anim.actors.get(&a).map(|x| x.channels.clone()).unwrap_or_default();
     let base = channels.first().map(|c| hp3_anim::Base {
@@ -354,7 +378,7 @@ fn bone_matrix_extra(vm: &mut Vm<'_>, a: ObjId, bone: &str, actor: glam::Mat4, e
         }
         None => hp3_anim::bones(&skel.skeleton, None, None, 0.0),
     };
-    Some(actor * skel.to_actor * *bones.get(index)?)
+    Some((skel, bones))
 }
 
 /// `m` without scale: unit axes, same origin.

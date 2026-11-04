@@ -285,6 +285,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         .or_else(|| config.get("URL", "LocalMap").map(|m| m.trim_end_matches(".unr").to_string()))
         .unwrap_or_else(|| "HP3_Adv1Express".to_string());
     let set = PackageSet::open(root)?;
+    eprintln!("language: texts {}, voices {}", config.language, set.language);
     let pkg = set.get(&map)?;
 
     let loader = Loader::new(&set);
@@ -310,6 +311,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
     let sdl = sdl3::init()?;
     let video = sdl.video()?;
     // No audio device is not fatal: the game runs silent.
+    let mut settings_seen = u32::MAX;
     let mut audio = if std::env::var_os("HP3_NO_AUDIO").is_none() { audio::AudioSystem::new(&sdl, &root) } else { None };
     if audio.is_none() {
         eprintln!("audio: off");
@@ -608,6 +610,15 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         // A level switch the game asked for: the new level is loaded and its scene built.
         if hp3_world::world(&mut vm).quit_requested {
             break 'main;
+        }
+        // The option menus changed something (or a level just made a new world): the picture and the sound follow.
+        let settings = hp3_world::world(&mut vm).settings_version;
+        if settings != settings_seen {
+            settings_seen = settings;
+            presenter.set_look(hp3_world::settings::look(&vm));
+            if let Some(a) = &mut audio {
+                a.apply_settings(&vm);
+            }
         }
         if let Some(url) = hp3_world::take_travel(&mut vm).or_else(|| pending_level.take()) {
             let t = Instant::now();

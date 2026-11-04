@@ -44,6 +44,9 @@ impl Input {
                     }
                 } else if !value.trim().is_empty() {
                     input.bindings.insert(key.to_ascii_lowercase(), value.to_string());
+                } else {
+                    // A key the player cleared in the options stays cleared over the install's own binding.
+                    input.bindings.remove(&key.to_ascii_lowercase());
                 }
             }
         }
@@ -59,6 +62,21 @@ impl Input {
         }
         input.button_names = names;
         input
+    }
+
+    /// The command line a key runs (empty for none), as the ini writes it.
+    pub fn binding(&self, key: &str) -> String {
+        self.bindings.get(&key.to_ascii_lowercase()).cloned().unwrap_or_default()
+    }
+
+    /// Gives a key another command line.
+    pub fn set_binding(&mut self, key: &str, binding: &str) {
+        let k = key.to_ascii_lowercase();
+        if binding.trim().is_empty() {
+            self.bindings.remove(&k);
+        } else {
+            self.bindings.insert(k, binding.to_string());
+        }
     }
 
     pub fn key_down(&mut self, key: &str) {
@@ -126,8 +144,10 @@ pub fn apply(vm: &mut Vm<'_>, pc: ObjId, dt: f32) {
             keys.push((k.clone(), 1.0));
         }
     }
-    keys.push(("mousex".into(), input.mouse.0));
-    keys.push(("mousey".into(), -input.mouse.1));
+    // The options menu's mouse speed and invert (`PlayerInput`); the engine's own default of 3 is the speed the axes were tuned for.
+    let (speed, invert_y) = crate::settings::mouse_look(vm, pc);
+    keys.push(("mousex".into(), input.mouse.0 * speed));
+    keys.push(("mousey".into(), if invert_y { input.mouse.1 } else { -input.mouse.1 } * speed));
     for (key, amount) in &keys {
         let mouse = key == "mousex" || key == "mousey";
         for cmd in input.commands(key) {
@@ -242,5 +262,71 @@ fn allow_bypass(vm: &mut Vm<'_>) {
         if vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, class)) && get(vm, a, "bNoBypass").as_bool() {
             crate::set(vm, a, "bNoBypass", Value::Bool(false));
         }
+    }
+}
+
+/// The name of a key by its code (`KEYNAME <code>`, as the Input options list the keys): the names the ini's bindings use.
+pub fn key_name(code: u32) -> &'static str {
+    const F: [&str; 24] = [
+        "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12", "F13", "F14", "F15", "F16", "F17", "F18", "F19", "F20", "F21", "F22", "F23", "F24",
+    ];
+    const DIGITS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+    const LETTERS: [&str; 26] = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"];
+    const PAD: [&str; 10] = ["NumPad0", "NumPad1", "NumPad2", "NumPad3", "NumPad4", "NumPad5", "NumPad6", "NumPad7", "NumPad8", "NumPad9"];
+    match code {
+        1 => "LeftMouse",
+        2 => "RightMouse",
+        4 => "MiddleMouse",
+        8 => "Backspace",
+        9 => "Tab",
+        13 => "Enter",
+        16 => "Shift",
+        17 => "Ctrl",
+        18 => "Alt",
+        19 => "Pause",
+        20 => "CapsLock",
+        27 => "Escape",
+        32 => "Space",
+        33 => "PageUp",
+        34 => "PageDown",
+        35 => "End",
+        36 => "Home",
+        37 => "Left",
+        38 => "Up",
+        39 => "Right",
+        40 => "Down",
+        45 => "Insert",
+        46 => "Delete",
+        48..=57 => DIGITS[(code - 48) as usize],
+        65..=90 => LETTERS[(code - 65) as usize],
+        96..=105 => PAD[(code - 96) as usize],
+        106 => "GreyStar",
+        107 => "GreyPlus",
+        109 => "GreyMinus",
+        110 => "NumPadPeriod",
+        111 => "GreySlash",
+        112..=135 => F[(code - 112) as usize],
+        144 => "NumLock",
+        145 => "ScrollLock",
+        160 => "LShift",
+        161 => "RShift",
+        162 => "LControl",
+        163 => "RControl",
+        164 => "LAlt",
+        165 => "RAlt",
+        186 => "Semicolon",
+        187 => "Equals",
+        188 => "Comma",
+        189 => "Minus",
+        190 => "Period",
+        191 => "Slash",
+        192 => "Tilde",
+        219 => "LeftBracket",
+        220 => "Backslash",
+        221 => "RightBracket",
+        222 => "SingleQuote",
+        239 => "MouseWheelUp",
+        240 => "MouseWheelDown",
+        _ => "",
     }
 }

@@ -156,3 +156,19 @@ cargo run --release -p hp3-pkg -- check <HP3 folder>
 HP3_DIR=<HP3 folder> cargo test --release
 cargo run --release -p hp3-run -- levels <HP3 folder>
 ```
+
+## Languages
+
+An install can hold several languages at once. The player's choice (`HP3_LANGUAGE`, or `.flipendo-language` next to the game, which the
+launcher writes; `int` is English) picks both the texts and the voices; with no choice the install's own language (`Default.ini`) stands.
+
+- **Texts:** `System/<Package>.<lang>` (`HpMenu.int`, `HpMenu.rus`...), read by `Config::localize`; a missing text falls back to `int`, then to the
+  edition's own language.
+- **Voices and localised art:** packages named `<name>.<lang>_<ext>` (`alldialog.rus_uax`, `HP3_Menu.rus_utx`) beat the plain `<name>.<ext>` (English)
+  when that language is chosen (`PackageSet::open_with_language`). A language with no package of its own (the text-only translations) keeps what
+  the install offers; a package only another language provides is used all the same.
+- **What differs between the retail English and the Russian edition:** the five text files (`BumpDialog`, `HpDialog`, `HpMenu`, `SaveTips`,
+  `ScriptTimes`), `sounds/alldialog` (the dub), `HP3_Menu.utx` and `HP3_Gameplay.utx` (the title logo and some menu art). `kwGame.u` differs in
+  20 bytes of the copy-protection digest only. Everything else is identical.
+- **Subtitle fonts:** Russian voices need system fonts for the subtitles whatever the menus speak; English voices use HP3's own fonts.
+- **Phone:** the launcher's own English `HpMenu.int` / `SaveTips.int` (made for a Russian-only install) are not copied when `HpDialog.int` is there.

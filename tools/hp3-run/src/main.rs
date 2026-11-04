@@ -74,6 +74,10 @@ fn list_class(vm: &mut hp3_script::Vm<'_>) {
                 info.push_str(&format!(" {n}={v}"));
             }
             let state = vm.state_of(a).map(|s| vm.db.names.get(vm.db.structs[s.0 as usize].name).to_string());
+            if std::env::var_os("HP3_LIST_OFFSET").is_some() {
+                let off = hp3_world::mesh_offset(vm, a);
+                info.push_str(&format!(" mesh_offset_z={:.2}", off.z));
+            }
             println!("  {name} state {state:?}{info}");
             // Emitter actors: what each emitter shows (its texture object and class).
             if let hp3_script::Value::Array(list) = hp3_world::get(vm, a, "Emitters") {
@@ -103,7 +107,19 @@ fn list_class(vm: &mut hp3_script::Vm<'_>) {
 fn follow_travel(vm: &mut hp3_script::Vm<'_>) -> bool {
     let Some(url) = hp3_world::take_travel(vm) else { return false };
     match hp3_world::travel(vm, &url) {
-        Ok(m) => println!("travelled to {} ({url})", m.name),
+        Ok(m) => {
+            println!("travelled to {} ({url})", m.name);
+            if std::env::var_os("HP3_TRAVEL_DEBUG").is_some() {
+                let pc = hp3_world::world(vm).player;
+                let pawn = pc.and_then(|pc| hp3_world::get(vm, pc, "Pawn").as_obj());
+                println!("after travel: player {pc:?} pawn {pawn:?}");
+                if let Some(pawn) = pawn {
+                    let name = vm.db.names.intern("Jellybean");
+                    let count = hp3_world::fire(vm, pawn, "GetInventoryCount", &mut [hp3_script::Value::Name(name)]);
+                    println!("after travel: beans {count:?}");
+                }
+            }
+        }
         Err(e) => println!("travel to {url} failed: {e}"),
     }
     true
@@ -229,6 +245,15 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             println!("  box {ext} trace {what}: {:?}", hit.map(|h| (h.time * d.length(), h.normal, h.actor.is_some())));
         }
     }
+    // HP3_POLYS=x0,y0,z0,x1,y1,z1: every BSP polygon of the level that touches that box, with its flags.
+    if let Ok(spec) = std::env::var("HP3_POLYS") {
+        let v: Vec<f32> = spec.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        if v.len() == 6 {
+            for line in hp3_world::world(&mut vm).collision.debug_polygons_in(glam::Vec3::new(v[0], v[1], v[2]), glam::Vec3::new(v[3], v[4], v[5])) {
+                println!("{line}");
+            }
+        }
+    }
     // HP3_PROBE_GRID=x0,y0,x1,y1,step,z_top,z_bottom: where a thin box dropped from z_top lands, over a grid.
     if let Ok(spec) = std::env::var("HP3_PROBE_GRID") {
         let v: Vec<f32> = spec.split(',').filter_map(|p| p.trim().parse().ok()).collect();
@@ -283,6 +308,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                 }
             }
             println!("mesh offset {:?}", hp3_world::mesh_offset(&mut vm, a));
+            println!("view offset {}", hp3_world::physics::view_offset(&mut vm, a));
         }
     }
     // HP3_PROBE_GATE=cx,cy,dirx,diry,reach,lat0,lat1,latstep,z0,z1,zstep: lines (a pawn's box, HP3_PROBE_EXT) are driven through
@@ -395,6 +421,10 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                     let state = vm.state_of(a).map(|s| vm.db.names.get(vm.db.get(s).name).to_string()).unwrap_or_default();
                     let at = hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "Location"));
                     let rot: Vec<i32> = hp3_world::get(&mut vm, a, "Rotation").fields().iter().map(hp3_script::Value::as_int).collect();
+                    if std::env::var_os("HP3_WATCH_DRAWN").is_some() {
+                        // Where the actor is drawn: its location plus the view offset the stair smoothing keeps.
+                        println!("drawn {frame} {path} z {:.2} offset {:.2} drawn_z {:.2}", at.z, hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "SavedPrePivot")).z, at.z + hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "SavedPrePivot")).z);
+                    }
                     println!(
                         "watch {frame} {path} label {:?} coll {} at {at} rot {rot:?} state {state} phys {:?} hidden {:?} draw {:?} mesh {:?} vel {:?} accel {:?}",
                         { let t = hp3_world::get(&mut vm, a, "Tag").as_name(); format!("{:?} tag {}", hp3_world::get(&mut vm, a, "Label"), vm.db.names.get(t)) },
@@ -489,6 +519,33 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                 }
             }
         }
+        // HP3_WALK=<actor name>:<x>,<y>,<z>><x>,<y>@<tick>: from that tick the actor is put at the first point and pushed towards the
+        // second (flat), as a mover that wants to go there would, to see whether it gets there.
+        if let Ok(spec) = std::env::var("HP3_WALK")
+            && let Some((what, tick)) = spec.split_once('@')
+            && let Ok(tick) = tick.parse::<u32>()
+            && frame >= tick
+            && let Some((name, route)) = what.split_once(':')
+            && let Some((from, to)) = route.split_once('>')
+        {
+            let num = |s: &str| -> Vec<f32> { s.split(',').filter_map(|v| v.parse().ok()).collect() };
+            let (from, to) = (num(from), num(to));
+            let actors = hp3_world::world(&mut vm).actors.clone();
+            for a in actors {
+                if !hp3_script::natives::object_path(&vm, a).ends_with(&format!(".{name}")) {
+                    continue;
+                }
+                if frame == tick && from.len() == 3 {
+                    hp3_world::physics::far_move(&mut vm, a, glam::Vec3::new(from[0], from[1], from[2]), false, false);
+                }
+                if to.len() == 2 {
+                    let at = hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "Location"));
+                    let dir = (glam::Vec2::new(to[0], to[1]) - at.truncate()).normalize_or_zero();
+                    let accel = hp3_script::Value::Struct(vec![hp3_script::Value::Float(dir.x * 389.0), hp3_script::Value::Float(dir.y * 389.0), hp3_script::Value::Float(0.0)].into());
+                    hp3_world::set(&mut vm, a, "Acceleration", accel);
+                }
+            }
+        }
         // HP3_UNCOLLIDE=<actor name>[,<actor name>]@<tick>: those actors stop colliding (as SetCollision(false) does).
         if let Ok(spec) = std::env::var("HP3_UNCOLLIDE")
             && let Some((names, tick)) = spec.split_once('@')
@@ -542,7 +599,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
         if let Ok(spec) = std::env::var("HP3_GIVE_BEANS")
             && let Some((n, tick)) = spec.split_once('@')
             && let (Ok(n), Ok(tick)) = (n.parse::<i32>(), tick.parse::<u32>())
-            && (frame == tick || frame == tick + 5 || (frame > tick && frame % 100 == 0))
+            && (frame == tick || frame == tick + 5 || ((frame > tick || std::env::var_os("HP3_BEANS_WATCH").is_some()) && frame % 100 == 0))
             && let Some(pc) = hp3_world::world(&mut vm).player
         {
             if frame == tick {
@@ -774,12 +831,88 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
         // HP3_OPEN_PAGE=Package.Class opens that menu page; HP3_MENU_KEYS=27,... then presses those keys (27 = Escape) on it
         // and says whether the menu is still up (the trade page must close on Escape).
         if let Ok(page) = std::env::var("HP3_OPEN_PAGE") {
-            let opened = hp3_world::interactions::open_menu(&mut vm, &page);
+            let opened = if page == "ShowMenu" {
+                println!("  strGameMenu={:?} save={:?}", hp3_world::get(&mut vm, pc, "strGameMenu"), hp3_world::get(&mut vm, pc, "strGameMenuSave"));
+                hp3_world::fire(&mut vm, pc, "ShowMenu", &mut []);
+                true
+            } else {
+                hp3_world::interactions::open_menu(&mut vm, &page)
+            };
             for _ in 0..10 {
                 hp3_world::tick(&mut vm, 1.0 / 60.0);
             }
-            let _ = hp3_world::canvas::render(&mut vm, 1280, 720);
+            let tiles = hp3_world::canvas::render(&mut vm, 1280, 720);
+            if std::env::var_os("HP3_TILES").is_some() {
+                for t in &tiles {
+                    let m = t.material.map(|m| hp3_script::natives::object_path(&vm, m)).unwrap_or_default();
+                    println!("  tile {m} at ({:.0},{:.0}) {:.0}x{:.0}", t.x, t.y, t.w, t.h);
+                }
+            }
             println!("  opened {page}: {opened}, menu up {}", hp3_world::gui::menu_open(&mut vm));
+            if let Ok(click) = std::env::var("HP3_CLICK") {
+                let v: Vec<f32> = click.split(',').filter_map(|s| s.parse().ok()).collect();
+                if v.len() == 2 {
+                    hp3_world::interactions::open_menu(&mut vm, "HGame.HPPageExit");
+                    for _ in 0..5 { hp3_world::tick(&mut vm, 1.0 / 60.0); }
+                    let _ = hp3_world::canvas::render(&mut vm, 1280, 720);
+                    if let Some(top) = hp3_world::gui::top_menu(&mut vm) {
+                        for n in ["btnYes", "btnNo", "lblMsg"] {
+                            let o = hp3_world::get(&mut vm, top, n).as_obj();
+                            let name = o.map(|o| vm.db.names.get(vm.db.objects.get(o).name).to_string());
+                            println!("  {n} = {name:?}");
+                        }
+                    }
+                    for l in hp3_world::gui::dump(&mut vm).iter().filter(|l| !l.starts_with(' ')) {
+                        println!("  before click: {l}");
+                    }
+                    if std::env::var_os("HP3_TRACE_CALLS").is_none() { vm.trace_calls = Some("page".into()); }
+                    hp3_world::gui::mouse_move(&mut vm, v[0], v[1]);
+                    hp3_world::gui::mouse_button(&mut vm, true);
+                    hp3_world::gui::mouse_button(&mut vm, false);
+                    for _ in 0..10 { hp3_world::tick(&mut vm, 1.0 / 60.0); }
+                    for l in hp3_world::gui::dump(&mut vm).iter().filter(|l| !l.starts_with(' ')) {
+                        println!("  after click: {l}");
+                    }
+                }
+            }
+            // HP3_CLICKS=x,y;x,y... moves to each point and clicks it (drawing between, so the controls have their boxes);
+            // HP3_DRAG=x,y>x,y drags from one point to the other. The settings the menu changed are printed after each step.
+            if let Ok(clicks) = std::env::var("HP3_CLICKS") {
+                for step in clicks.split(';') {
+                    let v: Vec<f32> = step.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                    if v.len() != 2 { continue; }
+                    let _ = hp3_world::canvas::render(&mut vm, 1280, 720);
+                    hp3_world::gui::mouse_move(&mut vm, v[0], v[1]);
+                    hp3_world::gui::mouse_button(&mut vm, true);
+                    hp3_world::gui::mouse_button(&mut vm, false);
+                    for _ in 0..10 { hp3_world::tick(&mut vm, 1.0 / 60.0); }
+                    let tiles = hp3_world::canvas::render(&mut vm, 1280, 720);
+                    println!("  click {step}: {} tiles, settings v{}", tiles.len(), hp3_world::world(&mut vm).settings_version);
+                    if std::env::var_os("HP3_TILES").is_some() {
+                        for t in tiles.iter().filter(|t| t.material.is_some() && t.y > 230.0 && t.y < 700.0) {
+                            let m = t.material.map(|m| hp3_script::natives::object_path(&vm, m)).unwrap_or_default();
+                            println!("    tile {m} at ({:.0},{:.0}) {:.0}x{:.0}", t.x, t.y, t.w, t.h);
+                        }
+                    }
+                }
+            }
+            if let Ok(drag) = std::env::var("HP3_DRAG") {
+                let pts: Vec<Vec<f32>> = drag.split('>').map(|p| p.split(',').filter_map(|s| s.trim().parse().ok()).collect()).collect();
+                if pts.len() == 2 && pts.iter().all(|p| p.len() == 2) {
+                    let _ = hp3_world::canvas::render(&mut vm, 1280, 720);
+                    hp3_world::gui::mouse_move(&mut vm, pts[0][0], pts[0][1]);
+                    hp3_world::gui::mouse_button(&mut vm, true);
+                    hp3_world::gui::mouse_move(&mut vm, pts[1][0], pts[1][1]);
+                    hp3_world::gui::mouse_button(&mut vm, false);
+                    for _ in 0..5 { hp3_world::tick(&mut vm, 1.0 / 60.0); }
+                    println!("  drag {drag}: settings v{}", hp3_world::world(&mut vm).settings_version);
+                }
+            }
+            if std::env::var_os("HP3_DUMP_GUI").is_some() {
+                for l in hp3_world::gui::dump(&mut vm) {
+                    println!("  gui {l}");
+                }
+            }
             for key in std::env::var("HP3_MENU_KEYS").unwrap_or_default().split(',').filter_map(|k| k.trim().parse::<u8>().ok()) {
                 hp3_world::gui::key(&mut vm, key, 1, 0.0);
                 hp3_world::gui::key(&mut vm, key, 3, 0.0);
@@ -865,9 +998,26 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             }
             // HP3_CLICK=x,y clicks the menu at that point of a 1280x720 screen.
             if let Ok(c) = std::env::var("HP3_CLICK") {
-                let _ = hp3_world::canvas::render(&mut vm, 1280, 720);
+                let tiles = hp3_world::canvas::render(&mut vm, 1280, 720);
+            if std::env::var_os("HP3_TILES").is_some() {
+                for t in &tiles {
+                    let m = t.material.map(|m| hp3_script::natives::object_path(&vm, m)).unwrap_or_default();
+                    println!("  tile {m} at ({:.0},{:.0}) {:.0}x{:.0}", t.x, t.y, t.w, t.h);
+                }
+            }
                 for click in c.split(';') {
                     let v: Vec<f32> = click.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                    if let Some(top) = hp3_world::gui::top_menu(&mut vm) {
+                        for n in ["btnYes", "btnNo", "lblMsg"] {
+                            let o = hp3_world::get(&mut vm, top, n).as_obj();
+                            let name = o.map(|o| vm.db.names.get(vm.db.objects.get(o).name).to_string());
+                            println!("  {n} = {name:?}");
+                        }
+                    }
+                    for l in hp3_world::gui::dump(&mut vm).iter().filter(|l| !l.starts_with(' ')) {
+                        println!("  before click: {l}");
+                    }
+                    if std::env::var_os("HP3_TRACE_CALLS").is_none() { vm.trace_calls = Some("page".into()); }
                     hp3_world::gui::mouse_move(&mut vm, v[0], v[1]);
                     hp3_world::gui::mouse_button(&mut vm, true);
                     hp3_world::gui::mouse_button(&mut vm, false);
@@ -881,7 +1031,13 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                             }
                         }
                     }
-                    let _ = hp3_world::canvas::render(&mut vm, 1280, 720);
+                    let tiles = hp3_world::canvas::render(&mut vm, 1280, 720);
+            if std::env::var_os("HP3_TILES").is_some() {
+                for t in &tiles {
+                    let m = t.material.map(|m| hp3_script::natives::object_path(&vm, m)).unwrap_or_default();
+                    println!("  tile {m} at ({:.0},{:.0}) {:.0}x{:.0}", t.x, t.y, t.w, t.h);
+                }
+            }
                 }
                 let gui = hp3_world::world(&mut vm).viewport.gui.unwrap();
                 let ac = hp3_world::get(&mut vm, gui, "ActiveControl");

@@ -45,6 +45,8 @@ pub struct ActorBox {
     pub is_pawn: bool,
     /// The actor's `Owner`: an owner and what it owns do not stop each other (a thrown pebble passes its thrower).
     pub owner: Option<ObjId>,
+    /// `CollideType` box: the box's own axes in the world (it turns with the actor). None: an upright cylinder.
+    pub axes: Option<[Vec3; 3]>,
 }
 
 #[derive(Default)]
@@ -107,9 +109,19 @@ pub struct MoverShape {
     radius: f32,
     /// `world_bounds` for the current placement, kept up to date by `place`.
     bounds: (Vec3, Vec3),
+    /// The mesh's simple collision model in mover space, and its `UseSimpleBoxCollision` / `UseSimpleLineCollision`: it answers
+    /// the traces those allow in place of the triangles, as it does for a static mesh actor that stands still.
+    model: Option<(std::rc::Rc<Model>, bool, bool)>,
 }
 
 impl MoverShape {
+    /// Gives the shape its mesh's collision model (planes already scaled into mover space).
+    pub fn set_model(&mut self, model: Model, boxes: bool, lines: bool) {
+        if !model.nodes.is_empty() && (boxes || lines) {
+            self.model = Some((std::rc::Rc::new(model), boxes, lines));
+        }
+    }
+
     pub fn new(actor: ObjId, triangles: &[[Vec3; 3]]) -> MoverShape {
         let mut tris = Vec::new();
         let mut radius: f32 = 0.0;
@@ -121,7 +133,7 @@ impl MoverShape {
             radius = radius.max(v[0].length()).max(v[1].length()).max(v[2].length());
             tris.push(Tri { v: *v, normal: normal.normalize(), actor: Some(actor) });
         }
-        let mut shape = MoverShape { actor, tris, to_world: glam::Mat4::IDENTITY, to_local: glam::Mat4::IDENTITY, radius, bounds: (Vec3::ZERO, Vec3::ZERO) };
+        let mut shape = MoverShape { actor, tris, to_world: glam::Mat4::IDENTITY, to_local: glam::Mat4::IDENTITY, radius, bounds: (Vec3::ZERO, Vec3::ZERO), model: None };
         shape.bounds = shape.world_bounds();
         shape
     }
@@ -177,6 +189,21 @@ impl MoverShape {
             return None;
         }
         let (ls, le) = (self.to_local.transform_point3(start), self.to_local.transform_point3(end));
+        // The simple collision model, when this kind of trace is one it answers.
+        static NO_MODELS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if let Some((model, boxes, lines)) = &self.model
+            && !*NO_MODELS.get_or_init(|| crate::envc::var_os("HP3_NO_MODELS").is_some() || crate::envc::var_os("HP3_NO_MOVER_MODELS").is_some())
+            && if extent == Vec3::ZERO { *lines } else { *boxes }
+        {
+            let mut out = None;
+            bsp_trace(model, 0, 0.0, 1.0, ls, le, ls, le, extent, Vec3::Z, &mut out);
+            return out.map(|h| Hit {
+                time: h.time,
+                location: start + (end - start) * h.time,
+                normal: self.to_world.transform_vector3(h.normal).normalize_or_zero(),
+                actor: Some(self.actor),
+            });
+        }
         let mut best: Option<Hit> = None;
         for t in &self.tris {
             if let Some(h) = tri_trace(t, ls, le, extent)
@@ -562,6 +589,36 @@ impl Collision {
         false
     }
 
+    /// For debugging: every BSP polygon of the level model whose bounds touch the box `lo`..`hi`, as text lines (flags, brush
+    /// actor, plane, bounds), to see what the level holds in a place whatever the collision does with it.
+    pub fn debug_polygons_in(&self, lo: Vec3, hi: Vec3) -> Vec<String> {
+        let Some(model) = &self.model else { return Vec::new() };
+        let mut out = Vec::new();
+        for (i, node) in model.nodes.iter().enumerate() {
+            if node.surf < 0 || node.num_vertices == 0 {
+                continue;
+            }
+            let (mut blo, mut bhi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+            for k in 0..node.num_vertices as i32 {
+                let Some(v) = model.verts.get((node.vert_pool + k) as usize) else { continue };
+                let Some(p) = model.points.get(v.vertex as usize) else { continue };
+                let p = Vec3::new(p.x, p.y, p.z);
+                blo = blo.min(p);
+                bhi = bhi.max(p);
+            }
+            if blo.cmpgt(hi).any() || bhi.cmplt(lo).any() {
+                continue;
+            }
+            let flags = model.surfs.get(node.surf as usize).map(|s| s.poly_flags).unwrap_or(0);
+            let actor = model.surfs.get(node.surf as usize).map(|s| s.actor.0).unwrap_or(0);
+            out.push(format!(
+                "node {i} flags {flags:#010x} actor ref {actor} normal ({:.2},{:.2},{:.2}) bounds ({:.0},{:.0},{:.0})..({:.0},{:.0},{:.0})",
+                node.plane.normal.x, node.plane.normal.y, node.plane.normal.z, blo.x, blo.y, blo.z, bhi.x, bhi.y, bhi.z
+            ));
+        }
+        out
+    }
+
     /// Whether a box at `at` overlaps solid geometry.
     pub fn encroaches(&self, at: Vec3, extent: Vec3, ignore: Option<ObjId>) -> bool {
         self.trace(at + Vec3::Z * 0.1, at, extent, ignore).is_some_and(|h| h.time <= 0.0)
@@ -575,8 +632,11 @@ fn plane_of(model: &Model, node: usize) -> (Vec3, f32) {
 }
 
 fn node_passes_through(model: &Model, node: usize) -> bool {
+    // HP3_NOT_SOLID_SOLID=1 (a debugging switch) lets the not-solid surfaces block too, to see what they would add.
+    static NOT_SOLID_BLOCKS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let passes = if *NOT_SOLID_BLOCKS.get_or_init(|| std::env::var_os("HP3_NOT_SOLID_SOLID").is_some()) { PF_PORTAL } else { PF_NOT_SOLID | PF_PORTAL };
     let surf = model.nodes[node].surf;
-    surf >= 0 && model.surfs.get(surf as usize).is_some_and(|s| s.poly_flags & (PF_NOT_SOLID | PF_PORTAL) != 0)
+    surf >= 0 && model.surfs.get(surf as usize).is_some_and(|s| s.poly_flags & passes != 0)
 }
 
 /// Whether a point (in the model's space) is inside its solid: walk the BSP to a leaf; ending behind a
@@ -713,9 +773,73 @@ fn segment_distance(p: Vec3, a: Vec3, b: Vec3) -> f32 {
     (p - (a + ab * t)).length()
 }
 
+/// A moving box swept against an actor whose collision is a box turned with it (`CollideType` box: the invisible walls and
+/// ramps along stairs). Everything is done in the blocker's own frame, where it is axis aligned: the mover's box (upright
+/// in the world) becomes the box around its turned corners, the blocker is grown by it, and the segment is clipped by the
+/// slabs. A mover that already overlaps is only stopped when its end is deeper in than its start, so it can walk out.
+fn oriented_box_trace(b: &ActorBox, axes: [Vec3; 3], start: Vec3, end: Vec3, extent: Vec3) -> Option<Hit> {
+    let local = |p: Vec3| {
+        let d = p - b.center;
+        Vec3::new(d.dot(axes[0]), d.dot(axes[1]), d.dot(axes[2]))
+    };
+    // Half size of the turned mover box along each blocker axis.
+    let reach = Vec3::new(
+        axes[0].x.abs() * extent.x + axes[0].y.abs() * extent.y + axes[0].z.abs() * extent.z,
+        axes[1].x.abs() * extent.x + axes[1].y.abs() * extent.y + axes[1].z.abs() * extent.z,
+        axes[2].x.abs() * extent.x + axes[2].y.abs() * extent.y + axes[2].z.abs() * extent.z,
+    );
+    let grown = b.extent + reach;
+    let (ls, le) = (local(start), local(end));
+    let d = le - ls;
+    let (mut t_enter, mut t_exit) = (f32::MIN, 1.0f32);
+    let mut normal_local = Vec3::ZERO;
+    for i in 0..3 {
+        let (s, v) = (ls[i], d[i]);
+        if v.abs() < 1e-9 {
+            if s.abs() >= grown[i] {
+                return None;
+            }
+            continue;
+        }
+        let (mut t0, mut t1) = ((-grown[i] - s) / v, (grown[i] - s) / v);
+        if t0 > t1 {
+            std::mem::swap(&mut t0, &mut t1);
+        }
+        if t0 > t_enter {
+            t_enter = t0;
+            normal_local = Vec3::ZERO;
+            normal_local[i] = -v.signum();
+        }
+        t_exit = t_exit.min(t1);
+    }
+    let to_world = |n: Vec3| (axes[0] * n.x + axes[1] * n.y + axes[2] * n.z).normalize_or_zero();
+    // How far inside the grown box a point is (negative: outside).
+    let depth = |p: Vec3| (0..3).map(|i| grown[i] - p[i].abs()).fold(f32::MAX, f32::min);
+    if t_enter < 0.0 {
+        // The start is inside the grown box.
+        if depth(ls) <= 0.0 || depth(le) <= depth(ls) {
+            return None;
+        }
+        // Blocked on the spot, pushed back out the way that is shallowest.
+        let axis = (0..3).min_by(|&i, &j| (grown[i] - ls[i].abs()).total_cmp(&(grown[j] - ls[j].abs()))).unwrap_or(0);
+        let mut n = Vec3::ZERO;
+        n[axis] = if ls[axis] >= 0.0 { 1.0 } else { -1.0 };
+        return Some(Hit { time: 0.0, location: start, normal: to_world(n), actor: Some(b.actor) });
+    }
+    if t_enter > t_exit || t_enter > 1.0 || normal_local == Vec3::ZERO {
+        return None;
+    }
+    let len = (end - start).length().max(EPSILON);
+    let time = (t_enter - EPSILON / len).max(0.0);
+    Some(Hit { time, location: start + (end - start) * time, normal: to_world(normal_local), actor: Some(b.actor) })
+}
+
 /// Swept cylinder against an actor's cylinder: an actor collides as an upright cylinder (radius, half height), so the
 /// moving thing's circle is added to the actor's in the plane and its half height to the actor's in height.
 fn box_trace(b: &ActorBox, start: Vec3, end: Vec3, extent: Vec3) -> Option<Hit> {
+    if let Some(axes) = b.axes {
+        return oriented_box_trace(b, axes, start, end, extent);
+    }
     let radius = b.extent.x.max(b.extent.y) + extent.x.max(extent.y);
     let half_height = b.extent.z + extent.z;
     let dir = end - start;
@@ -800,4 +924,51 @@ fn tri_box_overlap(v: &[Vec3; 3], normal: Vec3, center: Vec3, half: Vec3) -> boo
         }
     }
     true
+}
+
+#[cfg(test)]
+mod oriented_box_tests {
+    use super::*;
+
+    fn wall(extent: Vec3, yaw_deg: f32) -> ActorBox {
+        let (s, c) = yaw_deg.to_radians().sin_cos();
+        ActorBox {
+            actor: ObjId(1),
+            center: Vec3::ZERO,
+            extent,
+            blocks_actors: true,
+            blocks_players: true,
+            is_pawn: false,
+            owner: None,
+            axes: Some([Vec3::new(c, s, 0.0), Vec3::new(-s, c, 0.0), Vec3::Z]),
+        }
+    }
+
+    /// A thin wall (half sizes 100 x 5 x 50) along x is stopped by from the side, and a mover running along its length is not.
+    #[test]
+    fn thin_wall_blocks_across_but_not_along() {
+        let b = wall(Vec3::new(100.0, 5.0, 50.0), 0.0);
+        let pawn = Vec3::new(10.0, 10.0, 20.0);
+        let hit = box_trace(&b, Vec3::new(0.0, -200.0, 0.0), Vec3::new(0.0, 200.0, 0.0), pawn).expect("blocked across the wall");
+        assert!(hit.normal.y < -0.99, "stopped on the near face: {:?}", hit.normal);
+        assert!(hit.time > 0.4 && hit.time < 0.5, "stops about 15 + 5 short of the wall: {}", hit.time);
+        assert!(box_trace(&b, Vec3::new(-300.0, -100.0, 0.0), Vec3::new(300.0, -100.0, 0.0), pawn).is_none(), "passes alongside it");
+    }
+
+    /// Turned 45 degrees, the same wall stops a mover going along x, with a slanted face normal.
+    #[test]
+    fn turned_wall_has_a_slanted_face() {
+        let b = wall(Vec3::new(100.0, 5.0, 50.0), 45.0);
+        let hit = box_trace(&b, Vec3::new(-300.0, 0.0, 0.0), Vec3::new(300.0, 0.0, 0.0), Vec3::new(10.0, 10.0, 20.0)).expect("blocked");
+        assert!((hit.normal.x.abs() - 0.7071).abs() < 0.01 && (hit.normal.y.abs() - 0.7071).abs() < 0.01, "slanted normal {:?}", hit.normal);
+    }
+
+    /// A mover already inside can walk out, not deeper.
+    #[test]
+    fn mover_inside_walks_out() {
+        let b = wall(Vec3::new(100.0, 5.0, 50.0), 0.0);
+        let pawn = Vec3::new(10.0, 10.0, 20.0);
+        assert!(box_trace(&b, Vec3::new(0.0, 8.0, 0.0), Vec3::new(0.0, 40.0, 0.0), pawn).is_none());
+        assert!(box_trace(&b, Vec3::new(0.0, 8.0, 0.0), Vec3::new(0.0, 0.0, 0.0), pawn).is_some());
+    }
 }

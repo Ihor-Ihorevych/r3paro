@@ -152,25 +152,42 @@ fn push_tile(vm: &mut Vm<'_>, canvas: ObjId, material: Option<ObjId>, x: f32, y:
     world(vm).canvas.tiles.push(Tile { material, x, y, w, h, u: uv[0], v: uv[1], ul: uv[2], vl: uv[3], color, style });
 }
 
+/// The script picks a bitmap font by the canvas width and knows none beyond 1280 pixels (the menu there lays everything
+/// out in fractions of the width, the fonts stay put), so on a wider canvas text is drawn bigger, in step with the width
+/// (the largest font is made for about 1024), to keep its share of the screen. The HUD's canvas is laid out small and
+/// scaled afterwards, so it stays at 1.
+fn text_scale(vm: &mut Vm<'_>, canvas: ObjId) -> f32 {
+    let clip = f(vm, canvas, "ClipX");
+    if clip > 1280.0 { clip / 1024.0 } else { 1.0 }
+}
+
 /// Draws a line of text at (x, y); returns its width and height.
 fn draw_line(vm: &mut Vm<'_>, canvas: ObjId, text: &str, x: f32, y: f32, clip_right: Option<f32>) -> (f32, f32) {
+    if std::env::var_os("HP3_TRACE_TEXT").is_some() {
+        let has_font = get(vm, canvas, "Font").as_obj().is_some();
+        let font = get(vm, canvas, "Font").as_obj().map(|f| hp3_script::natives::object_path(vm, f));
+        let (clip, size) = (f(vm, canvas, "ClipX"), get(vm, canvas, "SizeX").as_int());
+        eprintln!("text {text:?} at {x:.0},{y:.0} font {font:?} set {has_font} usable {} clipx {clip} sizex {size}", canvas_font(vm, canvas).is_some());
+    }
     let Some(font) = canvas_font(vm, canvas) else { return (0.0, 0.0) };
+    let s = text_scale(vm, canvas);
     let mut cx = x;
     for c in text.chars() {
         let Some(g) = font.glyph(c).copied() else { continue };
-        if clip_right.is_some_and(|r| cx + g.width as f32 > r) {
+        if clip_right.is_some_and(|r| cx + g.width as f32 * s > r) {
             break;
         }
         let page = font.pages.get(g.texture as usize).copied().flatten();
-        push_tile(vm, canvas, page, cx, y, g.width as f32, g.height as f32, [g.u as f32, g.v as f32, g.width as f32, g.height as f32]);
-        cx += (g.width + font.font.kerning) as f32;
+        push_tile(vm, canvas, page, cx, y, g.width as f32 * s, g.height as f32 * s, [g.u as f32, g.v as f32, g.width as f32, g.height as f32]);
+        cx += (g.width + font.font.kerning) as f32 * s;
     }
-    (cx - x, font.height)
+    (cx - x, font.height * s)
 }
 
 fn text_size(vm: &mut Vm<'_>, canvas: ObjId, text: &str) -> (f32, f32) {
+    let s = text_scale(vm, canvas);
     match canvas_font(vm, canvas) {
-        Some(font) => (font.width(text), font.height),
+        Some(font) => (font.width(text) * s, font.height * s),
         None => (0.0, 0.0),
     }
 }
@@ -178,13 +195,14 @@ fn text_size(vm: &mut Vm<'_>, canvas: ObjId, text: &str) -> (f32, f32) {
 /// Splits text into lines no wider than `width`, at spaces (and at `eol` markers).
 fn wrap(vm: &mut Vm<'_>, canvas: ObjId, text: &str, width: f32, eol: &str) -> Vec<String> {
     let Some(font) = canvas_font(vm, canvas) else { return vec![text.to_string()] };
+    let s = text_scale(vm, canvas);
     let mut out = Vec::new();
     let paragraphs: Vec<&str> = if eol.is_empty() { vec![text] } else { text.split(eol).collect() };
     for para in paragraphs {
         let mut line = String::new();
         for word in para.split(' ') {
             let candidate = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
-            if !line.is_empty() && font.width(&candidate) > width {
+            if !line.is_empty() && font.width(&candidate) * s > width {
                 out.push(std::mem::take(&mut line));
                 line = word.to_string();
             } else {
@@ -215,6 +233,24 @@ pub fn tile(vm: &mut Vm<'_>, material: Option<ObjId>, rect: [f32; 4], uv: [f32; 
 }
 
 /// Width and height of a line of text in a font object.
+/// Splits text into lines no wider than `width` pixels in a font object, at spaces.
+pub fn wrap_in_font(vm: &mut Vm<'_>, font: ObjId, text: &str, width: f32) -> Vec<String> {
+    let Some(f) = font_info(vm, font) else { return vec![text.to_string()] };
+    let mut out = Vec::new();
+    let mut line = String::new();
+    for word in text.split(' ') {
+        let candidate = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
+        if !line.is_empty() && f.width(&candidate) > width {
+            out.push(std::mem::take(&mut line));
+            line = word.to_string();
+        } else {
+            line = candidate;
+        }
+    }
+    out.push(line);
+    out
+}
+
 pub fn measure(vm: &mut Vm<'_>, font: ObjId, text: &str) -> (f32, f32) {
     match font_info(vm, font) {
         Some(f) => (f.width(text), f.height),
@@ -280,8 +316,23 @@ pub fn render(vm: &mut Vm<'_>, width: u32, height: u32) -> Vec<Tile> {
     fire(vm, canvas, "Reset", &mut []);
     set(vm, canvas, "ClipX", Value::Float(width as f32));
     set(vm, canvas, "ClipY", Value::Float(height as f32));
+    // The menus draw on the full-size canvas: the HUD's scale (worked out on the smaller HUD canvas) is swapped for theirs meanwhile.
+    let hud = get(vm, pc, "myHUD").as_obj();
+    let hud_scale = hud.map(|h| (h, get(vm, h, "fScaleX"), get(vm, h, "fScaleY")));
+    if let Some(h) = hud
+        && scale != 1.0
+    {
+        let sx = fire(vm, h, "CalculateScaleX", &mut [Value::Object(Some(canvas))]);
+        let sy = fire(vm, h, "CalculateScaleY", &mut [Value::Object(Some(canvas))]);
+        set(vm, h, "fScaleX", sx);
+        set(vm, h, "fScaleY", sy);
+    }
     crate::interactions::post_render(vm, canvas);
     crate::gui::render(vm, canvas, width, height);
+    if let Some((h, sx, sy)) = hud_scale {
+        set(vm, h, "fScaleX", sx);
+        set(vm, h, "fScaleY", sy);
+    }
     std::mem::take(&mut world(vm).canvas.tiles)
 }
 

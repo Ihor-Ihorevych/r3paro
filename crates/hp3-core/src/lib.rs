@@ -7,12 +7,27 @@ use std::path::{Path, PathBuf};
 
 pub use ini::Ini;
 
+const SETTINGS_FILE: &str = "hp3-settings.ini";
+
+/// The language the player chose, in lower case (`int` is English): `HP3_LANGUAGE`, or the one Flipendo's launcher wrote next
+/// to the game (`.flipendo-language`). None when nothing was chosen: the install's own language then stands. The texts
+/// (`Config`) and the voices (the package set) both follow it.
+pub fn chosen_language(root: &Path) -> Option<String> {
+    std::env::var("HP3_LANGUAGE")
+        .ok()
+        .or_else(|| std::fs::read_to_string(root.join(".flipendo-language")).ok())
+        .map(|l| l.trim().to_ascii_lowercase())
+        .filter(|l| !l.is_empty() && l.len() <= 8 && l.chars().all(|c| c.is_ascii_alphanumeric()))
+}
+
 /// The configuration of an install: `Default.ini` with `User.ini` over it, and the localization files of the
 /// configured language.
 pub struct Config {
     pub system: PathBuf,
     pub ini: Ini,
     pub user: Ini,
+    /// What the player changed in the game's option menus (`System/hp3-settings.ini`); it is also layered over `user`.
+    saved: Ini,
     /// Localization file extension, e.g. `int` or `rus`: the player's choice, else the install's own.
     pub language: String,
     /// The install's own language (`Default.ini`'s `Language`): its texts stand in for what a chosen translation
@@ -31,28 +46,37 @@ impl Config {
             entries.flatten().map(|e| e.path()).find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name)))
         };
         let ini = find("Default.ini").and_then(|p| Ini::load(&p).ok()).unwrap_or_default();
-        let user = find("User.ini").and_then(|p| Ini::load(&p).ok()).unwrap_or_default();
+        let mut user = find("User.ini").and_then(|p| Ini::load(&p).ok()).unwrap_or_default();
+        let saved = find(SETTINGS_FILE).and_then(|p| Ini::load(&p).ok()).unwrap_or_default();
+        user.overlay(&saved);
         let edition = ini.get("Engine.Engine", "Language").unwrap_or("int").to_ascii_lowercase();
-        // The language the player chose: `HP3_LANGUAGE`, or the one Flipendo's launcher wrote next to the game.
-        let chosen = std::env::var("HP3_LANGUAGE")
-            .ok()
-            .or_else(|| std::fs::read_to_string(root.join(".flipendo-language")).ok())
-            .map(|l| l.trim().to_ascii_lowercase())
-            .filter(|l| !l.is_empty() && l.len() <= 8 && l.chars().all(|c| c.is_ascii_alphanumeric()));
-        let language = chosen.unwrap_or_else(|| edition.clone());
+        let language = chosen_language(root).unwrap_or_else(|| edition.clone());
         let mut named = HashMap::new();
         if let Ok(entries) = std::fs::read_dir(&system) {
             for path in entries.flatten().map(|e| e.path()) {
                 let is_ini = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("ini"));
                 let stem = path.file_stem().map(|s| s.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-                if is_ini && !matches!(stem.as_str(), "default" | "user" | "defuser" | "defunrealed") {
+                if is_ini && !matches!(stem.as_str(), "default" | "user" | "defuser" | "defunrealed" | "hp3-settings") {
                     if let Ok(i) = Ini::load(&path) {
                         named.insert(stem, i);
                     }
                 }
             }
         }
-        Config { system, ini, user, language, edition, localized: HashMap::new(), named }
+        Config { system, ini, user, saved, language, edition, localized: HashMap::new(), named }
+    }
+
+    /// Records an option the player changed: it reads back at once and is written to `System/hp3-settings.ini`.
+    pub fn set_setting(&mut self, section: &str, key: &str, value: &str) {
+        self.saved.set(section, key, value);
+        self.user.set(section, key, value);
+        // A read-only or missing folder only means the choice is not remembered next time.
+        let _ = std::fs::write(self.system.join(SETTINGS_FILE), self.saved.to_text());
+    }
+
+    /// The options the player changed, as `(section, key, value)`.
+    pub fn saved_settings(&self, section: &str) -> Vec<(String, String)> {
+        self.saved.entries(section).into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
     }
 
     /// A value from the ini file a class's `config(File)` names. `System` (and no name) is the main
@@ -153,6 +177,19 @@ mod tests {
         // Not in the translation: the edition's text stands in.
         assert_eq!(c.localize("HpMenu", "All", "only_rus").as_deref(), Some("Tolko"));
         assert_eq!(c.localize("HpMenu", "All", "nowhere"), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn english_is_a_choice_when_the_install_has_its_texts() {
+        let root = install("english");
+        std::fs::write(root.join("System").join("HpMenu.int"), "[All]\nback=Back\n").unwrap();
+        std::fs::write(root.join(".flipendo-language"), "int\n").unwrap();
+        let mut c = Config::load(&root);
+        assert_eq!((c.language.as_str(), c.edition.as_str()), ("int", "rus"));
+        assert_eq!(c.localize("HpMenu", "All", "back").as_deref(), Some("Back"));
+        // A text English lacks still comes from the edition.
+        assert_eq!(c.localize("HpMenu", "All", "only_rus").as_deref(), Some("Tolko"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -115,6 +115,12 @@ struct Config {
     sub_start: i32,
     sub_end: i32,
     random_sub: bool,
+    /// `UseSkeletalLocationAs` (0 none, 1 spawn offset, 2 follows the bone), the actor whose bones are used, their scale
+    /// and which part of the bone list to pick from (0..1).
+    skel_mode: u8,
+    skel_actor: Option<ObjId>,
+    skel_scale: Vec3,
+    bone_range: Range,
     auto_destroy: bool,
     respawn: bool,
     // Beams.
@@ -216,6 +222,10 @@ impl Config {
             sub_start: get(vm, o, "SubdivisionStart").as_int(),
             sub_end: get(vm, o, "SubdivisionEnd").as_int(),
             random_sub: flag(vm, o, "UseRandomSubdivision"),
+            skel_mode: get(vm, o, "UseSkeletalLocationAs").as_byte(),
+            skel_actor: get(vm, o, "SkeletalMeshActor").as_obj(),
+            skel_scale: vec3(vm, o, "SkeletalScale"),
+            bone_range: Range::of(&get(vm, o, "RelativeBoneIndexRange")),
             auto_destroy: flag(vm, o, "AutoDestroy"),
             respawn: flag(vm, o, "RespawnDeadParticles"),
             beam_distance: Range::of(&get(vm, o, "BeamDistanceRange")),
@@ -241,6 +251,9 @@ struct Particle {
     frame: i32,
     /// Beams: the end point relative to the emitter (or absolute).
     end: Vec3,
+    /// Skeletal emitters: the bone it was born at and where that bone (scaled) was last seen.
+    bone: usize,
+    old_mesh: Vec3,
 }
 
 /// A line the script gives an emitter to spawn along (`LineExpression`): points of the line from its start to its
@@ -303,7 +316,7 @@ fn interpolate<T: Copy>(table: &[(f32, T)], t: f32, mix: impl Fn(T, T, f32) -> T
     table.last().map(|e| e.1)
 }
 
-fn spawn(config: &Config, rng: &mut Rng, origin: Vec3, rot: Mat3, fill_age: f32, line: Option<&Line>) -> Particle {
+fn spawn(config: &Config, rng: &mut Rng, origin: Vec3, rot: Mat3, fill_age: f32, line: Option<&Line>, bones: &[Vec3]) -> Particle {
     let local = match config.shape {
         _ if line.is_some_and(|l| !l.points.is_empty()) => {
             // Born along the script's line: a point of it, and the usual offset taken along its axes.
@@ -338,6 +351,14 @@ fn spawn(config: &Config, rng: &mut Rng, origin: Vec3, rot: Mat3, fill_age: f32,
             at
         }
     };
+    // A skeletal emitter is born at one of the bones, scaled.
+    let (mut bone, mut old_mesh) = (0, Vec3::ZERO);
+    let mut local = local;
+    if config.skel_mode != 0 && !bones.is_empty() {
+        bone = ((config.bone_range.pick(rng) * bones.len() as f32) as usize).min(bones.len() - 1);
+        old_mesh = bones[bone] * config.skel_scale;
+        local += old_mesh;
+    }
     let relative = config.coordinates == 1;
     let pos = if relative { local } else if config.coordinates == 2 { local } else { origin + rot * local };
     let vel = if config.coordinates == 2 { config.start_velocity.pick(rng) } else { rot * config.start_velocity.pick(rng) };
@@ -358,6 +379,8 @@ fn spawn(config: &Config, rng: &mut Rng, origin: Vec3, rot: Mat3, fill_age: f32,
         },
         frame: if config.random_sub { min + (rng.next() * (max - min + 1) as f32) as i32 } else { min },
         end: Vec3::ZERO,
+        bone,
+        old_mesh,
     }
 }
 
@@ -430,6 +453,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     let actors = world(vm).actors.clone();
     let frame = world(vm).frame;
     let mut seen: Vec<(ObjId, usize)> = Vec::new();
+    let mut skeletons: crate::HashMap<ObjId, Vec<Vec3>> = crate::HashMap::default();
     for a in actors {
         let Some(class) = vm.db.objects.get(a).class else { continue };
         if vm.db.objects.get(a).deleted || !vm.is_child_of(class, emitter_class) {
@@ -469,11 +493,22 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
                     }
                 }
             }
+            // An emitter on a skeletal mesh spawns at its bones (the pose is computed once per actor each step).
+            let bones = match world(vm).particles.states.get(&key).map(|s| (s.config.skel_mode, s.config.skel_actor)) {
+                Some((mode, Some(actor))) if mode != 0 && !vm.db.objects.get(actor).deleted => {
+                    if !skeletons.contains_key(&actor) {
+                        let origins = crate::anim::mesh_bone_origins(vm, actor).unwrap_or_default();
+                        skeletons.insert(actor, origins);
+                    }
+                    skeletons[&actor].clone()
+                }
+                _ => Vec::new(),
+            };
             let name = vm.db.objects.get(a).name;
             let name = vm.db.names.get(name).to_string();
             let Some(s) = world(vm).particles.states.get_mut(&key) else { continue };
             s.line = line.clone();
-            step(s, dt, origin, rot, hidden);
+            step(s, dt, origin, rot, hidden, &bones);
             if needs && std::env::var_os("HP3_PARTICLE_DEBUG").is_some() {
                 let c = &s.config;
                 eprintln!(
@@ -525,7 +560,7 @@ fn line_of(vm: &mut Vm<'_>, a: ObjId, dt: f32) -> Option<Line> {
     Some(Line { points, alpha_max })
 }
 
-fn step(s: &mut EmitterState, dt: f32, origin: Vec3, rot: Mat3, hidden: bool) {
+fn step(s: &mut EmitterState, dt: f32, origin: Vec3, rot: Mat3, hidden: bool, bones: &[Vec3]) {
     // A hidden emitter stands still: its particles keep their age and come back as they were when it is shown
     // again (the aim symbols are hidden and shown by the spell cursor).
     if hidden {
@@ -535,7 +570,7 @@ fn step(s: &mut EmitterState, dt: f32, origin: Vec3, rot: Mat3, hidden: bool) {
     s.last_origin = origin;
     let off = c.disabled;
     let new_particle = |s: &mut EmitterState, c: &Config, age: f32| {
-        let mut p = spawn(c, &mut s.rng, origin, rot, age, s.line.as_ref());
+        let mut p = spawn(c, &mut s.rng, origin, rot, age, s.line.as_ref(), bones);
         if c.beam {
             let d = c.beam_distance.pick(&mut s.rng);
             p.end = Vec3::new(d, 0.0, 0.0) + c.beam_offset.pick(&mut s.rng);
@@ -549,6 +584,13 @@ fn step(s: &mut EmitterState, dt: f32, origin: Vec3, rot: Mat3, hidden: bool) {
         let p = &mut s.particles[i];
         p.vel += c.acceleration * dt;
         p.pos += p.vel * dt;
+        // Particles of an emitter that follows its bones move with the bone they were born at.
+        if c.skel_mode == 2 && !bones.is_empty() {
+            let now = bones[p.bone.min(bones.len() - 1)] * c.skel_scale;
+            let delta = now - p.old_mesh;
+            p.pos += if c.coordinates == 1 { delta } else { rot * delta };
+            p.old_mesh = now;
+        }
         p.age += dt;
         p.spin += p.spin_rate * dt;
         if p.age >= p.life {

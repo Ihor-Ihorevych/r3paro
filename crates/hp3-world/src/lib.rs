@@ -21,6 +21,7 @@ pub mod particles;
 mod perception;
 pub mod physics;
 pub mod save;
+pub mod settings;
 pub mod touch;
 
 use hp3_script::fx::FxHashMap as HashMap;
@@ -91,6 +92,8 @@ pub struct World {
     pub pending_travel: Option<String>,
     /// The game asked to leave (`ConsoleCommand("exit")`, the Quit page's Yes): the app ends its main loop.
     pub quit_requested: bool,
+    /// Counts changes made in the option menus (`settings`); the app reads the values it needs again when it moves.
+    pub settings_version: u32,
     /// Walking pawns' view offsets while they ease onto a step (drawing only).
     pub step_smooth: std::collections::HashMap<ObjId, f32>,
     /// Where each hero's floor was last drawn while it went over stairs (see `hero_stair_offset`).
@@ -384,6 +387,14 @@ pub fn travel(vm: &mut Vm<'_>, url: &str) -> Result<Rc<Package>, VmError> {
     // What goes with the player: a restart keeps what came in with the level; otherwise, when the level asked
     // for items to travel (`bNextItems`), the player's pawn and its inventory are described.
     let restart = url.trim_start().to_ascii_uppercase().starts_with("?RESTART");
+    // Leaving a level the engine has every actor put what it keeps across levels into the game's store first.
+    if !restart && world(vm).level_info.is_some_and(|li| get(vm, li, "bNextItems").as_bool()) {
+        for a in world(vm).actors.clone() {
+            if !vm.db.objects.get(a).deleted {
+                fire(vm, a, "SavePersistentData", &mut []);
+            }
+        }
+    }
     let mut info = world(vm).travel_info.clone();
     if !restart {
         let items = world(vm).level_info.is_some_and(|li| get(vm, li, "bNextItems").as_bool());
@@ -398,7 +409,7 @@ pub fn travel(vm: &mut Vm<'_>, url: &str) -> Result<Rc<Package>, VmError> {
             info.clear();
         }
     }
-    if std::env::var_os("HP3_TRAVEL_DEBUG").is_some() {
+    if true {
         let items = world(vm).level_info.is_some_and(|li| get(vm, li, "bNextItems").as_bool());
         eprintln!("travel to {url}: restart {restart} items {items}, {} players", info.len());
         for (n, actors) in &info {
@@ -518,6 +529,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         native_fonts: Default::default(),
         pending_travel: None,
         quit_requested: false,
+        settings_version: 0,
         step_smooth: Default::default(),
         stair_floor: Default::default(),
         volume_hulls: None,
@@ -548,6 +560,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
     }));
     let collision = build_collision(vm, map, level_model, &actors);
     world(vm).collision = collision;
+    settings::apply_saved(vm);
     // HP3's world info (game states, persistent values) lives across levels: made once, given to each level.
     let world_info = take_world_info().or_else(|| {
         let class = world(vm).config.get("Engine.Engine", "WorldInfo").map(str::to_string)?;
@@ -604,6 +617,10 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
     for &a in &actors {
         fire(vm, a, "FilterForCurrentGameState", &mut []);
     }
+    // Pawns placed in the level get their controller in `Pawn.PostBeginPlay` only while the level is starting.
+    if let Some(li) = world(vm).level_info {
+        set(vm, li, "bStartup", Value::Bool(true));
+    }
     for &a in &actors {
         fire(vm, a, "PreBeginPlay", &mut []);
     }
@@ -619,6 +636,13 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
     }
     for &a in &actors {
         fire(vm, a, "SetInitialState", &mut []);
+    }
+    if let Some(li) = world(vm).level_info {
+        set(vm, li, "bStartup", Value::Bool(false));
+    }
+    // A pawn the map placed a little inside its floor would find none and fall through it.
+    for &a in &actors {
+        physics::lift_out_of_floor(vm, a);
     }
     // The persistent store has the saved state of the earlier levels: every actor takes what is its own from it, then settles.
     for &a in &actors {
@@ -1297,6 +1321,22 @@ fn mover_shape(vm: &mut Vm<'_>, a: ObjId) -> Option<collision::MoverShape> {
         let chain = vm.db.set.export_chain(&p, index);
         let Some(Asset::StaticMesh(sm)) = native_asset(&p, index, &chain) else { return None };
         let pos: Vec<Vec3> = sm.vertices.iter().map(|v| Vec3::new(v.position.x, v.position.y, v.position.z) * s3 * scale).collect();
+        if std::env::var_os("HP3_COLLISION_STATS").is_some() {
+            let model_planes = vm.db.set.resolve(&p, sm.collision_model).and_then(|(cp, ci)| {
+                let cchain = vm.db.set.export_chain(&cp, ci);
+                match native_asset(&cp, ci, &cchain)? {
+                    Asset::Model(m) => Some(m.nodes.len()),
+                    _ => None,
+                }
+            });
+            let (boxes, lines) = mesh_simple_flags(&p, index, &chain);
+            eprintln!(
+                "movermesh {} tris={} model_nodes={:?} simple boxes={boxes} lines={lines}",
+                hp3_script::natives::object_path(vm, mesh),
+                sm.collision_triangles.len(),
+                model_planes
+            );
+        }
         if std::env::var("HP3_MOVER_MESH").is_ok_and(|n| hp3_script::natives::object_path(vm, a).ends_with(&n)) {
             eprintln!("mover mesh {}: {} vertices, {} render triangles, {} collision triangles, scale {s3} {scale}", hp3_script::natives::object_path(vm, mesh), pos.len(), sm.indices.len() / 3, sm.collision_triangles.len());
             for t in sm.indices.chunks_exact(3) {
@@ -1327,6 +1367,24 @@ fn mover_shape(vm: &mut Vm<'_>, a: ObjId) -> Option<collision::MoverShape> {
         return None;
     }
     let mut shape = collision::MoverShape::new(a, &tris);
+    // A mesh mover answers box traces with the mesh's simple collision model, as a static mesh does.
+    if let Some(mesh) = get(vm, a, "StaticMesh").as_obj()
+        && let Some((pkg, index)) = vm.db.objects.get(mesh).key.clone()
+        && let Ok(p) = vm.db.set.get(&pkg)
+    {
+        let chain = vm.db.set.export_chain(&p, index);
+        if let Some(Asset::StaticMesh(sm)) = native_asset(&p, index, &chain)
+            && let Some((cp, ci)) = vm.db.set.resolve(&p, sm.collision_model)
+        {
+            let (boxes, lines) = mesh_simple_flags(&p, index, &chain);
+            let cchain = vm.db.set.export_chain(&cp, ci);
+            if let Some(Asset::Model(cm)) = native_asset(&cp, ci, &cchain)
+                && let Some(placed) = place_model(*cm, glam::Vec3::ZERO, glam::Mat3::from_diagonal(s3 * scale))
+            {
+                shape.set_model(placed, boxes, lines);
+            }
+        }
+    }
     shape.place(mover_transform(vm, a));
     Some(shape)
 }
@@ -1715,11 +1773,28 @@ fn build_collision(vm: &mut Vm<'_>, map: &Rc<Package>, model: Option<ObjRef>, ac
                 );
             }
             if std::env::var_os("HP3_COLLISION_STATS").is_some() {
+                let prims = vm.db.set.resolve(&mp, sm.karma_props).and_then(|(kp, ki)| {
+                    let kchain = vm.db.set.export_chain(&kp, ki);
+                    match native_asset(&kp, ki, &kchain)? {
+                        Asset::MeshProps(m) => Some(format!("boxes {} spheres {} cylinders {} convexes {}", m.boxes.len(), m.spheres.len(), m.cylinders.len(), m.convexes.len())),
+                        _ => None,
+                    }
+                });
+                // Planes of the simple collision model that are neither upright nor flat: ramps and slanted faces.
+                let slanted = vm.db.set.resolve(&mp, sm.collision_model).and_then(|(cp, ci)| {
+                    let cchain = vm.db.set.export_chain(&cp, ci);
+                    match native_asset(&cp, ci, &cchain)? {
+                        Asset::Model(m) => Some((m.nodes.len(), m.nodes.iter().filter(|n| n.plane.normal.z.abs() > 0.05 && n.plane.normal.z.abs() < 0.95).count())),
+                        _ => None,
+                    }
+                });
                 eprintln!(
-                    "meshstats {} tris={} model={}",
+                    "meshstats {} tris={} model={} planes/slanted={:?} karma={}",
                     vm.db.names.get(vm.db.objects.get(mesh).name),
                     sm.collision_triangles.len(),
-                    !sm.collision_model.is_none()
+                    !sm.collision_model.is_none(),
+                    slanted,
+                    prims.unwrap_or_else(|| "none".into())
                 );
             }
             // A simple collision model stands in for the triangles in the traces its flags allow.

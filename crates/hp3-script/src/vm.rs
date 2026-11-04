@@ -483,6 +483,11 @@ impl<'s> Vm<'s> {
         let Some(Step::Slot(first)) = p.path.first() else { return };
         let Some(mut cur) = vals.get_mut(*first) else { return };
         for step in &p.path[1..] {
+            // A member written into an element that was only made room for (a dynamic array grown by `Length`
+            // holds `Empty` where the struct's type is not known) makes the struct.
+            if let (Step::Slot(s), Value::Empty) = (step, &*cur) {
+                *cur = Value::Struct(vec![Value::Empty; *s + 1].into());
+            }
             cur = match (step, cur) {
                 (Step::Slot(s), Value::Struct(f)) => match f.get_mut(*s) {
                     Some(v) => v,
@@ -598,6 +603,18 @@ impl<'s> Vm<'s> {
                     Some(c) => self.eval(inner, frame, Some(c))?,
                     None => Value::Empty,
                 }
+            }
+            // `Array.Length = n` grows (with empty elements) or cuts the array.
+            Expr::Let(dst, src) if matches!(**dst, Expr::DynArrayLength(_)) => {
+                let Expr::DynArrayLength(arr) = &**dst else { unreachable!() };
+                let p = self.place(arr, frame, ctx)?;
+                let n = self.eval(src, frame, ctx)?.as_int().max(0) as usize;
+                if let Value::Array(mut a) = self.read(&p, frame) {
+                    let fill = a.first().map(zero_like).unwrap_or(Value::Empty);
+                    a.resize(n, fill);
+                    self.write(&p, frame, Value::Array(a));
+                }
+                Value::Empty
             }
             Expr::Let(dst, src) => {
                 let p = self.place(dst, frame, ctx)?;

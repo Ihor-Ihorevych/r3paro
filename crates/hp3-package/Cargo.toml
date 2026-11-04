@@ -7,5 +7,6 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+hp3-core.workspace = true
 thiserror.workspace = true
 log.workspace = true

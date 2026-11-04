@@ -406,7 +406,7 @@ impl Renderer {
             let translucent = batch.texture.as_ref().and_then(|k| scene.images.get(k)).is_some_and(|i| i.translucent);
             let pass = if batch.blend.is_some() { 1 } else if translucent { 2 } else { 0 };
             let pan = batch.pan.map(|p| (p, batch.vertices.clone()));
-            draws.push(Draw { bind, vertices, indices, count: batch.indices.len() as u32, pass, pan });
+            draws.push(Draw { bind, vertices, indices, count: batch.indices.len() as u32, pass, sky: batch.sky, pan });
         }
         // A second camera for the sky zone's view.
         let sky_globals = d.create_buffer(&wgpu::BufferDescriptor {
@@ -437,10 +437,14 @@ impl Renderer {
 
     /// Draws `scene` from `camera` into `color` (with `depth` of the same size).
     pub fn draw(&self, scene: &GpuScene, camera: &Camera, color: &wgpu::TextureView, depth: &wgpu::TextureView, aspect: f32) -> wgpu::CommandBuffer {
-        self.draw_with(scene, camera, color, depth, aspect, |_| {})
+        self.draw_with(scene, camera, color, depth, aspect, |_| {}, |_| {})
     }
 
-    /// Like `draw`, then runs `extra` in the same pass (with the camera's bind group still set at group 0).
+    /// Like `draw`, with two hooks in the same pass (the camera's bind group still set at group 0): `opaque` runs after the
+    /// scene's opaque surfaces and terrain layers, so what it draws is hidden by them and writes the depth that the
+    /// alpha-blended surfaces are tested against (they write none, so actors behind a wall of such a surface would show
+    /// through it if drawn after); `blended` runs last, over everything.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_with(
         &self,
         scene: &GpuScene,
@@ -448,7 +452,8 @@ impl Renderer {
         color: &wgpu::TextureView,
         depth: &wgpu::TextureView,
         aspect: f32,
-        extra: impl FnOnce(&mut wgpu::RenderPass<'_>),
+        opaque: impl FnOnce(&mut wgpu::RenderPass<'_>),
+        blended: impl FnOnce(&mut wgpu::RenderPass<'_>),
     ) -> wgpu::CommandBuffer {
         let view_proj = camera.view_proj(aspect);
         self.queue.write_buffer(&scene.globals, 0, bytemuck::cast_slice(&view_proj.to_cols_array()));
@@ -475,7 +480,7 @@ impl Renderer {
                 occlusion_query_set: None,
             });
             pass.set_bind_group(0, &scene.sky_globals_bg, &[]);
-            self.draw_batches(&mut pass, scene);
+            self.draw_batches(&mut pass, scene, true, 0..3);
         }
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -498,22 +503,24 @@ impl Renderer {
                 occlusion_query_set: None,
             });
             pass.set_bind_group(0, &scene.globals_bg, &[]);
-            self.draw_batches(&mut pass, scene);
-            extra(&mut pass);
+            self.draw_batches(&mut pass, scene, false, 0..2);
+            opaque(&mut pass);
+            self.draw_batches(&mut pass, scene, false, 2..3);
+            blended(&mut pass);
         }
         enc.finish()
     }
 
     /// The scene's batches: opaque first, then blended ones in order (camera bind group already set).
-    fn draw_batches(&self, pass: &mut wgpu::RenderPass<'_>, scene: &GpuScene) {
+    fn draw_batches(&self, pass: &mut wgpu::RenderPass<'_>, scene: &GpuScene, sky: bool, passes: std::ops::Range<u8>) {
         // Opaque, then terrain layers, then alpha-blended surfaces.
-        for which in 0..3u8 {
+        for which in passes {
             pass.set_pipeline(match which {
                 0 => &self.pipeline,
                 1 => &self.blend_pipeline,
                 _ => &self.alpha_pipeline,
             });
-            for d in scene.draws.iter().filter(|d| d.pass == which) {
+            for d in scene.draws.iter().filter(|d| d.pass == which && d.sky == sky) {
                 pass.set_bind_group(1, &d.bind, &[]);
                 pass.set_vertex_buffer(0, d.vertices.slice(..));
                 pass.set_index_buffer(d.indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -616,6 +623,8 @@ struct Draw {
     count: u32,
     /// 0 opaque, 1 terrain layer, 2 alpha-blended.
     pass: u8,
+    /// The sky zone's geometry: drawn only in the sky pass.
+    sky: bool,
     /// A scrolling material: its speed and the vertices as built, which `animate_scene` shifts.
     pan: Option<(hp3_assets::loader::Pan, Vec<Vertex>)>,
 }

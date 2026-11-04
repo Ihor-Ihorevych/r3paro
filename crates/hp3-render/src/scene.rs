@@ -84,6 +84,19 @@ pub struct MapInputs {
     pub terrain_layers: HashMap<usize, Vec<TerrainLayer>>,
     /// Water surfaces (`FluidSurfaceInfo`): lakes drawn as a flat grid.
     pub fluids: Vec<FluidSurface>,
+    /// Static mesh actors whose mesh and look come from their class defaults, not from tags in the map (`SmartDesk`
+    /// and the like), by export index.
+    pub class_statics: HashMap<usize, ClassStatic>,
+}
+
+/// A baked static actor as the running world has it, class defaults applied.
+#[derive(Clone, Debug)]
+pub struct ClassStatic {
+    pub mesh: ObjKey,
+    pub scale: f32,
+    pub scale3d: [f32; 3],
+    /// Taken off the mesh's own origin before it is scaled and turned.
+    pub prepivot: [f32; 3],
 }
 
 /// A water surface as the running world has it: a `nx` by `ny` grid of vertices `spacing` apart, centred on `at` and turned
@@ -180,6 +193,8 @@ pub struct Batch {
     pub blend: Option<ObjKey>,
     /// The picture slides over the surface at this speed (a `TexPanner`).
     pub pan: Option<loader::Pan>,
+    /// Belongs to the sky zone: drawn only in the sky pass, from the sky zone's camera.
+    pub sky: bool,
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
 }
@@ -242,7 +257,9 @@ pub fn rotation_matrix(rot: [i32; 3]) -> Mat4 {
 
 struct Batcher<'l, 's> {
     loader: &'l Loader<'s>,
-    by_texture: HashMap<(Option<ObjKey>, Option<usize>, Option<(u32, u32)>), usize>,
+    by_texture: HashMap<(Option<ObjKey>, Option<usize>, Option<(u32, u32)>, bool), usize>,
+    /// Whether the batches `batch` hands out are the sky zone's.
+    sky: bool,
     /// The scroll of the material `texture_for` looked at last; the next `batch` takes it.
     last_pan: Option<loader::Pan>,
     scene: Scene,
@@ -291,9 +308,9 @@ impl Batcher<'_, '_> {
     fn batch(&mut self, texture: Option<ObjKey>, lightmap: Option<usize>) -> &mut Batch {
         let next = self.scene.batches.len();
         let pan = self.last_pan.take();
-        let i = *self.by_texture.entry((texture.clone(), lightmap, pan.map(|p| (p.u.to_bits(), p.v.to_bits())))).or_insert(next);
+        let i = *self.by_texture.entry((texture.clone(), lightmap, pan.map(|p| (p.u.to_bits(), p.v.to_bits())), self.sky)).or_insert(next);
         if i == next {
-            self.scene.batches.push(Batch { texture, lightmap, blend: None, pan, vertices: Vec::new(), indices: Vec::new() });
+            self.scene.batches.push(Batch { texture, lightmap, blend: None, pan, sky: self.sky, vertices: Vec::new(), indices: Vec::new() });
         }
         &mut self.scene.batches[i]
     }
@@ -301,13 +318,13 @@ impl Batcher<'_, '_> {
 
 /// Builds the scene of the level in `map` (a loaded map package).
 pub fn build(loader: &Loader<'_>, map: &Rc<Package>) -> Scene {
-    build_with(loader, map, &|_| true, None)
+    build_with(loader, map, &|_| true, None, &HashMap::new())
 }
 
 /// Like `build_with`, also drawing terrain with the given layers.
 pub fn build_map(loader: &Loader<'_>, map: &Rc<Package>, include: &dyn Fn(usize) -> bool, inputs: &MapInputs) -> Scene {
-    let mut scene = build_with(loader, map, include, inputs.lighting.as_ref());
-    let mut b = Batcher { loader, by_texture: HashMap::new(), last_pan: None, scene: std::mem::take(&mut scene) };
+    let mut scene = build_with(loader, map, include, inputs.lighting.as_ref(), &inputs.class_statics);
+    let mut b = Batcher { loader, by_texture: HashMap::new(), sky: false, last_pan: None, scene: std::mem::take(&mut scene) };
     add_terrain(&mut b, map, inputs);
     add_fluids(&mut b, inputs);
     b.scene
@@ -324,7 +341,7 @@ fn add_fluids(b: &mut Batcher<'_, '_>, inputs: &MapInputs) {
         let at = GVec3::from(f.at);
         // Unlit: the reflection is its own light (the surroundings are too dark for it).
         let color = [0.5, 0.5, 0.5];
-        let mut batch = Batch { texture: Some(texture), lightmap: None, blend: None, pan: None, vertices: Vec::with_capacity(f.nx * f.ny), indices: Vec::new() };
+        let mut batch = Batch { texture: Some(texture), lightmap: None, blend: None, pan: None, sky: false, vertices: Vec::with_capacity(f.nx * f.ny), indices: Vec::new() };
         for j in 0..f.ny {
             for i in 0..f.nx {
                 let (lx, ly) = ((i as f32 - (f.nx - 1) as f32 / 2.0) * f.spacing, (j as f32 - (f.ny - 1) as f32 / 2.0) * f.spacing);
@@ -403,7 +420,7 @@ fn add_terrain(b: &mut Batcher<'_, '_>, map: &Rc<Package>, inputs: &MapInputs) {
                 break;
             }
             let m = layer.matrix;
-            let mut batch = Batch { texture: Some(texture), lightmap: None, blend: alpha, pan: None, vertices: Vec::with_capacity(w * h), indices: Vec::new() };
+            let mut batch = Batch { texture: Some(texture), lightmap: None, blend: alpha, pan: None, sky: false, vertices: Vec::with_capacity(w * h), indices: Vec::new() };
             for k in 0..w * h {
                 let p = pos(k);
                 let u = p.x * m[0][0] + p.y * m[1][0] + p.z * m[2][0] + m[3][0];
@@ -428,12 +445,18 @@ fn add_terrain(b: &mut Batcher<'_, '_>, map: &Rc<Package>, inputs: &MapInputs) {
 }
 
 /// Builds the scene with only the static-mesh actors whose export index passes `include`; the others are drawn
-/// per frame.
-/// per frame. With `lighting`, surfaces are lit; without, everything is drawn at full brightness.
-pub fn build_with(loader: &Loader<'_>, map: &Rc<Package>, include: &dyn Fn(usize) -> bool, lighting: Option<&Lighting>) -> Scene {
-    let mut b = Batcher { loader, by_texture: HashMap::new(), last_pan: None, scene: Scene::default() };
+/// per frame. With `lighting`, surfaces are lit; without, everything is drawn at full brightness. `class_statics`
+/// gives the mesh of actors that have none of their own in the map.
+pub fn build_with(
+    loader: &Loader<'_>,
+    map: &Rc<Package>,
+    include: &dyn Fn(usize) -> bool,
+    lighting: Option<&Lighting>,
+    class_statics: &HashMap<usize, ClassStatic>,
+) -> Scene {
+    let mut b = Batcher { loader, by_texture: HashMap::new(), sky: false, last_pan: None, scene: Scene::default() };
     add_bsp(&mut b, map, lighting);
-    add_actors(&mut b, map, include, lighting);
+    add_actors(&mut b, map, include, lighting, class_statics);
     b.scene
 }
 
@@ -582,10 +605,18 @@ fn add_bsp(b: &mut Batcher<'_, '_>, map: &Rc<Package>, lighting: Option<&Lightin
     const HIDDEN: u32 = 0x0000_0001 | 0x0400_0000 | 0x0000_0080;
     // Unlit surfaces are drawn at full brightness.
     const UNLIT: u32 = 0x0040_0000;
+    // The zones whose actor is a SkyZoneInfo: their surfaces are the sky room, drawn only in the sky pass.
+    let sky_zones: Vec<bool> = model
+        .zones
+        .iter()
+        .map(|z| z.actor.export().is_some_and(|i| b.loader.set.export_chain(map, i).first().is_some_and(|c| c.eq_ignore_ascii_case("SkyZoneInfo"))))
+        .collect();
     for node in &model.nodes {
         if node.num_vertices < 3 || node.section < 0 {
             continue;
         }
+        let zone = if node.zone[1] != 0 { node.zone[1] } else { node.zone[0] };
+        b.sky = sky_zones.get(zone as usize).copied().unwrap_or(false);
         let Some(section) = model.sections.get(node.section as usize) else { continue };
         let surf_flags = model.surfs.get(node.surf as usize).map(|s| s.poly_flags).unwrap_or(0);
         if (surf_flags | section.poly_flags) & HIDDEN != 0 {
@@ -615,9 +646,10 @@ fn add_bsp(b: &mut Batcher<'_, '_>, map: &Rc<Package>, lighting: Option<&Lightin
         }
         b.scene.stats.bsp_triangles += n - 2;
     }
+    b.sky = false;
 }
 
-fn add_actors(b: &mut Batcher<'_, '_>, map: &Rc<Package>, include: &dyn Fn(usize) -> bool, lighting: Option<&Lighting>) {
+fn add_actors(b: &mut Batcher<'_, '_>, map: &Rc<Package>, include: &dyn Fn(usize) -> bool, lighting: Option<&Lighting>, class_statics: &HashMap<usize, ClassStatic>) {
     for i in 0..map.exports.len() {
         let chain = b.loader.set.export_chain(map, i);
         let is_mesh_actor = chain.iter().any(|c| c.eq_ignore_ascii_case("Actor"));
@@ -637,7 +669,10 @@ fn add_actors(b: &mut Batcher<'_, '_>, map: &Rc<Package>, include: &dyn Fn(usize
             if chain.first().is_some_and(|c| c.eq_ignore_ascii_case("SkyZoneInfo")) {
                 return Some((None, location, rotation, -1.0, GVec3::ONE, Vec::new(), false, None));
             }
-            let mesh = f("StaticMesh").and_then(|t| t.as_obj())?;
+            // No mesh of its own in the map: it may come from the class defaults, which `class_statics` has.
+            let Some(mesh) = f("StaticMesh").and_then(|t| t.as_obj()) else {
+                return class_statics.contains_key(&i).then(|| (None, location, rotation, 1.0, GVec3::ONE, Vec::new(), false, None));
+            };
             if f("bHidden").is_some_and(|t| t.bool_value) {
                 return None;
             }
@@ -655,8 +690,11 @@ fn add_actors(b: &mut Batcher<'_, '_>, map: &Rc<Package>, include: &dyn Fn(usize
             let instance = f("StaticMeshInstance").and_then(|t| t.as_obj());
             Some((Some(mesh), location, rotation, scale, scale3d, skins, false, instance))
         });
-        let Some(Some((mesh, location, rotation, scale, scale3d, skins, is_start, instance))) = info else { continue };
+        let Some(Some((mesh, location, rotation, mut scale, mut scale3d, skins, is_start, instance))) = info else { continue };
         let pos = GVec3::new(location.x, location.y, location.z);
+        // Unreal draws a static mesh at translate(Location) * rotate * scale * translate(-PrePivot): the pivot is taken off
+        // in the mesh's own space, so the scale applies to it.
+        let mut prepivot = GVec3::ZERO;
         if mesh.is_none() && scale < 0.0 {
             b.scene.sky = Some(pos);
             continue;
@@ -665,11 +703,24 @@ fn add_actors(b: &mut Batcher<'_, '_>, map: &Rc<Package>, include: &dyn Fn(usize
             b.scene.player_starts.push((pos, rotation));
             continue;
         }
-        let Some(mesh) = mesh else { continue };
+        let live = if mesh.is_none() { class_statics.get(&i) } else { None };
+        if mesh.is_none() && live.is_none() {
+            continue;
+        }
         if !include(i) {
             continue;
         }
-        let Some((sp, si)) = b.loader.set.resolve(map, mesh) else { continue };
+        let resolved = match (live, mesh) {
+            (Some(cs), _) => {
+                scale = cs.scale;
+                scale3d = GVec3::from(cs.scale3d);
+                prepivot = GVec3::from(cs.prepivot);
+                b.loader.set.get(&cs.mesh.0).ok().map(|p| (p, cs.mesh.1))
+            }
+            (None, Some(mesh)) => b.loader.set.resolve(map, mesh),
+            (None, None) => None,
+        };
+        let Some((sp, si)) = resolved else { continue };
         let Some(asset) = b.loader.asset(&sp, si) else { continue };
         let Asset::StaticMesh(sm) = &*asset else { continue };
         let materials = b.loader.static_mesh_materials(&sp, si);
@@ -678,7 +729,7 @@ fn add_actors(b: &mut Batcher<'_, '_>, map: &Rc<Package>, include: &dyn Fn(usize
             Asset::StaticMeshInstance(smi) if smi.colors.len() == sm.vertices.len() => Some(smi.colors.clone()),
             _ => None,
         });
-        let transform = Mat4::from_translation(pos) * rotation_matrix(rotation) * Mat4::from_scale(scale3d * scale);
+        let transform = Mat4::from_translation(pos) * rotation_matrix(rotation) * Mat4::from_scale(scale3d * scale) * Mat4::from_translation(-prepivot);
         let uvs = sm.uv_streams.first().map(|s| s.uvs.as_slice()).unwrap_or(&[]);
         for (si_, section) in sm.sections.iter().enumerate() {
             let texture = match skins.get(si_).copied().filter(|s| !s.is_none()) {

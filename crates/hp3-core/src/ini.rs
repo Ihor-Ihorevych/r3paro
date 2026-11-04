@@ -101,6 +101,19 @@ impl Ini {
         v
     }
 
+    /// The file's text: sections in name order, keys as written.
+    pub fn to_text(&self) -> String {
+        let mut out = String::new();
+        for name in self.section_names() {
+            out.push_str(&format!("[{name}]\n"));
+            for (k, v) in self.entries(name) {
+                out.push_str(&format!("{k}={v}\n"));
+            }
+            out.push('\n');
+        }
+        out
+    }
+
     /// Layers `other` over this file: its keys replace this file's.
     pub fn overlay(&mut self, other: &Ini) {
         for (sec, entries) in &other.sections {

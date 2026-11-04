@@ -9,7 +9,7 @@ use hp3_package::{ObjRef, Package};
 use hp3_render::dynamic::{Dynamic, GpuMesh};
 use hp3_render::gpu::Renderer;
 use hp3_render::meshes::{self, MeshGeom};
-use hp3_render::scene::{rotation_matrix, FluidSurface, LightSource, Lighting, MapInputs, TerrainLayer};
+use hp3_render::scene::{rotation_matrix, ClassStatic, FluidSurface, LightSource, Lighting, MapInputs, TerrainLayer};
 use hp3_script::{ObjId, Value, Vm};
 use hp3_world::{get, world};
 
@@ -137,6 +137,35 @@ pub fn map_inputs(vm: &mut Vm<'_>, loader: &Loader<'_>, map: &Package, lit: bool
                 tiles: [tile(vm, "UTiles"), tile(vm, "VTiles")],
             });
         }
+    }
+    // Static actors of other classes than StaticMeshActor (SmartDesk, ...) take their mesh from class defaults: the
+    // map's export has no tag for it, so the scene builder is given the running world's values.
+    let plain = vm.db.find("StaticMeshActor");
+    for &a in &actors {
+        let Some(class) = vm.db.objects.get(a).class else { continue };
+        let Some((pkg, index)) = vm.db.objects.get(a).key.clone() else { continue };
+        if pkg.as_ref() != map_name || vm.db.objects.get(a).deleted || plain.is_some_and(|p| vm.is_child_of(class, p)) {
+            continue;
+        }
+        if hp3_world::get(vm, a, "DrawType").as_byte() != DT_STATIC_MESH
+            || !hp3_world::get(vm, a, "bStatic").as_bool()
+            || hp3_world::get(vm, a, "bHidden").as_bool()
+            || hp3_world::get(vm, a, "bSpecialHidden").as_bool()
+        {
+            continue;
+        }
+        let Some(mesh) = hp3_world::get(vm, a, "StaticMesh").as_obj().and_then(|m| export_of(vm, m)) else { continue };
+        let scale = match hp3_world::rd(vm, a, "DrawScale").as_float() {
+            0.0 => 1.0,
+            s => s,
+        };
+        let s3 = match hp3_world::rd(vm, a, "DrawScale3D") {
+            v @ Value::Struct(_) => vec3(&v),
+            _ => Vec3::ONE,
+        };
+        let s3 = if s3 == Vec3::ZERO { Vec3::ONE } else { s3 };
+        let prepivot = hp3_world::rd_vec(vm, a, "PrePivot");
+        out.class_statics.insert(index, ClassStatic { mesh: loader::key(&mesh.0, mesh.1), scale, scale3d: s3.to_array(), prepivot: prepivot.to_array() });
     }
     let Some(terrain_class) = vm.db.find("TerrainInfo") else { return out };
     for a in actors {

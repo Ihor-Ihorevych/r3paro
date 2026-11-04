@@ -59,8 +59,17 @@ pub struct PackageSet {
 }
 
 impl PackageSet {
-    /// Indexes every package file under the install's package folders.
+    /// Indexes every package file under the install's package folders, with the voices of the language the player chose
+    /// (`hp3_core::chosen_language`), else of the install's own.
     pub fn open(root: &Path) -> Result<PackageSet> {
+        PackageSet::open_with_language(root, hp3_core::chosen_language(root).as_deref())
+    }
+
+    /// Like `open`, with the language named (`int` is English, `rus`...): the localized packages (`alldialog.rus_uax`) of that
+    /// language are used where the install has them, the plain ones (`alldialog.uax`) for `int`. A language the install has
+    /// no voices for (a translation of the texts only) keeps what the install offers, and a package only another language's
+    /// files provide is used all the same.
+    pub fn open_with_language(root: &Path, wanted: Option<&str>) -> Result<PackageSet> {
         let mut files = HashMap::new();
         let mut localized: HashMap<String, HashMap<String, PathBuf>> = HashMap::new();
         let entries = std::fs::read_dir(root).map_err(|e| Error::Io(root.to_path_buf(), e))?;
@@ -85,13 +94,29 @@ impl PackageSet {
                 }
             }
         }
-        let language = if localized.contains_key("int") || localized.len() != 1 {
-            "int".to_string()
-        } else {
-            localized.keys().next().cloned().unwrap_or_else(|| "int".to_string())
+        let wanted = wanted.map(str::to_ascii_lowercase);
+        let mut language = match wanted.as_deref() {
+            Some("int") => "int".to_string(),
+            Some(w) if localized.contains_key(w) => w.to_string(),
+            _ if localized.contains_key("int") || localized.len() != 1 => "int".to_string(),
+            _ => localized.keys().next().cloned().unwrap_or_else(|| "int".to_string()),
         };
         if let Some(loc) = localized.remove(&language) {
             files.extend(loc);
+        }
+        // What only another language provides (English asked for, an install with Russian voices alone) is used: the voices
+        // then speak that language, which is what `language` reports.
+        let mut rest: Vec<_> = localized.into_iter().collect();
+        rest.sort_by(|a, b| a.0.cmp(&b.0));
+        for (lang, loc) in rest {
+            for (stem, path) in loc {
+                if !files.contains_key(&stem) {
+                    if stem == "alldialog" {
+                        language = lang.clone();
+                    }
+                    files.insert(stem, path);
+                }
+            }
         }
         Ok(PackageSet {
             root: root.to_path_buf(),
@@ -223,5 +248,57 @@ impl PackageSet {
             None => pkg.name.clone(),
         };
         Some((owner, name))
+    }
+}
+
+#[cfg(test)]
+mod voice_language_tests {
+    use super::*;
+
+    /// A folder with the sounds of an install: the plain dialogue package (English) and a Russian dub next to it.
+    fn install(name: &str, plain: bool, russian: bool) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("hp3-set-{name}-{}", std::process::id()));
+        let sounds = root.join("sounds");
+        std::fs::create_dir_all(&sounds).unwrap();
+        if plain {
+            std::fs::write(sounds.join("alldialog.uax"), b"english").unwrap();
+        }
+        if russian {
+            std::fs::write(sounds.join("alldialog.rus_uax"), b"russian").unwrap();
+        }
+        root
+    }
+
+    fn voices(set: &PackageSet) -> String {
+        std::fs::read_to_string(set.path_of("alldialog").unwrap()).unwrap()
+    }
+
+    #[test]
+    fn english_and_russian_voices_follow_the_chosen_language() {
+        let root = install("both", true, true);
+        let english = PackageSet::open_with_language(&root, Some("int")).unwrap();
+        assert_eq!((voices(&english).as_str(), english.language.as_str()), ("english", "int"));
+        let russian = PackageSet::open_with_language(&root, Some("RUS")).unwrap();
+        assert_eq!((voices(&russian).as_str(), russian.language.as_str()), ("russian", "rus"));
+        // Nothing chosen: the install's only dub, as before English was added.
+        let none = PackageSet::open_with_language(&root, None).unwrap();
+        assert_eq!(voices(&none), "russian");
+        // A translation of the texts only (no voices of its own) keeps the dub the install has.
+        let ukrainian = PackageSet::open_with_language(&root, Some("ukr")).unwrap();
+        assert_eq!(voices(&ukrainian), "russian");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_missing_voice_package_falls_back_to_the_one_there_is() {
+        let russian_only = install("rus-only", false, true);
+        let asked_english = PackageSet::open_with_language(&russian_only, Some("int")).unwrap();
+        assert_eq!((voices(&asked_english).as_str(), asked_english.language.as_str()), ("russian", "rus"));
+        std::fs::remove_dir_all(russian_only).unwrap();
+
+        let english_only = install("int-only", true, false);
+        let asked_russian = PackageSet::open_with_language(&english_only, Some("rus")).unwrap();
+        assert_eq!((voices(&asked_russian).as_str(), asked_russian.language.as_str()), ("english", "int"));
+        std::fs::remove_dir_all(english_only).unwrap();
     }
 }

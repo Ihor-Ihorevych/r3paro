@@ -109,6 +109,8 @@ pub struct AudioSystem {
     /// The game's `AmbientVolume` and `SoundVolume` settings, which scale every ambient sound.
     ambient_setting: f32,
     sound_setting: f32,
+    /// The `ReverseStereo` option: left and right swapped.
+    reverse_stereo: bool,
     /// `logs/audio.log`: every sound asked for and stopped, ambient sounds and music, and a count of the voices.
     log: Option<std::io::BufWriter<std::fs::File>>,
     started: std::time::Instant,
@@ -157,6 +159,7 @@ impl AudioSystem {
             frame: 0,
             ambient_setting: setting("AmbientVolume", 1.0),
             sound_setting: setting("SoundVolume", 1.0),
+            reverse_stereo: config.get("ALAudio.ALAudioSubsystem", "ReverseStereo").is_some_and(|v| v.trim().eq_ignore_ascii_case("true")),
             log: std::fs::create_dir_all(root.join("logs"))
                 .ok()
                 .and_then(|_| std::fs::File::create(root.join("logs").join("audio.log")).ok())
@@ -164,6 +167,19 @@ impl AudioSystem {
             started: std::time::Instant::now(),
             repeats: HashMap::new(),
         })
+    }
+
+    /// Reads the volumes and the stereo option the player set in the option menus (`SetVolumes`).
+    pub fn apply_settings(&mut self, vm: &Vm<'_>) {
+        use hp3_world::settings::{AUDIO, flag, float};
+        self.ambient_setting = float(vm, AUDIO, "AmbientVolume", 1.0);
+        self.sound_setting = float(vm, AUDIO, "SoundVolume", 1.0);
+        self.reverse_stereo = flag(vm, AUDIO, "ReverseStereo", false);
+        if let Ok(mut m) = self.mixer.lock() {
+            m.music_volume = float(vm, AUDIO, "MusicVolume", 0.5);
+            m.effect_volume = self.sound_setting;
+            m.voice_volume = float(vm, AUDIO, "VoiceVolume", 1.0);
+        }
     }
 
     /// The decoded sound if it is ready. A sound met for the first time goes to the decoder thread and this is `Err(())`
@@ -318,7 +334,7 @@ impl AudioSystem {
             }
         }
         if let Ok(mut m) = self.mixer.lock() {
-            m.listener = mixer::Listener { position: position.to_array(), right: mixer::right_from_yaw(yaw) };
+            m.listener = mixer::Listener { position: position.to_array(), right: { let r = mixer::right_from_yaw(yaw); if self.reverse_stereo { [-r[0], -r[1]] } else { r } } };
         }
         self.frame += 1;
         if self.frame % 15 == 1 {

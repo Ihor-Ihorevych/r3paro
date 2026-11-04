@@ -164,6 +164,12 @@ fn pose(root: &Path, package: &str, mesh: &str, out: &Path, seq: Option<&str>, f
         None => (hp3_anim::skin_points(m, &hp3_anim::pose(&skel, None, None, 0.0)), "reference".into()),
     };
     eprintln!("posing {label}");
+    {
+        let to_actor = hp3_anim::mesh_to_actor(m);
+        let zs: Vec<f32> = points.iter().map(|p| to_actor.transform_point3(glam::Vec3::new(p.x, p.y, p.z)).z).collect();
+        let (lo, hi) = zs.iter().fold((f32::MAX, f32::MIN), |(a, b), &z| (a.min(z), b.max(z)));
+        println!("posed {label}: vertex z from {lo:.1} to {hi:.1} (origin at 0)");
+    }
     let geom = hp3_render::meshes::build_posed(&loader, &pkg, mi, &[], Some(&points)).ok_or("no geometry")?;
     if std::env::var_os("HP3_POSE_DEBUG").is_some() {
         for (i, b) in geom.batches.iter().enumerate() {
@@ -232,6 +238,31 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
                 }
             }
         }
+        // HP3_WALK=<actor>:<x>,<y>,<z>><x>,<y>@<tick>: as in hp3-run, the actor is put there and pushed towards the point.
+        if let Ok(spec) = std::env::var("HP3_WALK")
+            && let Some((what, tick)) = spec.split_once('@')
+            && tick.parse::<u32>().is_ok_and(|t| frame >= t)
+            && let Some((name, route)) = what.split_once(':')
+            && let Some((from, to)) = route.split_once('>')
+        {
+            let num = |s: &str| -> Vec<f32> { s.split(',').filter_map(|v| v.parse().ok()).collect() };
+            let (from, to) = (num(from), num(to));
+            let actors = hp3_world::world(&mut vm).actors.clone();
+            for a in actors {
+                if !hp3_script::natives::object_path(&vm, a).ends_with(&format!(".{name}")) {
+                    continue;
+                }
+                if Some(frame) == tick.parse::<u32>().ok() && from.len() == 3 {
+                    hp3_world::physics::far_move(&mut vm, a, Vec3::new(from[0], from[1], from[2]), false, false);
+                }
+                if to.len() == 2 {
+                    let at = hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "Location"));
+                    let dir = (glam::Vec2::new(to[0], to[1]) - at.truncate()).normalize_or_zero();
+                    let accel = Value::Struct(vec![Value::Float(dir.x * 389.0), Value::Float(dir.y * 389.0), Value::Float(0.0)].into());
+                    hp3_world::set(&mut vm, a, "Acceleration", accel);
+                }
+            }
+        }
         hp3_world::tick(&mut vm, 1.0 / 60.0);
     }
     // HP3_SHOW_HUD=1 fades every HUD item in (they rest hidden until the game shows them).
@@ -242,15 +273,33 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
     {
         for it in items.iter().filter_map(Value::as_obj) {
             let _ = vm.event(it, "DoFadeIn", &mut []);
+            if std::env::var_os("HP3_HUD_COUNTS").is_some() {
+                let class = vm.db.objects.get(it).class.map(|c| vm.db.names.get(vm.db.structs[c.0 as usize].name).to_string()).unwrap_or_default();
+                let count = hp3_world::fire(&mut vm, it, "GetCount", &mut []);
+                let (show, x, y) = (hp3_world::get(&mut vm, it, "bDisplayCount"), hp3_world::get(&mut vm, it, "nCountMiddleX"), hp3_world::get(&mut vm, it, "nCountMiddleY"));
+                eprintln!("hud item {class}: count {count:?} display {show:?} at {x:?},{y:?}");
+            }
         }
         for _ in 0..30 {
+            hp3_world::tick(&mut vm, 1.0 / 60.0);
+        }
+    }
+    // HP3_OPEN_MENU=<package.Page> opens a menu page (the pause menu is HGame.HPPageMainMenu) before rendering.
+    if let Ok(page) = std::env::var("HP3_OPEN_MENU") {
+        let opened = hp3_world::interactions::open_menu(&mut vm, &page);
+        eprintln!("open menu {page}: {opened}");
+        for _ in 0..10 {
             hp3_world::tick(&mut vm, 1.0 / 60.0);
         }
     }
     // HP3_CLICK=x,y[;x,y...] clicks the menus at those points (of the output size) before rendering.
     if let Ok(clicks) = std::env::var("HP3_CLICK") {
         for c in clicks.split(';') {
-            let _ = hp3_world::canvas::render(&mut vm, 1280, 720);
+            let (cw, ch): (u32, u32) = std::env::var("HP3_SIZE")
+                .ok()
+                .and_then(|s| s.split_once('x').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?))))
+                .unwrap_or((1280, 720));
+            let _ = hp3_world::canvas::render(&mut vm, cw, ch);
             let v: Vec<f32> = c.split(',').filter_map(|x| x.trim().parse().ok()).collect();
             if v.len() == 2 {
                 hp3_world::gui::mouse_move(&mut vm, v[0], v[1]);
@@ -343,7 +392,11 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
             camera = Camera { position: Vec3::new(v[0], v[1], v[2]), rotation: [v[3] as i32, v[4] as i32, 0], fov_degrees: 90.0 };
         }
     }
-    let (w, h) = (1280, 720);
+    // HP3_SIZE=<w>x<h> renders at another size (the menus pick their fonts by width).
+    let (w, h) = std::env::var("HP3_SIZE")
+        .ok()
+        .and_then(|s| s.split_once('x').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?))))
+        .unwrap_or((1280, 720));
     let gpu_scene = renderer.upload_scene(&scene);
     let refs: Vec<_> = instances.iter().map(|(m, t, l)| (m.as_ref(), *t, *l)).collect();
     // The HUD over the scene (HP3_NO_HUD=1 leaves it out).

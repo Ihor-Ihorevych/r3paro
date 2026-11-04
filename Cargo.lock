@@ -521,6 +521,7 @@ version = "0.5.3"
 name = "hp3-package"
 version = "0.5.3"
 dependencies = [
+ "hp3-core",
  "log",
  "thiserror 2.0.21",
 ]

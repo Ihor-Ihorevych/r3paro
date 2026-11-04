@@ -53,10 +53,14 @@ fn is_digable(vm: &mut Vm<'_>, a: ObjId) -> bool {
     vm.db.find("LapiforDigableObject").zip(class).is_some_and(|(k, c)| vm.is_child_of(c, k))
 }
 
+/// `Actor.CollideType` value of a box (`CT_Box`; 0 is `CT_Cylinder`).
+const CT_BOX: u8 = 1;
+
 /// Rebuilds the boxes of actors that block movement (static meshes collide by their triangles instead).
 fn refresh_actor_boxes(vm: &mut Vm<'_>) {
     let actors = std::mem::take(&mut world(vm).actors);
     let s = Slots::get(vm);
+    let (collide_type, collision_width, rotation) = (crate::actor_slot(vm, "CollideType"), crate::actor_slot(vm, "CollisionWidth"), crate::actor_slot(vm, "Rotation"));
     let mut boxes = Vec::new();
     for &a in &actors {
         let blocks_actors = crate::read(vm, a, s.block).as_bool();
@@ -71,9 +75,21 @@ fn refresh_actor_boxes(vm: &mut Vm<'_>) {
         if r <= 0.0 || h <= 0.0 {
             continue;
         }
+        // `CollideType` box (1): a box turned with the actor, half sizes radius (x), width (y, the radius when 0) and height (z): the
+        // invisible walls and ramps of the levels. Anything else is an upright cylinder.
+        let is_box = crate::read(vm, a, collide_type).as_byte() == CT_BOX;
+        if is_box {
+            let width = crate::read(vm, a, collision_width).as_float();
+            let rot: Vec<i32> = crate::read(vm, a, rotation).fields().iter().map(Value::as_int).collect();
+            let ax = hp3_script::natives::rot_axes([rot.first().copied().unwrap_or(0), rot.get(1).copied().unwrap_or(0), rot.get(2).copied().unwrap_or(0)]);
+            let axes = [Vec3::from(ax[0]), Vec3::from(ax[1]), Vec3::from(ax[2])];
+            let y = if width > 0.0 { width } else { r };
+            boxes.push(ActorBox { actor: a, center: crate::read_vec(vm, a, s.location), extent: Vec3::new(r, y, h), blocks_actors, blocks_players, is_pawn: is_pawn(vm, a), owner: crate::read(vm, a, s.owner).as_obj(), axes: Some(axes) });
+            continue;
+        }
         // A mound the rabbit digs is dug from up to 60 away, so its wall must let the rabbit within that (radius 72 would keep it at 82).
         let r = if r > DIG_BLOCK_RADIUS && is_digable(vm, a) { DIG_BLOCK_RADIUS } else { r };
-        boxes.push(ActorBox { actor: a, center: crate::read_vec(vm, a, s.location), extent: Vec3::new(r, r, h), blocks_actors, blocks_players, is_pawn: is_pawn(vm, a), owner: crate::read(vm, a, s.owner).as_obj() });
+        boxes.push(ActorBox { actor: a, center: crate::read_vec(vm, a, s.location), extent: Vec3::new(r, r, h), blocks_actors, blocks_players, is_pawn: is_pawn(vm, a), owner: crate::read(vm, a, s.owner).as_obj(), axes: None });
     }
     world(vm).actors = actors;
     world(vm).collision.actors = boxes;
@@ -350,8 +366,33 @@ fn floor_below(vm: &mut Vm<'_>, a: ObjId, depth: f32) -> Option<Hit> {
             break;
         }
     }
+    // A pawn on a tread, with its box just over a riser (the corner of a stair), can still be embedded in that riser's face
+    // however narrow the box: it then looks for the floor from a hair higher, which clears the face, and the result is turned
+    // back into time along the original sweep.
+    if hit.is_some_and(|h| h.time <= 0.0 && h.normal.z < WALKABLE_Z) {
+        // (The sweep pushes the planes out by 1.1 times the box, so at a corner the box's bottom can sit about 4 units in.)
+        for lift in [1.0, 2.0, 4.0, 5.0] {
+            let found = world(vm).collision.trace_as(player, loc + Vec3::Z * lift, loc - Vec3::Z * depth, ext, Some(a));
+            if crate::envc::var("HP3_FLOOR_DEBUG").is_ok_and(|n| hp3_script::natives::object_path(vm, a).ends_with(&n)) {
+                eprintln!("floor retry: frame {} at {loc} lift {lift} -> {:?}", world(vm).frame, found.map(|f| (f.time, f.normal, f.location)));
+            }
+            let Some(found) = found else { continue };
+            if found.time <= 0.0 && found.normal.z < WALKABLE_Z {
+                continue;
+            }
+            let drop = found.time * (depth + lift) - lift;
+            // A box coming straight down cannot meet a riser's side: landing with an upright normal is the corner of a tread, and
+            // the tread is what it came down on.
+            let normal = if found.normal.z < WALKABLE_Z && found.normal.z.abs() < 0.1 { Vec3::Z } else { found.normal };
+            hit = Some(Hit { time: (drop / depth).max(0.0), normal, ..found });
+            break;
+        }
+    }
     let hit = hit?;
     let normal = surface_normal(vm, a, &hit, loc, depth);
+    if crate::envc::var("HP3_FLOOR_DEBUG").is_ok_and(|n| hp3_script::natives::object_path(vm, a).ends_with(&n)) {
+        eprintln!("floor result: frame {} hit time {} normal {} -> surface normal {normal}", world(vm).frame, hit.time, hit.normal);
+    }
     (normal.z >= WALKABLE_Z).then_some(Hit { normal, ..hit })
 }
 
@@ -384,10 +425,21 @@ fn surface_normal(vm: &mut Vm<'_>, a: ObjId, hit: &Hit, from: Vec3, depth: f32) 
     let ext = extent(vm, a);
     let thin = Vec3::new(2.0, 2.0, ext.z);
     let player = blocked_as_player(vm, a);
-    match world(vm).collision.trace_as(player, from, from - Vec3::Z * depth, thin, Some(a)) {
-        Some(under) if under.normal.z >= WALKABLE_Z => under.normal,
-        _ => hit.normal,
+    if let Some(under) = world(vm).collision.trace_as(player, from, from - Vec3::Z * depth, thin, Some(a))
+        && under.normal.z >= WALKABLE_Z
+    {
+        return under.normal;
     }
+    // Standing on a tread with its middle right at the riser's edge, even the thin box is inside the riser's plane region: from a
+    // little higher it is clear of it and finds the tread.
+    for lift in [1.0, 2.0, 4.0, 5.0] {
+        if let Some(under) = world(vm).collision.trace_as(player, from + Vec3::Z * lift, from - Vec3::Z * depth, thin, Some(a))
+            && under.normal.z >= WALKABLE_Z
+        {
+            return under.normal;
+        }
+    }
+    hit.normal
 }
 
 /// Whether `a` is the pawn the local player controls (what `bBlockPlayers` actors block).
@@ -488,105 +540,69 @@ fn ground_velocity(vm: &mut Vm<'_>, a: ObjId, accel: Vec3, mut vel: Vec3, dt: f3
 /// (else the pawn slides along it); the pawn is put back on the floor and takes what it stands on as its
 /// `Base`. With no floor under it, a pawn that must not walk off ledges has the step undone, and any other one
 /// starts to fall. At the end the velocity is what the pawn actually moved.
-/// Walks, and keeps what a step or a slope lifted the pawn by as a view offset that eases out, so the pawn and the
-/// camera rise over a stair instead of jumping a step at a time. The offset is only for drawing; the pawn is where it is.
+/// Walks, then gives the pawn the stair smoothing of the original game (`smooth_steps`).
 fn walk_smoothed(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
-    let before = vec(&get(vm, a, "Location")).z;
-    let had_base = get(vm, a, "Base").as_obj();
+    let old = vec(&get(vm, a, "Location"));
     walk(vm, a, dt);
-    // The heroes slide over stairs as over a ramp (below); the others ease each step off as it comes.
-    if is_hero(vm, a)
-        && let Some(off) = hero_stair_offset(vm, a, dt)
-    {
-        let w = world(vm);
-        if off.abs() < 0.05 {
-            w.step_smooth.remove(&a);
-        } else {
-            w.step_smooth.insert(a, off);
-        }
+    smooth_steps(vm, a, old);
+}
+
+/// Stair smoothing as the original's pawns have it. The pawn itself climbs a step in one tick; what it keeps in
+/// `SavedPrePivot.z` is how far its mesh (and the script's camera target) lags behind, so they rise over a stair as over a ramp.
+///
+/// After a tick on foot, `d` is the horizontal distance moved times `StepHeight / StepWidth` (16 / 32: the slope of a
+/// stair), at most `StepHeight`. What is kept moves towards nothing by `d`, never past it. Then a tick that took the
+/// pawn down by `StepHeight` (within 1) keeps `StepHeight - d`, and one that took it up keeps `-(StepHeight - d)`: the
+/// mesh starts a step behind and gains on the pawn at the stair's own slope while it walks. Only walking gives it back.
+/// Written from the behaviour checked in the original's pawn physics (the flipendo notes, engine.md "Stair smoothing").
+fn smooth_steps(vm: &mut Vm<'_>, a: ObjId, old: Vec3) {
+    if get(vm, a, "Physics").as_byte() != PHYS_WALKING {
+        set_saved_pre_pivot(vm, a, 0.0);
         return;
     }
-    let rise = vec(&get(vm, a, "Location")).z - before;
-    let walking = get(vm, a, "Physics").as_byte() == PHYS_WALKING;
-    let w = world(vm);
-    let mut off = w.step_smooth.get(&a).copied().unwrap_or(0.0);
-    if walking && had_base == get(vm, a, "Base").as_obj() && rise.abs() > 0.3 && rise.abs() <= MAX_STEP_HEIGHT + 4.0 {
-        off -= rise;
+    let (step_height, step_width) = (get(vm, a, "StepHeight").as_float(), get(vm, a, "StepWidth").as_float());
+    if step_height <= 0.0 || step_width <= 0.0 {
+        return;
     }
-    off *= (-12.0 * dt).exp();
-    let w = world(vm);
-    if off.abs() < 0.05 {
-        w.step_smooth.remove(&a);
-    } else {
-        w.step_smooth.insert(a, off);
+    let new = vec(&get(vm, a, "Location"));
+    let d = ((new - old).truncate().length() * step_height / step_width).min(step_height);
+    let mut kept = saved_pre_pivot(vm, a);
+    if kept > 0.0 {
+        kept = (kept - d).max(0.0);
+    } else if kept < 0.0 {
+        kept = (kept + d).min(0.0);
+    }
+    let rise = new.z - old.z;
+    if (rise + step_height).abs() <= 1.0 {
+        kept = step_height - d;
+    } else if (rise - step_height).abs() <= 1.0 {
+        kept = -(step_height - d);
+    }
+    set_saved_pre_pivot(vm, a, kept);
+}
+
+fn saved_pre_pivot(vm: &mut Vm<'_>, a: ObjId) -> f32 {
+    vec(&get(vm, a, "SavedPrePivot")).z
+}
+
+fn set_saved_pre_pivot(vm: &mut Vm<'_>, a: ObjId, z: f32) {
+    let now = vec(&get(vm, a, "SavedPrePivot"));
+    if (now.z - z).abs() > 1e-4 {
+        set(vm, a, "SavedPrePivot", value(Vec3::new(now.x, now.y, z)));
     }
 }
 
-/// Harry, Ron and Hermione (the pawns that get the ramp-like stair view).
-fn is_hero(vm: &mut Vm<'_>, a: ObjId) -> bool {
-    let Some(hero) = vm.db.find("HPHeroPawn") else { return false };
-    vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, hero))
+/// A pawn that is not walking keeps no stair offset (other actors have none to clear).
+fn drop_step_offset(vm: &mut Vm<'_>, a: ObjId) {
+    if is_pawn(vm, a) && saved_pre_pivot(vm, a) != 0.0 {
+        set_saved_pre_pivot(vm, a, 0.0);
+    }
 }
 
-/// How far a hero on the ground is drawn above or below where it physically stands so that stairs read as a slide: the floor
-/// is sampled across `STAIR_WINDOW` along the way the hero goes, and the hero is drawn at the average of what is found. On a
-/// staircase whose treads are about as long as the window that average rises at a steady slope (a ramp through the nosings)
-/// instead of in steps, going up or down, and on flat ground or a real slope it is the floor itself. At rest the offset eases
-/// back to none. `None` when there is no clear reading (the pawn is in the air, or against a wall): the usual easing applies.
-fn hero_stair_offset(vm: &mut Vm<'_>, a: ObjId, dt: f32) -> Option<f32> {
-    if get(vm, a, "Physics").as_byte() != PHYS_WALKING {
-        return None;
-    }
-    let current = world(vm).step_smooth.get(&a).copied().unwrap_or(0.0);
-    let heading = vec(&get(vm, a, "Velocity")).truncate();
-    if heading.length() < 20.0 {
-        world(vm).stair_floor.remove(&a);
-        return Some(current * (-10.0 * dt).exp());
-    }
-    let dir = heading.normalize();
-    let (loc, ext) = (vec(&get(vm, a, "Location")), extent(vm, a));
-    let probe = |vm: &mut Vm<'_>, t: f32| -> Option<f32> {
-        let at = loc + Vec3::new(dir.x, dir.y, 0.0) * t;
-        let hit = world(vm).collision.trace_static(at, at - Vec3::Z * (ext.z + MAX_STEP_HEIGHT + 8.0), Vec3::ZERO)?;
-        (hit.time > 0.0 && hit.normal.z >= WALKABLE_Z).then_some(hit.location.z)
-    };
-    let debug = crate::envc::var_os("HP3_STAIR_DEBUG").is_some() && is_player_pawn(vm, a);
-    // The player is sampled more finely and over a wider window (what is on screen), the companions more cheaply. The samples are
-    // weighted by a triangle, so the ramp has no corners where it starts and ends.
-    let (samples, window) = if is_player_pawn(vm, a) { (13usize, 64.0f32) } else { (7, 48.0) };
-    let half = (samples / 2) as f32;
-    let (mut sum, mut weights, mut found) = (0.0f32, 0.0f32, 0usize);
-    for i in 0..samples {
-        let k = i as f32 - half;
-        let weight = 1.0 - k.abs() / (half + 1.0);
-        if let Some(z) = probe(vm, k * window / (samples - 1) as f32) {
-            sum += z * weight;
-            weights += weight;
-            found += 1;
-        }
-    }
-    if found + 1 < samples {
-        return None;
-    }
-    let average = sum / weights;
-    // The average moves in small hops where a sample crosses a riser: a very short filter on the drawn floor (not on the offset,
-    // which jumps with the pawn) takes those out. It starts from where the pawn was last drawn.
-    let drawn_before = world(vm).stair_floor.get(&a).copied().unwrap_or(loc.z - ext.z + 0.5 + current);
-    let drawn = if (average - drawn_before).abs() < MAX_STEP_HEIGHT { drawn_before + (average - drawn_before) * (1.0 - (-dt / 0.025).exp()) } else { average };
-    world(vm).stair_floor.insert(a, drawn);
-    if debug {
-        eprintln!("stair: frame {} loc.z {:.1} dir ({:.2},{:.2}) average {average:.2}", world(vm).frame, loc.z, dir.x, dir.y);
-    }
-    // Taken as it is: the average moves smoothly with the pawn, while the pawn's own height jumps a step at a time, so any lag
-    // on top would show as a bump at each step.
-    // Against where the pawn really stands (its box bottom), which rises a step before its middle reaches the riser.
-    // (A pawn rests half a unit above its floor, which is taken out so that flat ground is drawn as it always was.)
-    Some((drawn - (loc.z - ext.z) + 0.5).clamp(-MAX_STEP_HEIGHT, MAX_STEP_HEIGHT))
-}
-
-/// How far below (negative) or above where it is a walking pawn is drawn, while it eases onto a new step.
-pub fn view_offset(vm: &mut Vm<'_>, a: ObjId) -> f32 {
-    world(vm).step_smooth.get(&a).copied().unwrap_or(0.0)
+/// The mesh offset the stair smoothing keeps now lives in `SavedPrePivot` (drawn through `mesh_offset`, read by the camera
+/// script), so there is nothing extra to add to where an actor is drawn.
+pub fn view_offset(_vm: &mut Vm<'_>, _a: ObjId) -> f32 {
+    0.0
 }
 
 fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
@@ -668,7 +684,7 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
             let at = vec(&get(vm, a, "Location"));
             let ext = extent(vm, a);
             let raw = world(vm).collision.trace_as(false, at, at - Vec3::Z * (MAX_STEP_HEIGHT + 2.0), ext, Some(a));
-            eprintln!("floor: at {at} ext {ext} floor {:?} raw {:?}", floor_found.map(|f| (f.time, f.normal)), raw.map(|f| (f.time, f.normal)));
+            eprintln!("floor: frame {} at {at} ext {ext} floor {:?} raw {:?}", world(vm).frame, floor_found.map(|f| (f.time, f.normal)), raw.map(|f| (f.time, f.normal)));
         }
         match floor_found {
             Some(floor) => {
@@ -720,6 +736,9 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     set(vm, a, "Velocity", value(actual));
     let _ = old_base;
 }
+
+/// The least a walker is pushed forward when it steps up onto a tread (units).
+const MIN_STEP_PUSH: f32 = 6.0;
 
 /// A normal whose z is below this is the side of a step (a riser); steeper than that is not climbed.
 const MAX_STEP_SIDE_Z: f32 = 0.08;
@@ -783,11 +802,15 @@ fn step_up(vm: &mut Vm<'_>, a: ObjId, delta: Vec3, hit: Hit, depth: u32) {
     // step goes where it is pushed (the player's heading), by at least a few units, so that it comes down on the
     // tread and not back where it stood.
     let mut delta = delta;
-    if depth == 0 && steppable && get(vm, a, "Physics").as_byte() == PHYS_WALKING && is_player_pawn(vm, a) {
+    // Any walker that is being driven does this, not only the player: a companion or a student led up a stair stood
+    // against the first riser, its drift along the face never carrying it over.
+    if depth == 0 && steppable && get(vm, a, "Physics").as_byte() == PHYS_WALKING {
         let push = vec(&get(vm, a, "Acceleration"));
         let push = Vec3::new(push.x, push.y, 0.0).normalize_or_zero();
         if push != Vec3::ZERO {
-            delta = push * delta.length().max(6.0);
+            // At least a few units, so that it comes down on the tread and not back where it stood. (Tried less for a pawn walking at
+            // speed, to stop the small lunge at each riser: 3 units or none left it bouncing back off the riser for many frames.)
+            delta = push * delta.length().max(MIN_STEP_PUSH);
         }
     }
     let mut now = Some(hit);
@@ -1549,8 +1572,14 @@ pub fn step_actor(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
             return;
         }
         PHYS_WALKING => walk_smoothed(vm, a, dt),
-        PHYS_FALLING => fall(vm, a, dt),
-        PHYS_FLYING | PHYS_SWIMMING => fly(vm, a, dt),
+        PHYS_FALLING => {
+            drop_step_offset(vm, a);
+            fall(vm, a, dt)
+        }
+        PHYS_FLYING | PHYS_SWIMMING => {
+            drop_step_offset(vm, a);
+            fly(vm, a, dt)
+        }
         PHYS_ROTATING => rotate(vm, a, dt),
         PHYS_PROJECTILE => projectile(vm, a, dt),
         PHYS_TRAILER => {
@@ -1732,8 +1761,14 @@ pub fn step(vm: &mut Vm<'_>, dt: f32) {
                 continue;
             }
             PHYS_WALKING => walk_smoothed(vm, a, dt),
-            PHYS_FALLING => fall(vm, a, dt),
-            PHYS_FLYING | PHYS_SWIMMING => fly(vm, a, dt),
+            PHYS_FALLING => {
+                drop_step_offset(vm, a);
+                fall(vm, a, dt)
+            }
+            PHYS_FLYING | PHYS_SWIMMING => {
+                drop_step_offset(vm, a);
+                fly(vm, a, dt)
+            }
             PHYS_ROTATING => rotate(vm, a, dt),
             PHYS_PROJECTILE => projectile(vm, a, dt),
             _ => continue,

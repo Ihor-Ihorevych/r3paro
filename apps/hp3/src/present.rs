@@ -18,6 +18,8 @@ enum Msg {
     Surface(wgpu::Surface<'static>),
     /// The window changed: configure the surface again.
     Reconfigure { width: u32, height: u32 },
+    /// The picture adjustment (exponent for gamma, brightness added, contrast multiplier) from the game's display options.
+    Look([f32; 3]),
     Quit,
 }
 
@@ -45,7 +47,7 @@ fn make_images(device: &wgpu::Device, format: wgpu::TextureFormat, width: u32, h
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             })
         })
@@ -122,6 +124,11 @@ impl Presenter {
         &self.views[slot]
     }
 
+    /// Sets the picture adjustment of the display options: `[gamma exponent, brightness, contrast]`, `[1, 0, 1]` for none.
+    pub fn set_look(&self, look: [f32; 3]) {
+        let _ = self.tx.send(Msg::Look(look));
+    }
+
     /// Hands a drawn image over to be shown.
     pub fn show(&self, slot: usize) {
         let image = self.images[slot].clone();
@@ -177,9 +184,12 @@ fn present_loop(
         }
     };
     let mut configured = (0, 0);
+    let mut look = NEUTRAL;
+    let mut adjust: Option<Adjust> = None;
     for message in messages {
         match message {
             Msg::Quit => break,
+            Msg::Look(l) => look = l,
             Msg::Surface(new) => {
                 surface = new;
                 configured = (0, 0);
@@ -206,12 +216,109 @@ fn present_loop(
                 };
                 if let Some(frame) = frame {
                     let mut encoder = device.create_command_encoder(&Default::default());
-                    encoder.copy_texture_to_texture(image.as_image_copy(), frame.texture.as_image_copy(), wgpu::Extent3d { width: width.min(frame.texture.width()), height: height.min(frame.texture.height()), depth_or_array_layers: 1 });
+                    if look == NEUTRAL {
+                        encoder.copy_texture_to_texture(image.as_image_copy(), frame.texture.as_image_copy(), wgpu::Extent3d { width: width.min(frame.texture.width()), height: height.min(frame.texture.height()), depth_or_array_layers: 1 });
+                    } else {
+                        let a = adjust.get_or_insert_with(|| Adjust::new(&device, format));
+                        a.draw(&device, &queue, &mut encoder, &image, &frame.texture, look);
+                    }
                     queue.submit([encoder.finish()]);
                     frame.present();
                 }
                 let _ = free.send(slot);
             }
         }
+    }
+}
+
+/// No picture adjustment: gamma exponent 1, nothing added, contrast 1.
+const NEUTRAL: [f32; 3] = [1.0, 0.0, 1.0];
+
+/// The pass that shows a frame through the display options: `(c - 0.5) * contrast + 0.5 + brightness`, then the gamma
+/// exponent.
+struct Adjust {
+    pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    params: wgpu::Buffer,
+}
+
+const ADJUST_SHADER: &str = "
+struct Params { look: vec4<f32> };
+@group(0) @binding(0) var frame: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> params: Params;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let size = vec2<i32>(textureDimensions(frame));
+    let c = textureLoad(frame, min(vec2<i32>(pos.xy), size - vec2<i32>(1)), 0).rgb;
+    var v = (c - vec3<f32>(0.5)) * params.look.z + vec3<f32>(0.5 + params.look.y);
+    v = pow(clamp(v, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(params.look.x));
+    return vec4<f32>(v, 1.0);
+}
+";
+
+impl Adjust {
+    fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Adjust {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("adjust"), source: wgpu::ShaderSource::Wgsl(ADJUST_SHADER.into()) });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("adjust"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("adjust"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("adjust"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState { module: &module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview: None,
+            cache: None,
+        });
+        let params = device.create_buffer(&wgpu::BufferDescriptor { label: Some("adjust"), size: 16, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        Adjust { pipeline, layout, params }
+    }
+
+    fn draw(&self, device: &wgpu::Device, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, image: &wgpu::Texture, target: &wgpu::Texture, look: [f32; 3]) {
+        let bytes: Vec<u8> = [look[0], look[1], look[2], 0.0f32].iter().flat_map(|v| v.to_le_bytes()).collect();
+        queue.write_buffer(&self.params, 0, &bytes);
+        let view = image.create_view(&Default::default());
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("adjust"),
+            layout: &self.layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }, wgpu::BindGroupEntry { binding: 1, resource: self.params.as_entire_binding() }],
+        });
+        let target_view = target.create_view(&Default::default());
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("adjust"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &target_view, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store } })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.draw(0..3, 0..1);
     }
 }

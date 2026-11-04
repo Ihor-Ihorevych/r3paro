@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use glam::Mat4;
-use hp3_assets::loader::{Image, ObjKey};
+use hp3_assets::loader::{Image, MaterialBlend, ObjKey};
 use wgpu::util::DeviceExt;
 
 use crate::gpu::{GpuScene, Renderer, DEPTH_FORMAT};
@@ -35,6 +35,13 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
     if (c.a < 0.5) { discard; }
     return vec4<f32>(c.rgb * m.light.rgb * 2.0, 1.0);
 }
+
+// Sections blended by their alpha (flame cards): nothing is cut out, the alpha goes to the blend.
+@fragment fn fs_blend(i: VsOut) -> @location(0) vec4<f32> {
+    let c = textureSample(tex, samp, i.uv);
+    if (c.a < 0.01) { discard; }
+    return vec4<f32>(c.rgb * m.light.rgb * 2.0, c.a);
+}
 "#;
 
 /// Stride of one model matrix in the instance buffer (uniform offsets must be 256-aligned).
@@ -47,6 +54,7 @@ struct MeshDraw {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     count: u32,
+    blend: MaterialBlend,
 }
 
 /// A mesh uploaded once and drawn at any number of transforms.
@@ -57,6 +65,9 @@ pub struct GpuMesh {
 
 pub struct Dynamic {
     pipeline: wgpu::RenderPipeline,
+    /// Sections blended by alpha and added by alpha: depth-tested, not written.
+    alpha_pipeline: wgpu::RenderPipeline,
+    additive_pipeline: wgpu::RenderPipeline,
     model_layout: wgpu::BindGroupLayout,
     instances: RefCell<(wgpu::Buffer, wgpu::BindGroup, u64)>,
     images: RefCell<HashMap<ObjKey, wgpu::TextureView>>,
@@ -87,39 +98,49 @@ impl Dynamic {
             bind_group_layouts: &[r.globals_layout(), r.texture_layout(), &model_layout],
             push_constant_ranges: &[],
         });
-        let pipeline = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("dynamic"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &crate::gpu::VERTEX_ATTRIBUTES,
-                }],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs"),
-                targets: &[Some(r.color_format.into())],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
-            multisample: Default::default(),
-            multiview: None,
-            cache: None,
-        });
+        // `blend` None: opaque and cut-out sections (depth written); Some: blended with the given factors, depth only tested.
+        let make = |label: &str, fs: &str, blend: Option<wgpu::BlendState>| {
+            d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs"),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Vertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &crate::gpu::VERTEX_ATTRIBUTES,
+                    }],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(fs),
+                    targets: &[Some(wgpu::ColorTargetState { format: r.color_format, blend, write_mask: wgpu::ColorWrites::ALL })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: blend.is_none(),
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            })
+        };
+        let pipeline = make("dynamic", "fs", None);
+        let alpha_pipeline = make("dynamic alpha", "fs_blend", Some(wgpu::BlendState::ALPHA_BLENDING));
+        let additive = wgpu::BlendState {
+            color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::SrcAlpha, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
+            alpha: wgpu::BlendComponent::OVER,
+        };
+        let additive_pipeline = make("dynamic additive", "fs_blend", Some(additive));
         let (buffer, bind) = Self::instance_buffer(r, &model_layout, 256);
-        Dynamic { pipeline, model_layout, instances: RefCell::new((buffer, bind, 256)), images: RefCell::new(HashMap::new()) }
+        Dynamic { pipeline, alpha_pipeline, additive_pipeline, model_layout, instances: RefCell::new((buffer, bind, 256)), images: RefCell::new(HashMap::new()) }
     }
 
     fn instance_buffer(r: &Renderer, layout: &wgpu::BindGroupLayout, capacity: u64) -> (wgpu::Buffer, wgpu::BindGroup) {
@@ -173,7 +194,7 @@ impl Dynamic {
                 contents: bytemuck::cast_slice(&b.indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
-            draws.push(MeshDraw { batch: bi, bind, vertices, indices, count: b.indices.len() as u32 });
+            draws.push(MeshDraw { batch: bi, bind, vertices, indices, count: b.indices.len() as u32, blend: b.blend });
         }
         GpuMesh { draws, local: geom.local }
     }
@@ -241,20 +262,35 @@ impl Dynamic {
             }
         }
         let inst = self.instances.borrow();
-        r.draw_with(scene, camera, color, depth, aspect, |pass| {
-            pass.set_pipeline(&self.pipeline);
-            for (i, (mesh, _, _)) in meshes.iter().enumerate() {
-                pass.set_bind_group(2, &inst.1, &[(i as u64 * STRIDE) as u32]);
-                for d in &mesh.draws {
-                    pass.set_bind_group(1, &d.bind, &[]);
-                    pass.set_vertex_buffer(0, d.vertices.slice(..));
-                    pass.set_index_buffer(d.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..d.count, 0, 0..1);
+        let sections = |pass: &mut wgpu::RenderPass<'_>, kinds: &[(MaterialBlend, &wgpu::RenderPipeline)]| {
+            for &(blend, pipeline) in kinds {
+                pass.set_pipeline(pipeline);
+                for (i, (mesh, _, _)) in meshes.iter().enumerate() {
+                    pass.set_bind_group(2, &inst.1, &[(i as u64 * STRIDE) as u32]);
+                    for d in mesh.draws.iter().filter(|d| (d.blend == MaterialBlend::Cutout && blend == MaterialBlend::Opaque) || d.blend == blend) {
+                        pass.set_bind_group(1, &d.bind, &[]);
+                        pass.set_vertex_buffer(0, d.vertices.slice(..));
+                        pass.set_index_buffer(d.indices.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..d.count, 0, 0..1);
+                    }
                 }
             }
-            if let Some((renderer, frame)) = particles {
-                renderer.draw(pass, frame);
-            }
-        })
+        };
+        r.draw_with(
+            scene,
+            camera,
+            color,
+            depth,
+            aspect,
+            // Opaque and cut-out sections go before the scene's blended surfaces, which test against their depth...
+            |pass| sections(pass, &[(MaterialBlend::Opaque, &self.pipeline)]),
+            // ...and the blended and added ones, then the particles, after them.
+            |pass| {
+                sections(pass, &[(MaterialBlend::Alpha, &self.alpha_pipeline), (MaterialBlend::Additive, &self.additive_pipeline)]);
+                if let Some((renderer, frame)) = particles {
+                    renderer.draw(pass, frame);
+                }
+            },
+        )
     }
 }

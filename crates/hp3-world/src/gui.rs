@@ -86,15 +86,69 @@ fn rel(v: f32, size: f32) -> f32 {
     if v.abs() <= 1.0 { v * size } else { v }
 }
 
+/// The box of a part of a composite control (a combo box's edit box, button and list, a menu option's label and
+/// control): their owner places them, so what their own window values say is not used.
+fn part_layout(vm: &mut Vm<'_>, o: ObjId, owner: ObjId) -> Option<[f32; 4]> {
+    let b: Vec<f32> = (0..4).map(|i| indexed(vm, owner, "Bounds", i).as_float()).collect();
+    let (x, y, w, h) = (b[0], b[1], b[2] - b[0], b[3] - b[1]);
+    if is_a(vm, owner, "GUIComboBox") {
+        let is = |vm: &mut Vm<'_>, name: &str| get(vm, owner, name).as_obj() == Some(o);
+        // The edit box takes the width but a square button's; the list drops below one row per item.
+        if is(vm, "Edit") {
+            return Some([x, y, (w - h).max(0.0), h]);
+        }
+        if is(vm, "MyShowListBtn") {
+            return Some([x + w - h, y, h, h]);
+        }
+        if is(vm, "MyListBox") {
+            let list = get(vm, owner, "MyListBox").as_obj().and_then(|l| get(vm, l, "List").as_obj());
+            let count = list.map(|l| list_items(vm, l).len()).unwrap_or(0);
+            let rows = count.min(get(vm, owner, "MaxVisibleItems").as_int().max(1) as usize).max(1);
+            return Some([x, y + h, w, h * rows as f32]);
+        }
+    } else if is_a(vm, owner, "GUIListBox") {
+        if get(vm, owner, "List").as_obj() == Some(o) {
+            return Some([x, y, w, h]);
+        }
+    } else if is_a(vm, owner, "GUIMenuOption") {
+        let label = get(vm, owner, "MyLabel").as_obj() == Some(o);
+        if label || get(vm, owner, "MyComponent").as_obj() == Some(o) {
+            let caption = get(vm, owner, "CaptionWidth").as_float();
+            let label_w = if caption <= 1.0 { caption * w } else { caption }.clamp(0.0, w);
+            let flipped = get(vm, owner, "bFlipped").as_bool();
+            let (lx, cx) = if flipped { (x + w - label_w, x) } else { (x, x + label_w) };
+            if label {
+                return Some([lx, y, label_w, h]);
+            }
+            let cw = w - label_w;
+            // A check box is a square, at the side of the label's opposite.
+            if is_a(vm, o, "GUICheckBoxButton") {
+                let s = cw.min(h);
+                return Some([cx, y + (h - s) / 2.0, s, s]);
+            }
+            return Some([cx, y, cw, h]);
+        }
+    }
+    None
+}
+
 /// A component's box on screen: left, top, width, height.
 fn layout(vm: &mut Vm<'_>, o: ObjId, screen: Screen) -> [f32; 4] {
     let owner = get(vm, o, "MenuOwner").as_obj().filter(|&m| m != o);
+    if let Some(owner) = owner
+        && let Some(r) = part_layout(vm, o, owner)
+    {
+        return r;
+    }
     let parent = owner.map(|m| {
         let b: Vec<f32> = (0..4).map(|i| indexed(vm, m, "Bounds", i).as_float()).collect();
         [b[0], b[1], b[2] - b[0], b[3] - b[1]]
     });
     let bound = get(vm, o, "bBoundToParent").as_bool();
-    let scale = get(vm, o, "bScaleToParent").as_bool();
+    // The trade page's bound children are laid out in fractions of the page (as the page's script expects); taking them
+    // as fractions of the screen on top of the page's origin pushed Yes and No down past the parchment.
+    let in_vendor = owner.is_some_and(|m| is_a(vm, m, "HPPageVendor"));
+    let scale = get(vm, o, "bScaleToParent").as_bool() || (bound && in_vendor);
     let (pw, ph) = match (parent, scale) {
         (Some(p), true) => (p[2], p[3]),
         _ => (screen.w, screen.h),
@@ -223,6 +277,21 @@ fn style_text(vm: &mut Vm<'_>, style: ObjId, state: u8, r: [f32; 4], just: u8, t
 
 fn draw_text(vm: &mut Vm<'_>, font: ObjId, text: &str, r: [f32; 4], just: u8, color: [u8; 4]) {
     let (w, h) = canvas::measure(vm, font, text);
+    // Text wider than its box wraps onto lines centered vertically as a block, instead of running off the screen.
+    if w > r[2] && r[2] > 0.0 && text.contains(' ') {
+        let lines = canvas::wrap_in_font(vm, font, text, r[2]);
+        let top = r[1] + (r[3] - h * lines.len() as f32) / 2.0;
+        for (i, l) in lines.iter().enumerate() {
+            let lw = canvas::measure(vm, font, l).0;
+            let x = match just {
+                1 => r[0] + (r[2] - lw) / 2.0,
+                2 => r[0] + r[2] - lw,
+                _ => r[0],
+            };
+            canvas::text(vm, font, l, x, top + h * i as f32, r[0] + r[2].max(lw), color);
+        }
+        return;
+    }
     let x = match just {
         1 => r[0] + (r[2] - w) / 2.0,
         2 => r[0] + r[2] - w,
@@ -232,14 +301,41 @@ fn draw_text(vm: &mut Vm<'_>, font: ObjId, text: &str, r: [f32; 4], just: u8, co
     canvas::text(vm, font, text, x, y, r[0] + r[2].max(w), color);
 }
 
+/// A slider: its style's image as a thin track across the box and the button style's image as a square thumb whose
+/// position follows `Value` between `MinValue` and `MaxValue`.
+fn draw_slider(vm: &mut Vm<'_>, o: ObjId, r: [f32; 4]) {
+    let state = get(vm, o, "MenuState").as_byte();
+    let (min, max, value) = (get(vm, o, "MinValue").as_float(), get(vm, o, "MaxValue").as_float(), get(vm, o, "Value").as_float());
+    let perc = if max > min { ((value - min) / (max - min)).clamp(0.0, 1.0) } else { 0.0 };
+    // The styles of the sliders declare only `ImgStyle`; `RStyles` stays empty.
+    let draw = |vm: &mut Vm<'_>, style: ObjId, r: [f32; 4]| {
+        let i = state.min(4) as usize;
+        let img = indexed(vm, style, "Images", i).as_obj();
+        let color = color_of(&indexed(vm, style, "ImgColors", i));
+        let mut rstyle = indexed(vm, style, "RStyles", i).as_byte();
+        if rstyle == 0 {
+            rstyle = indexed(vm, style, "ImgStyle", i).as_byte();
+        }
+        draw_image(vm, img, r, color, rstyle);
+    };
+    let thumb = r[3];
+    if let Some(style) = get(vm, o, "Style").as_obj() {
+        draw(vm, style, [r[0], r[1] + r[3] * 0.375, r[2], r[3] * 0.25]);
+    }
+    if let Some(style) = get(vm, o, "ButtonStyle").as_obj() {
+        draw(vm, style, [r[0] + perc * (r[2] - thumb).max(0.0), r[1], thumb, thumb]);
+    }
+}
+
 /// Lays out and draws a component and its children.
-fn draw_component(vm: &mut Vm<'_>, o: ObjId, canvas_obj: ObjId, screen: Screen, depth: usize) {
+fn draw_component(vm: &mut Vm<'_>, o: ObjId, canvas_obj: ObjId, screen: Screen, depth: usize, late: &mut Vec<ObjId>) {
     if depth > 16 || !get(vm, o, "bVisible").as_bool() {
         return;
     }
     let r = layout(vm, o, screen);
     store_bounds(vm, o, r);
     call_delegate(vm, o, "OnPreDraw", &mut [Value::Object(Some(canvas_obj))]);
+    let tiles_before = world(vm).canvas.tiles.len();
     let handled = call_delegate(vm, o, "OnDraw", &mut [Value::Object(Some(canvas_obj))]).as_bool();
     if !handled {
         if is_a(vm, o, "GUIPage") {
@@ -247,6 +343,12 @@ fn draw_component(vm: &mut Vm<'_>, o: ObjId, canvas_obj: ObjId, screen: Screen, 
             let color = color_of(&get(vm, o, "BackgroundColor"));
             let style = get(vm, o, "BackgroundRStyle").as_byte();
             draw_image(vm, bg, r, color, style);
+            // A page's own drawing (the stats, cards and portraits tabs) goes over the page background.
+            let tiles = &mut world(vm).canvas.tiles;
+            if tiles.len() > tiles_before + 1 {
+                let bg_tile = tiles.pop().unwrap();
+                tiles.insert(tiles_before, bg_tile);
+            }
         } else if is_a(vm, o, "GUIImage") {
             let img = get(vm, o, "Image").as_obj();
             let color = color_of(&get(vm, o, "ImageColor"));
@@ -277,10 +379,24 @@ fn draw_component(vm: &mut Vm<'_>, o: ObjId, canvas_obj: ObjId, screen: Screen, 
                     style_text(vm, style, state, r, 1, &caption, screen.w);
                 }
             }
-            if is_a(vm, o, "GUIGFXButton") {
+            // A check box shows its mark only while it is checked.
+            if is_a(vm, o, "GUIGFXButton") && (!get(vm, o, "bCheckBox").as_bool() || get(vm, o, "bChecked").as_bool()) {
                 let g = get(vm, o, "Graphic").as_obj();
                 draw_image(vm, g, r, [255; 4], canvas::STY_ALPHA);
             }
+        } else if is_a(vm, o, "GUISlider") {
+            draw_slider(vm, o, r);
+        } else if is_a(vm, o, "GUIEditBox") {
+            let state = get(vm, o, "MenuState").as_byte();
+            if let Some(style) = get(vm, o, "Style").as_obj() {
+                style_draw(vm, style, state, r);
+                let text = get(vm, o, "TextStr").as_str().to_string();
+                if !text.is_empty() {
+                    style_text(vm, style, state, [r[0] + r[3] * 0.3, r[1], r[2] - r[3] * 0.3, r[3]], 0, &text, screen.w);
+                }
+            }
+        } else if is_a(vm, o, "GUIList") {
+            draw_list(vm, o, r, screen);
         }
     }
     if let Value::Array(children) = get(vm, o, "Controls") {
@@ -289,8 +405,14 @@ fn draw_component(vm: &mut Vm<'_>, o: ObjId, canvas_obj: ObjId, screen: Screen, 
             k.0 = get(vm, k.1, "RenderWeight").as_float();
         }
         kids.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let popup = if is_a(vm, o, "GUIComboBox") { get(vm, o, "MyListBox").as_obj() } else { None };
         for (_, c) in kids {
-            draw_component(vm, c, canvas_obj, screen, depth + 1);
+            // A combo box's open list drops over what is drawn after it, so it is drawn last.
+            if Some(c) == popup && get(vm, c, "bVisible").as_bool() {
+                late.push(c);
+                continue;
+            }
+            draw_component(vm, c, canvas_obj, screen, depth + 1, late);
         }
     }
 }
@@ -300,8 +422,12 @@ pub fn render(vm: &mut Vm<'_>, canvas_obj: ObjId, width: u32, height: u32) {
     let Some(gui) = world(vm).viewport.gui else { return };
     let Value::Array(pages) = get(vm, gui, "MenuStack") else { return };
     let screen = Screen { w: width as f32, h: height as f32 };
+    let mut late = Vec::new();
     for p in pages.iter().filter_map(Value::as_obj) {
-        draw_component(vm, p, canvas_obj, screen, 0);
+        draw_component(vm, p, canvas_obj, screen, 0, &mut late);
+    }
+    for c in late {
+        draw_component(vm, c, canvas_obj, screen, 1, &mut Vec::new());
     }
 }
 
@@ -332,6 +458,10 @@ pub fn menu_open(vm: &mut Vm<'_>) -> bool {
     top_page(vm).is_some()
 }
 
+pub fn top_menu(vm: &mut Vm<'_>) -> Option<ObjId> {
+    top_page(vm)
+}
+
 fn top_page(vm: &mut Vm<'_>) -> Option<ObjId> {
     let gui = world(vm).viewport.gui?;
     match get(vm, gui, "MenuStack") {
@@ -343,11 +473,20 @@ fn top_page(vm: &mut Vm<'_>) -> Option<ObjId> {
 /// The cursor moved: the component under it becomes watched.
 pub fn mouse_move(vm: &mut Vm<'_>, x: f32, y: f32) {
     let Some(gui) = world(vm).viewport.gui else { return };
+    let (dx, dy) = (x - get(vm, gui, "MouseX").as_float(), y - get(vm, gui, "MouseY").as_float());
     set(vm, gui, "MouseX", Value::Float(x));
     set(vm, gui, "MouseY", Value::Float(y));
     let Some(page) = top_page(vm) else { return };
-    let over = hit(vm, page, x, y);
     let prev = get(vm, gui, "ActiveControl").as_obj();
+    // A pressed control that captures the mouse (a slider) keeps it while the cursor leaves its box.
+    if let Some(p) = prev
+        && get(vm, p, "MenuState").as_byte() == MSAT_PRESSED
+        && get(vm, p, "bCaptureMouse").as_bool()
+    {
+        call_delegate(vm, p, "OnCapturedMouseMove", &mut [Value::Float(dx), Value::Float(dy)]);
+        return;
+    }
+    let over = hit_top(vm, page, x, y);
     if prev != over {
         if let Some(p) = prev
             && get(vm, p, "MenuState").as_byte() != MSAT_PRESSED
@@ -364,18 +503,120 @@ pub fn mouse_move(vm: &mut Vm<'_>, x: f32, y: f32) {
 /// A mouse button: pressing marks the component under the cursor, releasing over it clicks it.
 pub fn mouse_button(vm: &mut Vm<'_>, pressed: bool) {
     let Some(gui) = world(vm).viewport.gui else { return };
-    let Some(over) = get(vm, gui, "ActiveControl").as_obj() else { return };
+    let over = get(vm, gui, "ActiveControl").as_obj();
+    // A press anywhere but on an open drop-down list closes it.
+    if pressed && let Some(page) = top_page(vm) {
+        close_popups(vm, page, over);
+    }
+    let Some(over) = over else { return };
     if pressed {
         set(vm, over, "MenuState", Value::Byte(MSAT_PRESSED));
         call_delegate(vm, over, "OnMousePressed", &mut [Value::Object(Some(over)), Value::Bool(false)]);
+        // A slider jumps to where it was pressed.
+        if is_a(vm, over, "GUISlider") {
+            call_delegate(vm, over, "OnCapturedMouseMove", &mut [Value::Float(0.0), Value::Float(0.0)]);
+        }
     } else {
         let was_pressed = get(vm, over, "MenuState").as_byte() == MSAT_PRESSED;
         set(vm, over, "MenuState", Value::Byte(MSAT_WATCHED));
         call_delegate(vm, over, "OnMouseRelease", &mut [Value::Object(Some(over))]);
         if was_pressed {
+            let in_list = is_a(vm, over, "GUIList");
+            if in_list {
+                pick_item(vm, gui, over);
+            }
             call_delegate(vm, over, "OnClick", &mut [Value::Object(Some(over))]);
+            // Choosing an item closes its combo box's list.
+            if in_list && let Some(combo) = owning_combo(vm, over) {
+                call_method(vm, combo, "HideListBox");
+            }
         }
     }
+}
+
+/// Runs a script function of an object that takes no arguments.
+fn call_method(vm: &mut Vm<'_>, o: ObjId, name: &str) {
+    let n = vm.db.names.intern(name);
+    if let Some(f) = vm.find_function(Some(o), None, n)
+        && let Err(e) = vm.invoke(f, Some(o), &mut [])
+    {
+        world(vm).errors.push(format!("GUI {name}: {e}"));
+    }
+}
+
+/// The combo box a control belongs to, searching a few owners up.
+fn owning_combo(vm: &mut Vm<'_>, o: ObjId) -> Option<ObjId> {
+    let mut at = Some(o);
+    for _ in 0..4 {
+        let c = at?;
+        if is_a(vm, c, "GUIComboBox") {
+            return Some(c);
+        }
+        at = get(vm, c, "MenuOwner").as_obj().filter(|&m| m != c);
+    }
+    None
+}
+
+/// Every combo box under `o` whose drop-down list is open.
+fn open_combos(vm: &mut Vm<'_>, o: ObjId, out: &mut Vec<ObjId>, depth: usize) {
+    if depth > 12 || !get(vm, o, "bVisible").as_bool() {
+        return;
+    }
+    if is_a(vm, o, "GUIComboBox")
+        && let Some(l) = get(vm, o, "MyListBox").as_obj()
+        && get(vm, l, "bVisible").as_bool()
+    {
+        out.push(o);
+    }
+    if let Value::Array(children) = get(vm, o, "Controls") {
+        for c in children.iter().filter_map(Value::as_obj) {
+            open_combos(vm, c, out, depth + 1);
+        }
+    }
+}
+
+/// The component under the cursor, an open drop-down list before anything it covers.
+fn hit_top(vm: &mut Vm<'_>, page: ObjId, x: f32, y: f32) -> Option<ObjId> {
+    let mut combos = Vec::new();
+    open_combos(vm, page, &mut combos, 0);
+    for combo in combos {
+        let list = get(vm, combo, "MyListBox").as_obj().and_then(|l| get(vm, l, "List").as_obj());
+        if let Some(l) = list {
+            let b: Vec<f32> = (0..4).map(|i| indexed(vm, l, "Bounds", i).as_float()).collect();
+            if x >= b[0] && x < b[2] && y >= b[1] && y < b[3] {
+                return Some(l);
+            }
+        }
+    }
+    hit(vm, page, x, y)
+}
+
+/// Closes the open drop-down lists the pressed component is not part of.
+fn close_popups(vm: &mut Vm<'_>, page: ObjId, over: Option<ObjId>) {
+    let mut combos = Vec::new();
+    open_combos(vm, page, &mut combos, 0);
+    for combo in combos {
+        if over.and_then(|o| owning_combo(vm, o)) != Some(combo) {
+            call_method(vm, combo, "HideListBox");
+        }
+    }
+}
+
+/// A press on a list chooses the row under the cursor.
+fn pick_item(vm: &mut Vm<'_>, gui: ObjId, list: ObjId) {
+    let count = list_items(vm, list).len();
+    if count == 0 {
+        return;
+    }
+    let b: Vec<f32> = (0..4).map(|i| indexed(vm, list, "Bounds", i).as_float()).collect();
+    let rows = list_rows(vm, list, count);
+    let row_h = (b[3] - b[1]) / rows as f32;
+    let y = get(vm, gui, "MouseY").as_float();
+    let row = (((y - b[1]) / row_h.max(1.0)).floor().max(0.0) as usize).min(rows - 1);
+    let top = get(vm, list, "Top").as_int().max(0) as usize;
+    let index = (top + row).min(count - 1);
+    set(vm, list, "Index", Value::Int(index as i32));
+    call_delegate(vm, list, "OnChange", &mut [Value::Object(Some(list))]);
 }
 
 /// A key for the top page (its `OnKeyEvent` delegate). Returns whether it was used.
@@ -506,4 +747,95 @@ pub fn register(vm: &mut Vm<'_>) {
     vm.register("Object.KWDeleteSaveGame", |vm, _this, a| Ok(Value::Bool(crate::save::delete(vm, a.first().map_or(0, Value::as_int)))));
     vm.register("Object.GetLanguage", |vm, _this, _a| Ok(Value::Str(world(vm).config.language.clone())));
     vm.register("Object.NeedSAPFont", |vm, _this, _a| Ok(Value::Bool(crate::fonts::need_sap_font(vm))));
+}
+
+/// A listing of the open menus and their controls (name, bounds, window fractions), for debugging layouts.
+pub fn dump(vm: &mut Vm<'_>) -> Vec<String> {
+    fn walk(vm: &mut Vm<'_>, o: ObjId, depth: usize, out: &mut Vec<String>) {
+        let name = vm.db.names.get(vm.db.objects.get(o).name).to_string();
+        let class = vm.db.objects.get(o).class.map(|c| vm.db.names.get(vm.db.get(c).name).to_string()).unwrap_or_default();
+        let b: Vec<f32> = (0..4).map(|i| indexed(vm, o, "Bounds", i).as_float()).collect();
+        let w: Vec<f32> = ["WinLeft", "WinTop", "WinWidth", "WinHeight"].iter().map(|n| get(vm, o, n).as_float()).collect();
+        let vis = get(vm, o, "bVisible").as_bool();
+        let bound = get(vm, o, "bBoundToParent").as_bool();
+        out.push(format!("{}{name} ({class}) vis={vis} bound={bound} win={w:.3?} bounds={b:.0?}", "  ".repeat(depth)));
+        if is_a(vm, o, "GUISlider") {
+            let v: Vec<f32> = ["MinValue", "MaxValue", "Value"].iter().map(|n| get(vm, o, n).as_float()).collect();
+            let ini = get(vm, o, "IniOption").as_str().to_string();
+            out.push(format!("{}  slider min/max/value={v:.3?} ini={ini:?}", "  ".repeat(depth)));
+        }
+        if is_a(vm, o, "GUIComboBox") {
+            let list = get(vm, o, "MyListBox").as_obj().and_then(|l| get(vm, l, "List").as_obj());
+            let items = list.map(|l| list_items(vm, l)).unwrap_or_default();
+            let index = list.map(|l| get(vm, l, "Index").as_int());
+            let text = get(vm, o, "Edit").as_obj().map(|e| get(vm, e, "TextStr").as_str().to_string());
+            out.push(format!("{}  combo index={index:?} text={text:?} items={items:?}", "  ".repeat(depth)));
+        }
+        if let Value::Array(children) = get(vm, o, "Controls") {
+            for c in children.iter().filter_map(Value::as_obj) {
+                walk(vm, c, depth + 1, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(gui) = world(vm).viewport.gui
+        && let Value::Array(pages) = get(vm, gui, "MenuStack")
+    {
+        for p in pages.iter().filter_map(Value::as_obj) {
+            walk(vm, p, 0, &mut out);
+        }
+    }
+    out
+}
+
+/// The items of a list, as their text.
+fn list_items(vm: &mut Vm<'_>, list: ObjId) -> Vec<String> {
+    match get(vm, list, "Elements") {
+        // Each element is a struct whose first field is the item's text.
+        Value::Array(items) => items.iter().map(|e| e.fields().first().map(|v| v.as_str().to_string()).unwrap_or_default()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// A list: its style's image behind, the selected row marked, one row of text per item.
+fn draw_list(vm: &mut Vm<'_>, o: ObjId, r: [f32; 4], screen: Screen) {
+    let items = list_items(vm, o);
+    if let Some(style) = get(vm, o, "Style").as_obj() {
+        style_draw(vm, style, 0, r);
+    }
+    let count = items.len();
+    if count == 0 {
+        return;
+    }
+    // A row is as high as the box is for its items (one box height each when the list is a combo box's drop-down).
+    let rows = list_rows(vm, o, count);
+    let row_h = r[3] / rows as f32;
+    let selected = get(vm, o, "Index").as_int();
+    let top = get(vm, o, "Top").as_int().max(0) as usize;
+    for (n, text) in items.iter().enumerate().skip(top).take(rows) {
+        let row = [r[0], r[1] + row_h * (n - top) as f32, r[2], row_h];
+        if n as i32 == selected {
+            let img = get(vm, o, "SelectedImage").as_obj();
+            let color = color_of(&get(vm, o, "SelectedBKColor"));
+            draw_image(vm, img, row, color, canvas::STY_ALPHA);
+        }
+        if let Some(style) = get(vm, o, "Style").as_obj() {
+            style_text(vm, style, 0, [row[0] + row[3] * 0.3, row[1], row[2] - row[3] * 0.3, row[3]], 0, text, screen.w);
+        }
+    }
+}
+
+/// How many rows a list shows: all its items, up to what its combo box allows or the list itself says.
+fn list_rows(vm: &mut Vm<'_>, o: ObjId, count: usize) -> usize {
+    let mut limit = get(vm, o, "ItemsPerPage").as_int();
+    let mut owner = get(vm, o, "MenuOwner").as_obj();
+    for _ in 0..3 {
+        let Some(m) = owner else { break };
+        if is_a(vm, m, "GUIComboBox") {
+            limit = get(vm, m, "MaxVisibleItems").as_int();
+            break;
+        }
+        owner = get(vm, m, "MenuOwner").as_obj().filter(|&x| x != m);
+    }
+    if limit > 0 { count.min(limit as usize) } else { count }
 }
