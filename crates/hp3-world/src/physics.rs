@@ -350,6 +350,22 @@ pub fn debug_floor(vm: &mut Vm<'_>, a: ObjId) -> String {
     format!("ahead {ahead:?} movers {near:?} at {loc} phys {phys} base {base:?} floor {floor:?} raw {raw:?} inside-mesh {inside} collide(world,actors,block) {flags:?} touching {touching:?}")
 }
 
+/// Why `floor_below` found no floor (debugging): the sweeps it makes and what each met.
+fn floor_report(vm: &mut Vm<'_>, a: ObjId) -> String {
+    let loc = vec(&get(vm, a, "Location"));
+    let ext = extent(vm, a);
+    let player = blocked_as_player(vm, a);
+    let depth = MAX_STEP_HEIGHT + 2.0;
+    let mut out = format!("at {loc} ext {ext}");
+    for (name, e) in [("box", ext), ("narrow2", Vec3::new(ext.x - 2.0, ext.y - 2.0, ext.z)), ("narrow5", Vec3::new(ext.x - 5.0, ext.y - 5.0, ext.z)), ("thin", Vec3::new(2.0, 2.0, ext.z))] {
+        let h = world(vm).collision.trace_as(player, loc, loc - Vec3::Z * depth, e, Some(a));
+        out += &format!(" {name} {:?}", h.map(|h| (h.time, h.normal)));
+    }
+    let deep = world(vm).collision.trace_as(player, loc, loc - Vec3::Z * 200.0, Vec3::new(2.0, 2.0, ext.z), Some(a));
+    out += &format!(" deep-thin {:?}", deep.map(|h| (h.time * 200.0, h.normal)));
+    out
+}
+
 fn floor_below(vm: &mut Vm<'_>, a: ObjId, depth: f32) -> Option<Hit> {
     let loc = vec(&get(vm, a, "Location"));
     let ext = extent(vm, a);
@@ -389,6 +405,12 @@ fn floor_below(vm: &mut Vm<'_>, a: ObjId, depth: f32) -> Option<Hit> {
         }
     }
     let hit = hit?;
+    // Going down a stair, the pawn's middle passes the edge of the tread it stands on while its box still rests on it: the sweep
+    // down meets the tread's corner half a unit below and reports the riser's upright normal (the thin box under the middle too).
+    // A box moving straight down cannot run into an upright face, so this is the tread's top, as the original's round foot finds
+    // it: the pawn stays on the tread until its box is past the edge, then drops a whole step onto the next one in one tick
+    // (which the stair smoothing turns into a ramp). Taken for a wall, it walked off every tread and fell (and grunted) on landing.
+    let hit = if hit.time > 0.0 && hit.normal.z.abs() < 0.1 { Hit { normal: Vec3::Z, ..hit } } else { hit };
     let normal = surface_normal(vm, a, &hit, loc, depth);
     if crate::envc::var("HP3_FLOOR_DEBUG").is_ok_and(|n| hp3_script::natives::object_path(vm, a).ends_with(&n)) {
         eprintln!("floor result: frame {} hit time {} normal {} -> surface normal {normal}", world(vm).frame, hit.time, hit.normal);
@@ -701,6 +723,10 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
                 }
             }
             None => {
+                if crate::envc::var_os("HP3_FALL_LOG").is_some() {
+                    let (frame, report) = (world(vm).frame, floor_report(vm, a));
+                    eprintln!("walk off: frame {frame} {report}");
+                }
                 // Nothing to stand on. The controller gets a chance to stop the pawn once.
                 if !asked_may_fall && can_jump {
                     asked_may_fall = true;

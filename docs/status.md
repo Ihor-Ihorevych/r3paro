@@ -47,7 +47,9 @@ Milestones are from the plan (M0 to M12).
   (the whole level for now, to be culled to the sky zone), then the scene over it. Not yet: emitters,
   translucency, fog, dynamic lights, deco layers, HUD.
 - **M6 Movement, started**: swept-box collision against the level BSP, static mesh and terrain triangles and
-  blocking actors; walking (friction, step-up of 24, sliding, floor snapping), falling and landing, flying,
+  blocking actors; walking (friction, step-up of 24, sliding, floor snapping; going down a stair the floor sweep's
+  graze of the tread corner counts as the tread, not a wall, so pawns step down instead of falling off each tread;
+  `HP3_FALL_LOG=1` prints why a walker lost its floor), falling and landing, flying,
   projectiles; touch events from collision cylinders; `Trace`, `FastTrace`, `TraceActors`. Holding W walks
   Harry until the wall stops him at the distance a trace measures. Movement values are not yet matched to the
   retail game.
