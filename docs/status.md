@@ -32,7 +32,9 @@ Milestones are from the plan (M0 to M12).
   directly, walkers at rest skip their floor probes). `HP3_TICK_PROFILE=1` times each tick phase. Runs are deterministic: hash maps use a fixed hash, so
   timers, latent actions and events are processed in the same order every time.
 - **M5 Playable render, in progress**: `hp3 <HP3 folder> [map]` opens an SDL3 window and draws the level with
-  wgpu while its scripts run at 60 Hz. Keyboard and mouse go through the game's key bindings; the view is the
+  wgpu while its scripts run at 60 Hz (Vulkan 1.0+ or OpenGL / OpenGL ES 3.0+: the device asks only for the
+  adapter's own limits, and `HP3_BACKEND` picks the API, Vulkan first and OpenGL when that fails; OpenGL surfaces
+  cannot be copied into, so the presenter draws frames into them). Keyboard and mouse go through the game's key bindings; the view is the
   game's own `PlayerCalcView`, or a camera behind the pawn while the game's camera is not running (a map loaded
   directly skips the menu and New Game flow that starts it). F1 toggles a free camera. Characters and other
   live actors are drawn with their meshes and skins, skinned on the CPU each frame from their animation;

@@ -278,6 +278,53 @@ pub fn desktop_main() -> ExitCode {
     }
 }
 
+/// The GPU for the window: the first graphics API of `HP3_BACKEND` (see `hp3_render::gpu::backend_order`) whose adapter
+/// can show the window and give a device. Vulkan is tried first; a phone whose Vulkan driver fails falls back to
+/// OpenGL ES.
+fn open_gpu(
+    window: &sdl3::video::Window,
+) -> Result<(wgpu::Instance, wgpu::Surface<'static>, wgpu::SurfaceCapabilities, wgpu::TextureFormat, Renderer), String> {
+    let mut failed = Vec::new();
+    for backends in hp3_render::gpu::backend_order() {
+        let instance = hp3_render::gpu::instance_for(backends);
+        // SAFETY: the window outlives the surface; both live until the end of `run`.
+        let surface = match unsafe { wgpu::SurfaceTargetUnsafe::from_window(window).map_err(|e| e.to_string()).and_then(|t| instance.create_surface_unsafe(t).map_err(|e| e.to_string())) } {
+            Ok(s) => s,
+            Err(e) => {
+                failed.push(format!("{backends:?}: surface: {e}"));
+                continue;
+            }
+        };
+        let adapter = match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+        })) {
+            Ok(a) => a,
+            Err(e) => {
+                failed.push(format!("{backends:?}: no adapter: {e}"));
+                continue;
+            }
+        };
+        let caps = surface.get_capabilities(&adapter);
+        let Some(&first) = caps.formats.first() else {
+            failed.push(format!("{backends:?}: the surface has no formats"));
+            continue;
+        };
+        let format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(first);
+        match Renderer::with_adapter(&adapter, format) {
+            Ok(renderer) => {
+                for f in &failed {
+                    eprintln!("GPU: skipped {f}");
+                }
+                return Ok((instance, surface, caps, format, renderer));
+            }
+            Err(e) => failed.push(format!("{backends:?}: {e}")),
+        }
+    }
+    Err(format!("no usable GPU: {}", failed.join("; ")))
+}
+
 pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let config = hp3_core::Config::load(root);
     let map = map
@@ -324,17 +371,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
     }
     let mut window = builder.build()?;
 
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-    // SAFETY: the window outlives the surface; both live until the end of this function.
-    let surface = unsafe { instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_window(&window)?)? };
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        compatible_surface: Some(&surface),
-        force_fallback_adapter: false,
-    }))?;
-    let caps = surface.get_capabilities(&adapter);
-    let format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
-    let renderer = Renderer::with_adapter(&adapter, format)?;
+    let (instance, surface, caps, format, renderer) = open_gpu(&window)?;
     eprintln!("GPU: {}", renderer.adapter_info);
     let mut gpu_scene = renderer.upload_scene(&scene);
     let dynamic = hp3_render::dynamic::Dynamic::new(&renderer);
@@ -346,7 +383,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
     eprintln!("window: {width}x{height} pixels, {:?} points", window.size());
     // Frames are drawn off-screen and shown by a thread of their own, so waiting for the display does not hold up the game.
     let mut presenter = present::Presenter::new(surface, &caps, renderer.device.clone(), renderer.queue.clone(), format, width, height)
-        .ok_or("the display surface cannot be copied into")?;
+        .ok_or("the presenting thread could not be started")?;
     let mut depth = renderer.depth_target(width.max(1), height.max(1));
 
     let (start, start_rot) = scene.player_starts.first().copied().unwrap_or((Vec3::ZERO, [0, 0, 0]));

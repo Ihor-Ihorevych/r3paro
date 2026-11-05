@@ -71,6 +71,18 @@ pub struct Dynamic {
     model_layout: wgpu::BindGroupLayout,
     instances: RefCell<(wgpu::Buffer, wgpu::BindGroup, u64)>,
     images: RefCell<HashMap<ObjKey, wgpu::TextureView>>,
+    posed: RefCell<Posed>,
+}
+
+/// Posed vertices waiting for the next draw: all of a frame's go up in one write and are copied into each mesh's
+/// vertex buffer on the GPU. A write per mesh section costs little on Vulkan but a lot on OpenGL, where a frame with
+/// eighty characters took 25 ms in writes alone.
+#[derive(Default)]
+struct Posed {
+    bytes: Vec<u8>,
+    /// (destination, offset in `bytes`, size)
+    copies: Vec<(wgpu::Buffer, u64, u64)>,
+    staging: Option<wgpu::Buffer>,
 }
 
 impl Dynamic {
@@ -140,7 +152,7 @@ impl Dynamic {
         };
         let additive_pipeline = make("dynamic additive", "fs_blend", Some(additive));
         let (buffer, bind) = Self::instance_buffer(r, &model_layout, 256);
-        Dynamic { pipeline, alpha_pipeline, additive_pipeline, model_layout, instances: RefCell::new((buffer, bind, 256)), images: RefCell::new(HashMap::new()) }
+        Dynamic { pipeline, alpha_pipeline, additive_pipeline, model_layout, instances: RefCell::new((buffer, bind, 256)), images: RefCell::new(HashMap::new()), posed: RefCell::default() }
     }
 
     fn instance_buffer(r: &Renderer, layout: &wgpu::BindGroupLayout, capacity: u64) -> (wgpu::Buffer, wgpu::BindGroup) {
@@ -199,21 +211,53 @@ impl Dynamic {
         GpuMesh { draws, local: geom.local }
     }
 
-    /// Moves an uploaded skeletal mesh's vertices to posed `points` (indexed like the mesh's points).
-    pub fn write_points(&self, r: &Renderer, mesh: &GpuMesh, geom: &MeshGeom, points: &[glam::Vec3]) {
+    /// Moves an uploaded skeletal mesh's vertices to posed `points` (indexed like the mesh's points), from the next draw on.
+    pub fn write_points(&self, _r: &Renderer, mesh: &GpuMesh, geom: &MeshGeom, points: &[glam::Vec3]) {
+        let mut posed = self.posed.borrow_mut();
         for d in &mesh.draws {
             let Some(b) = geom.batches.get(d.batch) else { continue };
             if b.points.len() != b.vertices.len() {
                 continue;
             }
-            let verts: Vec<Vertex> = b
-                .vertices
-                .iter()
-                .zip(&b.points)
-                .map(|(v, &p)| Vertex { position: points.get(p as usize).map(|p| p.to_array()).unwrap_or(v.position), ..*v })
-                .collect();
-            r.queue.write_buffer(&d.vertices, 0, bytemuck::cast_slice(&verts));
+            let start = posed.bytes.len() as u64;
+            for (v, &p) in b.vertices.iter().zip(&b.points) {
+                let v = Vertex { position: points.get(p as usize).map(|p| p.to_array()).unwrap_or(v.position), ..*v };
+                posed.bytes.extend_from_slice(bytemuck::bytes_of(&v));
+            }
+            let size = posed.bytes.len() as u64 - start;
+            if size > 0 {
+                posed.copies.push((d.vertices.clone(), start, size));
+            }
         }
+    }
+
+    /// Sends the posed vertices written since the last draw: one write into a staging buffer, then a copy into each
+    /// mesh, submitted ahead of the frame's commands.
+    fn flush_posed(&self, r: &Renderer) {
+        let mut posed = self.posed.borrow_mut();
+        if posed.copies.is_empty() {
+            posed.bytes.clear();
+            return;
+        }
+        let needed = (posed.bytes.len() as u64).next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
+        if posed.staging.as_ref().is_none_or(|s| s.size() < needed) {
+            posed.staging = Some(r.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("posed vertices"),
+                size: needed.next_power_of_two().max(1 << 16),
+                usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        posed.bytes.resize(needed as usize, 0);
+        let Posed { bytes, copies, staging } = &mut *posed;
+        let staging = staging.as_ref().expect("made above");
+        r.queue.write_buffer(staging, 0, bytes);
+        let mut encoder = r.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("posed vertices") });
+        for (dst, offset, size) in copies.drain(..) {
+            encoder.copy_buffer_to_buffer(staging, offset, &dst, 0, size);
+        }
+        r.queue.submit([encoder.finish()]);
+        bytes.clear();
     }
 
     /// Draws the static scene and the meshes at their transforms (actor space to world) in one pass.
@@ -243,6 +287,7 @@ impl Dynamic {
         depth: &wgpu::TextureView,
         aspect: f32,
     ) -> wgpu::CommandBuffer {
+        self.flush_posed(r);
         {
             let mut inst = self.instances.borrow_mut();
             if (meshes.len() as u64) > inst.2 {

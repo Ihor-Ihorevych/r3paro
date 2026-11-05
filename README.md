@@ -122,6 +122,7 @@ Environment variables (set them before starting, e.g. `$env:HP3_FPS = 0` in Powe
 | `HP3_LANGUAGE=<ext>` | interface language: `int` (English), `ukr`, `bel`, `geo`, `lav`; also read from a `.flipendo-language` file next to the game (the Android launcher writes it). Menus and loading tips only: subtitles stay in the edition's language |
 | `HP3_HIT_LOG=1` | prints what blocks a character (for collision bugs) |
 | `HP3_UNLIT=1` | lighting off |
+| `HP3_BACKEND=<api>` | graphics API: `auto` (default: Vulkan, then DX12 on Windows, then OpenGL), `vulkan`, `gl` (OpenGL; OpenGL ES 3 on a phone), `dx12`, `metal`. The Android launcher sets it from its Renderer choice |
 | `HP3_PROFILE=1` | frame timing |
 
 `docs/` lists the rest. Headless tools for development (`hp3-run`, `hp3-view`, `hp3-pkg`) are below.

@@ -55,7 +55,7 @@ fn make_images(device: &wgpu::Device, format: wgpu::TextureFormat, width: u32, h
 }
 
 impl Presenter {
-    /// Takes over the surface. `None` when the surface cannot be a copy target (the caller then has no way to present).
+    /// Takes over the surface. `None` when the presenting thread cannot be started.
     pub fn new(
         surface: wgpu::Surface<'static>,
         caps: &wgpu::SurfaceCapabilities,
@@ -65,9 +65,8 @@ impl Presenter {
         width: u32,
         height: u32,
     ) -> Option<Presenter> {
-        if !caps.usages.contains(wgpu::TextureUsages::COPY_DST) {
-            return None;
-        }
+        // A surface that cannot be copied into (OpenGL's) gets frames drawn into it instead.
+        let can_copy = caps.usages.contains(wgpu::TextureUsages::COPY_DST);
         let alpha_mode = caps.alpha_modes[0];
         let (tx, rx) = mpsc::channel();
         let (free_tx, free) = mpsc::channel();
@@ -80,7 +79,7 @@ impl Presenter {
         let (thread_device, thread_queue) = (device.clone(), queue);
         let thread = std::thread::Builder::new()
             .name("hp3-present".into())
-            .spawn(move || present_loop(surface, alpha_mode, thread_device, thread_queue, format, rx, back, thread_broken))
+            .spawn(move || present_loop(surface, alpha_mode, can_copy, thread_device, thread_queue, format, rx, back, thread_broken))
             .ok()?;
         let (width, height) = (width.max(1), height.max(1));
         let images = make_images(&device, format, width, height);
@@ -151,6 +150,7 @@ impl Drop for Presenter {
 fn present_loop(
     mut surface: wgpu::Surface<'static>,
     alpha_mode: wgpu::CompositeAlphaMode,
+    can_copy: bool,
     device: wgpu::Device,
     queue: wgpu::Queue,
     format: wgpu::TextureFormat,
@@ -164,7 +164,7 @@ fn present_loop(
         surface.configure(
             &device,
             &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
+                usage: if can_copy { wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST } else { wgpu::TextureUsages::RENDER_ATTACHMENT },
                 format,
                 width,
                 height,
@@ -216,7 +216,7 @@ fn present_loop(
                 };
                 if let Some(frame) = frame {
                     let mut encoder = device.create_command_encoder(&Default::default());
-                    if look == NEUTRAL {
+                    if can_copy && look == NEUTRAL {
                         encoder.copy_texture_to_texture(image.as_image_copy(), frame.texture.as_image_copy(), wgpu::Extent3d { width: width.min(frame.texture.width()), height: height.min(frame.texture.height()), depth_or_array_layers: 1 });
                     } else {
                         let a = adjust.get_or_insert_with(|| Adjust::new(&device, format));

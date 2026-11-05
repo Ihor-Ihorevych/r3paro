@@ -79,24 +79,70 @@ pub struct Renderer {
     pub adapter_info: String,
 }
 
+/// The graphics APIs to try, best first, from `HP3_BACKEND`: `vulkan`, `gl` (OpenGL, OpenGL ES on a phone), `dx12`,
+/// `metal`, or `auto` (the default: Vulkan, then the platform's own API, then OpenGL).
+pub fn backend_order() -> Vec<wgpu::Backends> {
+    let auto = || {
+        let mut order = vec![wgpu::Backends::VULKAN];
+        if cfg!(windows) {
+            order.push(wgpu::Backends::DX12);
+        }
+        if cfg!(target_vendor = "apple") {
+            order.push(wgpu::Backends::METAL);
+        }
+        order.push(wgpu::Backends::GL);
+        order
+    };
+    match std::env::var("HP3_BACKEND").unwrap_or_default().to_ascii_lowercase().as_str() {
+        "vulkan" | "vk" => vec![wgpu::Backends::VULKAN],
+        "gl" | "gles" | "opengl" => vec![wgpu::Backends::GL],
+        "dx12" => vec![wgpu::Backends::DX12],
+        "metal" => vec![wgpu::Backends::METAL],
+        "" | "auto" => auto(),
+        other => {
+            eprintln!("HP3_BACKEND={other}: unknown (vulkan, gl, dx12, metal, auto); using auto");
+            auto()
+        }
+    }
+}
+
+/// An instance for one graphics API.
+pub fn instance_for(backends: wgpu::Backends) -> wgpu::Instance {
+    wgpu::Instance::new(&wgpu::InstanceDescriptor { backends, ..wgpu::InstanceDescriptor::from_env_or_default() })
+}
+
 impl Renderer {
-    /// A renderer without a window, drawing to sRGB RGBA targets.
+    /// A renderer without a window, drawing to sRGB RGBA targets. Tries the APIs of `backend_order` in turn.
     pub fn new_headless() -> Result<Renderer, String> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        }))
-        .map_err(|e| format!("no GPU adapter: {e}"))?;
-        Self::with_adapter(&adapter, wgpu::TextureFormat::Rgba8UnormSrgb)
+        let mut errors = Vec::new();
+        for backends in backend_order() {
+            let instance = instance_for(backends);
+            let adapter = match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            })) {
+                Ok(a) => a,
+                Err(e) => {
+                    errors.push(format!("{backends:?}: no adapter: {e}"));
+                    continue;
+                }
+            };
+            match Self::with_adapter(&adapter, wgpu::TextureFormat::Rgba8UnormSrgb) {
+                Ok(r) => return Ok(r),
+                Err(e) => errors.push(format!("{backends:?}: {e}")),
+            }
+        }
+        Err(format!("no GPU: {}", errors.join("; ")))
     }
 
     /// A renderer for an adapter, drawing to targets of `color_format`.
     pub fn with_adapter(adapter: &wgpu::Adapter, color_format: wgpu::TextureFormat) -> Result<Renderer, String> {
         let info = adapter.get_info();
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-            .map_err(|e| format!("device: {e}"))?;
+        // The adapter's own limits, not WebGPU's defaults: those are more than many older phones' Vulkan 1.1 drivers and
+        // every OpenGL ES adapter offer, and asking for them fails the device.
+        let descriptor = wgpu::DeviceDescriptor { label: Some("hp3"), required_limits: adapter.limits(), ..Default::default() };
+        let (device, queue) = pollster::block_on(adapter.request_device(&descriptor)).map_err(|e| format!("device: {e}"))?;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("scene"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -282,7 +328,11 @@ impl Renderer {
             clamp_sampler,
             white_lightmap,
             color_format,
-            adapter_info: format!("{} ({:?})", info.name, info.backend),
+            adapter_info: {
+                let missing = wgpu::DownlevelFlags::compliant() - adapter.get_downlevel_capabilities().flags;
+                let driver = [info.driver.as_str(), info.driver_info.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" ");
+                format!("{} ({:?}, {driver}){}", info.name, info.backend, if missing.is_empty() { String::new() } else { format!(", lacks {missing:?}") })
+            },
         })
     }
 
