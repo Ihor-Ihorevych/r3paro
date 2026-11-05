@@ -13,8 +13,9 @@ use hp3_script::{ObjId, Value, Vm};
 use crate::{get, set, world};
 
 /// How a particle is blended with what is behind it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Blend {
+    #[default]
     Alpha,
     Additive,
     Modulate,
@@ -77,7 +78,7 @@ impl Rng {
 }
 
 /// One emitter's settings, read from its object.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct Config {
     beam: bool,
     disabled: bool,
@@ -92,6 +93,12 @@ struct Config {
     sphere_radius: Range,
     /// `StartLocationPolarRange`: angle around, angle from the top (65536ths of a turn) and radius.
     polar: RangeVec,
+    /// `UseRotationFrom` (0 none, 1 the actor's rotation and the offset, 2 the offset, 3 the normal), `RotationOffset`,
+    /// `RotationNormal` and `EffectAxis` (1: the effect was made along +Z instead of -X).
+    rot_from: u8,
+    rot_offset: [i32; 3],
+    rot_normal: Vec3,
+    effect_axis: u8,
     start_velocity: RangeVec,
     acceleration: Vec3,
     start_size: RangeVec,
@@ -199,6 +206,13 @@ impl Config {
             shape: get(vm, o, "StartLocationShape").as_byte(),
             sphere_radius: Range::of(&get(vm, o, "SphereRadiusRange")),
             polar: RangeVec::of(&get(vm, o, "StartLocationPolarRange")),
+            rot_from: get(vm, o, "UseRotationFrom").as_byte(),
+            rot_offset: {
+                let r: Vec<i32> = get(vm, o, "RotationOffset").fields().iter().map(Value::as_int).collect();
+                [r.first().copied().unwrap_or(0), r.get(1).copied().unwrap_or(0), r.get(2).copied().unwrap_or(0)]
+            },
+            rot_normal: vec3(vm, o, "RotationNormal"),
+            effect_axis: get(vm, o, "EffectAxis").as_byte(),
             start_velocity: RangeVec::of(&get(vm, o, "StartVelocityRange")),
             acceleration: vec3(vm, o, "Acceleration"),
             start_size: RangeVec::of(&get(vm, o, "StartSizeRange")),
@@ -316,6 +330,31 @@ fn interpolate<T: Copy>(table: &[(f32, T)], t: f32, mix: impl Fn(T, T, f32) -> T
     table.last().map(|e| e.1)
 }
 
+/// The turns `UseRotationFrom` gives a newborn particle's offset and velocity (the normal's turn of the offset also
+/// maps an effect made along +Z onto -X).
+fn rotation_source(config: &Config, actor: Mat3) -> (Mat3, Mat3) {
+    let turn = |r: [i32; 3]| Mat3::from_mat4(hp3_anim::rotator_matrix(r));
+    match config.rot_from {
+        1 => {
+            let m = actor * turn(config.rot_offset);
+            (m, m)
+        }
+        2 => {
+            let m = turn(config.rot_offset);
+            (m, m)
+        }
+        3 => {
+            let n = config.rot_normal;
+            let unit = 32768.0 / std::f32::consts::PI;
+            let yaw = (n.y.atan2(n.x) * unit) as i32;
+            let pitch = (n.z.atan2(n.x.hypot(n.y)) * unit) as i32;
+            let axis_fix = if config.effect_axis == 1 { 16384 } else { 0 };
+            (turn([pitch - axis_fix, yaw, 0]), turn([pitch, yaw, 0]))
+        }
+        _ => (Mat3::IDENTITY, Mat3::IDENTITY),
+    }
+}
+
 fn spawn(config: &Config, rng: &mut Rng, origin: Vec3, rot: Mat3, fill_age: f32, line: Option<&Line>, bones: &[Vec3]) -> Particle {
     let local = match config.shape {
         _ if line.is_some_and(|l| !l.points.is_empty()) => {
@@ -342,11 +381,11 @@ fn spawn(config: &Config, rng: &mut Rng, origin: Vec3, rot: Mat3, fill_age: f32,
             }
             if all || shape == 2 {
                 let p = config.polar.pick(rng);
-                // The first angle is the elevation above the horizon and the second the heading around it (65536ths of a turn), so
-                // a fixed first angle and a sweeping second one is a flat ring or arc on the ground: the dementors' circle, the ground
-                // halo, the mist rings. (They were once taken the other way round, which stood all of those up like hoops.)
-                let (pitch, yaw) = (p.x * std::f32::consts::PI / 32768.0, p.y * std::f32::consts::PI / 32768.0);
-                at += Vec3::new(p.z * pitch.cos() * yaw.cos(), p.z * pitch.cos() * yaw.sin(), p.z * pitch.sin());
+                // The first angle is the heading around the vertical and the second the angle down from straight up (65536ths
+                // of a turn): a fixed heading and a sweeping second angle is a circle standing in the x-z plane. The emitter's
+                // rotation source turns it (lying flat for the dementors' circle, across the flight for the hippogriff rings).
+                let (around, down) = (p.x * std::f32::consts::PI / 32768.0, p.y * std::f32::consts::PI / 32768.0);
+                at += p.z * Vec3::new(around.cos() * down.sin(), around.sin() * down.sin(), down.cos());
             }
             at
         }
@@ -359,9 +398,18 @@ fn spawn(config: &Config, rng: &mut Rng, origin: Vec3, rot: Mat3, fill_age: f32,
         old_mesh = bones[bone] * config.skel_scale;
         local += old_mesh;
     }
-    let relative = config.coordinates == 1;
-    let pos = if relative { local } else if config.coordinates == 2 { local } else { origin + rot * local };
-    let vel = if config.coordinates == 2 { config.start_velocity.pick(rng) } else { rot * config.start_velocity.pick(rng) };
+    let vel = config.start_velocity.pick(rng);
+    let (pos, vel) = if line.is_some() {
+        // A script's line is laid out in the actor's frame.
+        let relative = config.coordinates == 1;
+        let pos = if relative { local } else if config.coordinates == 2 { local } else { origin + rot * local };
+        (pos, if config.coordinates == 2 { vel } else { rot * vel })
+    } else {
+        // The rotation source turns the born offset and the velocity; an independent particle is then placed at the actor.
+        let (turn_pos, turn_vel) = rotation_source(config, rot);
+        let local = turn_pos * local;
+        (if config.coordinates == 0 { origin + local } else { local }, turn_vel * vel)
+    };
     let size = config.start_size.pick(rng);
     let life = config.lifetime.pick(rng).max(0.05);
     let (min, max) = (config.sub_start, config.sub_end.max(config.sub_start));
@@ -811,4 +859,41 @@ pub fn register(vm: &mut Vm<'_>) {
         }
         Ok(Value::Empty)
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A polar circle: a heading of 0 and the second angle all the way round, of radius 100.
+    fn circle(rot_from: u8, rot_offset: [i32; 3], rot_normal: Vec3) -> Vec<Vec3> {
+        let config = Config {
+            shape: 2,
+            coordinates: 1,
+            polar: RangeVec([Range(0.0, 0.0), Range(0.0, 65536.0), Range(100.0, 100.0)]),
+            lifetime: Range(1.0, 1.0),
+            rot_from,
+            rot_offset,
+            rot_normal,
+            ..Default::default()
+        };
+        let mut rng = Rng(12345);
+        (0..32).map(|_| spawn(&config, &mut rng, Vec3::ZERO, Mat3::IDENTITY, 0.0, None, &[]).pos).collect()
+    }
+
+    #[test]
+    fn hippogriff_ring_stands_across_the_flight() {
+        // `UseRotationFrom` normal with the normal along +y: the circle stands in the y-z plane.
+        let points = circle(3, [0; 3], Vec3::Y);
+        assert!(points.iter().all(|p| p.x.abs() < 0.5 && (p.length() - 100.0).abs() < 0.5));
+        assert!(points.iter().any(|p| p.z.abs() > 50.0) && points.iter().any(|p| p.y.abs() > 50.0));
+    }
+
+    #[test]
+    fn dementor_circle_lies_flat() {
+        // A quarter turn of roll as the offset lays the circle on the ground.
+        let points = circle(2, [0, 0, 16384], Vec3::ZERO);
+        assert!(points.iter().all(|p| p.z.abs() < 0.5));
+        assert!(points.iter().any(|p| p.x.abs() > 50.0) && points.iter().any(|p| p.y.abs() > 50.0));
+    }
 }

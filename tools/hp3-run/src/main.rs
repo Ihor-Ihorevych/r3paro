@@ -79,6 +79,9 @@ fn list_class(vm: &mut hp3_script::Vm<'_>) {
                 let off = hp3_world::mesh_offset(vm, a);
                 info.push_str(&format!(" mesh_offset_z={:.2}", off.z));
             }
+            if let Some((lo, hi)) = hp3_world::volume_bounds(vm, a) {
+                info.push_str(&format!(" bounds {:.0} .. {:.0}", lo, hi));
+            }
             println!("  {name} state {state:?}{info}");
             // Emitter actors: what each emitter shows (its texture object and class).
             if let hp3_script::Value::Array(list) = hp3_world::get(vm, a, "Emitters") {
@@ -92,7 +95,7 @@ fn list_class(vm: &mut hp3_script::Vm<'_>) {
                         println!("      emitter {i}: texture {tex_desc:?} blend {:?}", hp3_world::get(vm, eo, "ColorMultiplierRange"));
                         if std::env::var_os("HP3_LIST_EMITTER_PROPS").is_some() {
                             let mut line = String::new();
-                            for n in ["MaxParticles", "InitialParticlesPerSecond", "ParticlesPerSecond", "AutomaticInitialSpawning", "StartLocationShape", "SphereRadiusRange", "StartLocationRange", "LifetimeRange", "StartLocationPolarRange", "ColorScale", "ColorMultiplierRange", "FadeOutStartTime", "FadeInEndTime", "StartSizeRange", "Opacity", "RespawnDeadParticles", "Disabled", "UseCollision", "SecondsBeforeInactive", "ParticleLifeTime"] {
+                            for n in ["RotationNormal", "UseRotationFrom", "RotationOffset", "EffectAxis", "CoordinateSystem", "SpinParticles", "UseDirectionAs", "MaxParticles", "InitialParticlesPerSecond", "ParticlesPerSecond", "AutomaticInitialSpawning", "StartLocationShape", "SphereRadiusRange", "StartLocationRange", "LifetimeRange", "StartLocationPolarRange", "ColorScale", "ColorMultiplierRange", "FadeOutStartTime", "FadeInEndTime", "StartSizeRange", "Opacity", "RespawnDeadParticles", "Disabled", "UseCollision", "SecondsBeforeInactive", "ParticleLifeTime"] {
                                 line.push_str(&format!(" {n}={:?}", hp3_world::get(vm, eo, n)));
                             }
                             println!("        {line}");

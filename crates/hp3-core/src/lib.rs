@@ -46,7 +46,13 @@ impl Config {
             entries.flatten().map(|e| e.path()).find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name)))
         };
         let ini = find("Default.ini").and_then(|p| Ini::load(&p).ok()).unwrap_or_default();
-        let mut user = find("User.ini").and_then(|p| Ini::load(&p).ok()).unwrap_or_default();
+        // A first run has no User.ini: it starts as a copy of DefUser.ini (the key bindings among the rest), kept for the next run.
+        let user_path = find("User.ini").or_else(|| {
+            let defaults = find("DefUser.ini")?;
+            let path = system.join("User.ini");
+            std::fs::copy(&defaults, &path).ok().map(|_| path).or(Some(defaults))
+        });
+        let mut user = user_path.and_then(|p| Ini::load(&p).ok()).unwrap_or_default();
         let saved = find(SETTINGS_FILE).and_then(|p| Ini::load(&p).ok()).unwrap_or_default();
         user.overlay(&saved);
         let edition = ini.get("Engine.Engine", "Language").unwrap_or("int").to_ascii_lowercase();
@@ -156,6 +162,17 @@ mod tests {
         std::fs::write(system.join("HpMenu.rus"), "[All]\nback=Nazad\nonly_rus=Tolko\n").unwrap();
         std::fs::write(system.join("HpMenu.ukr"), "[All]\nback=Nazad-uk\n").unwrap();
         root
+    }
+
+    #[test]
+    fn a_first_run_takes_the_default_user_settings() {
+        let root = install("first-run");
+        let system = root.join("System");
+        std::fs::write(system.join("defuser.ini"), "[Engine.Input]\nSpace=Jump\n").unwrap();
+        let c = Config::load(&root);
+        assert_eq!(c.user.get("Engine.Input", "Space"), Some("Jump"));
+        assert!(system.join("User.ini").is_file());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -1524,7 +1524,7 @@ fn brush_triangles(vm: &mut Vm<'_>, a: ObjId, s3: glam::Vec3, scale: f32) -> Opt
 
 /// The box around a volume's brush in the world (None for anything that is not a volume with a brush, and for
 /// volumes that move: a mover's shape is handled apart).
-pub(crate) fn volume_bounds(vm: &mut Vm<'_>, a: ObjId) -> Option<(glam::Vec3, glam::Vec3)> {
+pub fn volume_bounds(vm: &mut Vm<'_>, a: ObjId) -> Option<(glam::Vec3, glam::Vec3)> {
     use glam::{Mat3, Vec3};
     let volume = vm.db.find("Volume")?;
     if !vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, volume)) || !get(vm, a, "bStatic").as_bool() {
