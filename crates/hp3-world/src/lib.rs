@@ -282,17 +282,76 @@ fn export_travel(vm: &mut Vm<'_>, actor: ObjId) -> Option<TravelActor> {
     Some(TravelActor { class, name: vm.db.names.get(vm.db.objects.get(actor).name).to_string(), props: out })
 }
 
-/// The player's pawn and the inventory chain behind it, for the next level.
+/// The pawns whose inventory goes along: the player's pawn, the level's inventory carrier (`Level.InventoryCarrierPawn`: HP3
+/// files every collection, beans, cakes, pasties, on it, and the HUD counts from it) and every pawn of the carrier class (Harry).
+/// The carrier can be another pawn than the one played (Ron, Hermione, a creature), and `ServerTravel` points it at the played
+/// pawn just before leaving, so all of them are looked at.
+fn inventory_holders(vm: &mut Vm<'_>, pc: ObjId) -> Vec<ObjId> {
+    let mut out: Vec<ObjId> = Vec::new();
+    let mut add = |vm: &mut Vm<'_>, p: Option<ObjId>| {
+        if let Some(p) = p
+            && !vm.db.objects.get(p).deleted
+            && !out.contains(&p)
+        {
+            out.push(p);
+        }
+    };
+    let pawn = get(vm, pc, "Pawn").as_obj();
+    add(vm, pawn);
+    if let Some(li) = world(vm).level_info {
+        let carrier = get(vm, li, "InventoryCarrierPawn").as_obj();
+        add(vm, carrier);
+        if let Some(class) = carrier_class(vm, li) {
+            for a in world(vm).actors.clone() {
+                if vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, class)) {
+                    add(vm, Some(a));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The class whose pawn carries the player's inventory (`LevelInfo.InventoryCarrierClass`, `HGame.Harry`).
+fn carrier_class(vm: &mut Vm<'_>, li: ObjId) -> Option<hp3_script::StructId> {
+    let c = get(vm, li, "InventoryCarrierClass").as_obj()?;
+    vm.class_of(c)
+}
+
+/// The player's pawn and the inventory that goes with it, for the next level: the pawn's own `travel` values first, then each
+/// item of every inventory holder once.
 fn export_player(vm: &mut Vm<'_>, pc: ObjId) -> Option<(String, Vec<TravelActor>)> {
-    let pawn = get(vm, pc, "Pawn").as_obj()?;
+    let pawn = get(vm, pc, "Pawn").as_obj();
     let mut actors = Vec::new();
-    let mut at = Some(pawn);
+    if let Some(p) = pawn {
+        actors.extend(export_travel(vm, p));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for holder in inventory_holders(vm, pc) {
+        let mut at = get(vm, holder, "Inventory").as_obj();
+        for _ in 0..256 {
+            let Some(a) = at else { break };
+            if !seen.insert(a) {
+                break;
+            }
+            actors.extend(export_travel(vm, a));
+            at = get(vm, a, "Inventory").as_obj();
+        }
+    }
+    (pawn.is_some() || !actors.is_empty()).then(|| (player_name(vm, pc), actors))
+}
+
+/// The item of `class` already in `pawn`'s inventory chain.
+fn held_item(vm: &mut Vm<'_>, pawn: ObjId, class: hp3_script::StructId) -> Option<ObjId> {
+    let mut at = get(vm, pawn, "Inventory").as_obj();
     for _ in 0..256 {
-        let Some(a) = at else { break };
-        actors.extend(export_travel(vm, a));
+        let a = at?;
+        if vm.db.objects.get(a).class == Some(class) && !vm.db.objects.get(a).deleted {
+            return Some(a);
+        }
         at = get(vm, a, "Inventory").as_obj();
     }
-    Some((player_name(vm, pc), actors))
+    None
 }
 
 /// The name the player's replication info holds (empty when it has none).
@@ -303,29 +362,54 @@ fn player_name(vm: &mut Vm<'_>, pc: ObjId) -> String {
     }
 }
 
-/// Brings the travelling actors of `info` into the new level for the player's pawn: the pawn entry is the
-/// pawn itself, others are spawned at the pawn (owned by it); then their `travel` properties are put back, with
-/// actor references pointing at the new copies. Returns the actors that came, in the order they were listed.
+/// Brings the travelling actors of `info` into the new level: the pawn entry is the player's pawn itself; the items are spawned
+/// for the level's inventory carrier (`Level.InventoryCarrierPawn`, else the player's pawn) and owned by it. An item of a class
+/// the carrier already holds is not made again: a collection (beans, cakes, pasties) adds its count to the one there, anything
+/// else (the wand every pawn starts with) is dropped. Then the `travel` values are put back, with actor references pointing at
+/// the new copies; the inventory links are left to the items' `TravelPreAccept` (`GiveTo` files each one on its owner).
+/// Returns the actors that came, in the order they were listed.
 fn accept_travel(vm: &mut Vm<'_>, pc: ObjId, pawn: ObjId, info: &TravelInfo) -> Vec<ObjId> {
     // The entry under the player's name; failing that (a game with one player) the first one.
     let name = player_name(vm, pc);
     let Some((_, actors)) = info.iter().find(|(n, _)| *n == name).or_else(|| info.first()) else { return Vec::new() };
     let pawn_class = vm.db.find("Pawn");
+    let collection_class = vm.db.find("KWInventoryCollection");
+    let carrier = world(vm).level_info.and_then(|li| get(vm, li, "InventoryCarrierPawn").as_obj()).filter(|&c| !vm.db.objects.get(c).deleted).unwrap_or(pawn);
     let mut accepted: Vec<(String, ObjId, &TravelActor)> = Vec::new();
+    let mut made: HashMap<hp3_script::StructId, ObjId> = HashMap::default();
     for t in actors {
         let is_pawn = pawn_class.is_some_and(|p| vm.is_child_of(t.class, p));
-        let actor = if is_pawn {
-            Some(pawn)
-        } else {
-            let class_obj = vm.db.get(t.class).object;
-            natives::spawn(vm, Some(pawn), &[Value::Object(Some(class_obj)), Value::Object(Some(pawn))]).ok().and_then(|v| v.as_obj())
-        };
+        if is_pawn {
+            accepted.push((t.name.clone(), pawn, t));
+            continue;
+        }
+        let have = made.get(&t.class).copied().or_else(|| held_item(vm, carrier, t.class));
+        if let Some(have) = have {
+            if collection_class.is_some_and(|c| vm.is_child_of(t.class, c)) {
+                let count = t.props.iter().find(|(p, _)| p.eq_ignore_ascii_case("iNumItems")).map(|(_, v)| match v {
+                    TravelValue::Plain(v) => v.as_int(),
+                    TravelValue::Actor(_) => 0,
+                });
+                if let Some(count) = count {
+                    let total = get(vm, have, "iNumItems").as_int() + count;
+                    set(vm, have, "iNumItems", Value::Int(total));
+                }
+            }
+            continue;
+        }
+        let class_obj = vm.db.get(t.class).object;
+        let actor = natives::spawn(vm, Some(carrier), &[Value::Object(Some(class_obj)), Value::Object(Some(carrier))]).ok().and_then(|v| v.as_obj());
         if let Some(a) = actor {
+            made.insert(t.class, a);
             accepted.push((t.name.clone(), a, t));
         }
     }
     for (_, actor, t) in &accepted {
         for (prop, value) in &t.props {
+            // The chain is built again by GiveTo; the old links would point items at each other twice.
+            if prop.eq_ignore_ascii_case("Inventory") {
+                continue;
+            }
             let v = match value {
                 TravelValue::Plain(v) => v.clone(),
                 TravelValue::Actor(target) => match accepted.iter().find(|(n, ..)| n == target) {
@@ -645,11 +729,18 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         physics::lift_out_of_floor(vm, a);
     }
     // The persistent store has the saved state of the earlier levels: every actor takes what is its own from it, then settles.
-    for &a in &actors {
-        fire(vm, a, "RestorePersistentData", &mut []);
+    // That is every actor alive now, not only the map's: the game's own managers (`WizardCardManager`, `ChallengeStarManager`,
+    // made by `HGame.PreBeginPlay`) hold the cards and shields.
+    let live: Vec<ObjId> = world(vm).actors.clone();
+    for &a in &live {
+        if !vm.db.objects.get(a).deleted {
+            fire(vm, a, "RestorePersistentData", &mut []);
+        }
     }
-    for &a in &actors {
-        fire(vm, a, "PostPersistentDataRestored", &mut []);
+    for &a in &live {
+        if !vm.db.objects.get(a).deleted {
+            fire(vm, a, "PostPersistentDataRestored", &mut []);
+        }
     }
     // Actors with an `AttachTag` ride on the actor with that tag or name (a knight on its panel).
     let by_name = |vm: &mut Vm<'_>, o: ObjId| vm.db.objects.get(o).name;
@@ -875,13 +966,30 @@ pub fn refresh_baked_collision(vm: &mut Vm<'_>, a: ObjId) {
     world(vm).collision.set_active(a, active);
 }
 
+/// A level switch the game asked for (`Level.NextURL`) happens when its countdown runs out.
+fn count_down_travel(vm: &mut Vm<'_>, li: ObjId, dt: f32) {
+    let next = get(vm, li, "NextURL").as_str().to_string();
+    if !next.is_empty() {
+        let countdown = get(vm, li, "NextSwitchCountdown").as_float() - dt;
+        set(vm, li, "NextSwitchCountdown", Value::Float(countdown));
+        if countdown <= 0.0 {
+            set(vm, li, "NextURL", Value::Str(String::new()));
+            world(vm).pending_travel = Some(next);
+        }
+    }
+}
+
 pub fn tick(vm: &mut Vm<'_>, dt: f32) {
-    // The step is scaled by the level's time dilation; while someone has paused the game only the menus run.
+    // The step is scaled by the level's time dilation; while someone has paused the game only the menus run, and a level
+    // switch still happens (a pause page's "leave" asks for one while the game is paused).
     let dilation = world(vm).level_info.map(|li| get(vm, li, "TimeDilation").as_float()).filter(|d| *d > 0.0).unwrap_or(1.0);
     let dt = dt * dilation;
-    if world(vm).level_info.is_some_and(|li| get(vm, li, "Pauser").as_obj().is_some()) {
+    if let Some(li) = world(vm).level_info
+        && get(vm, li, "Pauser").as_obj().is_some()
+    {
         follow_player(vm);
         interactions::tick(vm, dt);
+        count_down_travel(vm, li, dt);
         return;
     }
     let actors = {
@@ -927,16 +1035,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
                 world(vm).save_requested = true;
             }
         }
-        // A level switch the game asked for happens when its countdown runs out.
-        let next = get(vm, li, "NextURL").as_str().to_string();
-        if !next.is_empty() {
-            let countdown = get(vm, li, "NextSwitchCountdown").as_float() - dt;
-            set(vm, li, "NextSwitchCountdown", Value::Float(countdown));
-            if countdown <= 0.0 {
-                set(vm, li, "NextURL", Value::Str(String::new()));
-                world(vm).pending_travel = Some(next);
-            }
-        }
+        count_down_travel(vm, li, dt);
     }
     if world(vm).frame == 1
         && let Some(pc) = world(vm).player
