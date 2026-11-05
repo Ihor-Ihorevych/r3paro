@@ -7,7 +7,7 @@
 //! is still touching afterwards. Ending a touch (`UnTouch`) works the same way, and a destroyed actor ends all
 //! of its touches at once.
 //!
-//! A pair touches when both collide with actors, their cylinders overlap, at least one of them blocks
+//! A pair touches when both collide with actors, their shapes overlap, at least one of them blocks
 //! non-zero-extent traces (so two triggers never touch each other), and neither stands on the other.
 
 use glam::Vec3;
@@ -32,6 +32,8 @@ struct Shape {
     height: f32,
     /// A volume is its brush: half the size of the box around it (`location` is then that box's middle).
     half: Option<Vec3>,
+    /// A `CollideType` box: half sizes along its own axes (radius, width, height) and those axes in the world.
+    obox: Option<(Vec3, [Vec3; 3])>,
 }
 
 /// Property slots read for every actor, resolved once.
@@ -45,7 +47,13 @@ struct Slots {
     is_static: Option<usize>,
     base: Option<usize>,
     traceable: Option<usize>,
+    collide_type: Option<usize>,
+    width: Option<usize>,
+    rotation: Option<usize>,
 }
+
+/// `Actor.CollideType` of a box turned with the actor (0 is the upright cylinder).
+const CT_BOX: u8 = 1;
 
 #[derive(Default)]
 pub struct Touch {
@@ -79,6 +87,9 @@ fn slots(vm: &mut Vm<'_>) -> Slots {
         is_static: actor_slot(vm, "bStatic"),
         base: actor_slot(vm, "Base"),
         traceable: actor_slot(vm, "bBlockNonZeroExtentTraces"),
+        collide_type: actor_slot(vm, "CollideType"),
+        width: actor_slot(vm, "CollisionWidth"),
+        rotation: actor_slot(vm, "Rotation"),
     };
     world(vm).touch.slots = Some(s);
     s
@@ -96,9 +107,55 @@ fn shape_of(vm: &mut Vm<'_>, a: ObjId, s: &Slots) -> Shape {
     let collide = read(vm, a, s.collide).as_bool();
     if let Some((lo, hi)) = bounds {
         let half = (hi - lo) * 0.5;
-        return Shape { collide, location: (lo + hi) * 0.5, radius: half.truncate().length(), height: half.z, half: Some(half) };
+        return Shape { collide, location: (lo + hi) * 0.5, radius: half.truncate().length(), height: half.z, half: Some(half), obox: None };
     }
-    Shape { collide, location: read_vec(vm, a, s.location), radius: read(vm, a, s.radius).as_float(), height: read(vm, a, s.height).as_float(), half: None }
+    let (radius, height) = (read(vm, a, s.radius).as_float(), read(vm, a, s.height).as_float());
+    let location = read_vec(vm, a, s.location);
+    if read(vm, a, s.collide_type).as_byte() == CT_BOX {
+        let width = read(vm, a, s.width).as_float();
+        let half = Vec3::new(radius, if width > 0.0 { width } else { radius }, height);
+        let r: Vec<i32> = read(vm, a, s.rotation).fields().iter().map(Value::as_int).collect();
+        let ax = hp3_script::natives::rot_axes([r.first().copied().unwrap_or(0), r.get(1).copied().unwrap_or(0), r.get(2).copied().unwrap_or(0)]);
+        let axes = [Vec3::from(ax[0]), Vec3::from(ax[1]), Vec3::from(ax[2])];
+        // For the spatial index the box counts as wide as its corners reach.
+        return Shape { collide, location, radius: half.truncate().length(), height: world_half(half, &axes).z, half: None, obox: Some((half, axes)) };
+    }
+    Shape { collide, location, radius, height, half: None, obox: None }
+}
+
+/// Half size of the world-aligned box around a turned box.
+fn world_half(half: Vec3, axes: &[Vec3; 3]) -> Vec3 {
+    axes[0].abs() * half.x + axes[1].abs() * half.y + axes[2].abs() * half.z
+}
+
+/// A turned box against an upright cylinder: the cylinder's middle in the box's frame, its nearest point of the box
+/// across the ground less than the radius away, and the heights overlapping.
+fn box_cylinder(location: Vec3, half: Vec3, axes: &[Vec3; 3], c: &Shape) -> bool {
+    let d = c.location - location;
+    let local = Vec3::new(d.dot(axes[0]), d.dot(axes[1]), d.dot(axes[2]));
+    let near = local.clamp(-half, half);
+    let (dx, dy) = (local.x - near.x, local.y - near.y);
+    dx * dx + dy * dy < c.radius * c.radius && local.z.abs() < half.z + c.height
+}
+
+/// Two turned boxes: no separating axis among the ground axes of either, and their world heights overlap.
+fn box_box(a: &Shape, ah: Vec3, aa: &[Vec3; 3], b: &Shape, bh: Vec3, ba: &[Vec3; 3]) -> bool {
+    let d = b.location - a.location;
+    if d.z.abs() >= world_half(ah, aa).z + world_half(bh, ba).z {
+        return false;
+    }
+    let flat = |v: Vec3| Vec3::new(v.x, v.y, 0.0);
+    let reach = |h: Vec3, ax: &[Vec3; 3], n: Vec3| h.x * flat(ax[0]).dot(n).abs() + h.y * flat(ax[1]).dot(n).abs();
+    for n in [aa[0], aa[1], ba[0], ba[1]].map(flat) {
+        if n.length_squared() < 1e-6 {
+            continue;
+        }
+        let n = n.normalize();
+        if flat(d).dot(n).abs() >= reach(ah, aa, n) + reach(bh, ba, n) {
+            return false;
+        }
+    }
+    true
 }
 
 fn cell(p: Vec3) -> (i32, i32) {
@@ -107,23 +164,33 @@ fn cell(p: Vec3) -> (i32, i32) {
 
 fn overlaps(a: &Shape, b: &Shape) -> bool {
     let d = a.location - b.location;
-    // A volume's brush box against a cylinder (taken as its box) or another brush box.
+    // A volume's brush box against a cylinder or a turned box (each taken as its box) or another brush box.
     if a.half.is_some() || b.half.is_some() {
-        let ha = a.half.unwrap_or(Vec3::new(a.radius, a.radius, a.height));
-        let hb = b.half.unwrap_or(Vec3::new(b.radius, b.radius, b.height));
+        let as_box = |s: &Shape| s.half.or(s.obox.map(|(h, ax)| world_half(h, &ax))).unwrap_or(Vec3::new(s.radius, s.radius, s.height));
+        let (ha, hb) = (as_box(a), as_box(b));
         return d.x.abs() < ha.x + hb.x && d.y.abs() < ha.y + hb.y && d.z.abs() < ha.z + hb.z;
     }
-    (d.x * d.x + d.y * d.y).sqrt() < a.radius + b.radius && d.z.abs() < a.height + b.height
+    match (a.obox, b.obox) {
+        (Some((ah, aa)), Some((bh, ba))) => box_box(a, ah, &aa, b, bh, &ba),
+        (Some((h, ax)), None) => box_cylinder(a.location, h, &ax, b),
+        (None, Some((h, ax))) => box_cylinder(b.location, h, &ax, a),
+        (None, None) => (d.x * d.x + d.y * d.y).sqrt() < a.radius + b.radius && d.z.abs() < a.height + b.height,
+    }
 }
 
 /// Whether two actors overlap. A mover is its geometry rather than its cylinder, and two movers never overlap.
 fn overlap_between(col: &crate::collision::Collision, a: (ObjId, &Shape), b: (ObjId, &Shape)) -> bool {
     match (col.mover(a.0), col.mover(b.0)) {
         (Some(_), Some(_)) => false,
-        (Some(m), None) => m.overlaps(b.1.location, Vec3::new(b.1.radius, b.1.radius, b.1.height)),
-        (None, Some(m)) => m.overlaps(a.1.location, Vec3::new(a.1.radius, a.1.radius, a.1.height)),
+        (Some(m), None) => m.overlaps(b.1.location, extent_of(b.1)),
+        (None, Some(m)) => m.overlaps(a.1.location, extent_of(a.1)),
         (None, None) => overlaps(a.1, b.1),
     }
+}
+
+/// Half size of the world-aligned box an actor fills (a mover is tested against it).
+fn extent_of(s: &Shape) -> Vec3 {
+    s.obox.map(|(h, ax)| world_half(h, &ax)).unwrap_or(Vec3::new(s.radius, s.radius, s.height))
 }
 
 /// Enters (or moves) an actor in the spatial index.
@@ -410,4 +477,47 @@ pub fn along(vm: &mut Vm<'_>, start: Vec3, end: Vec3, pad: f32) -> Vec<ObjId> {
 
 fn is_player(vm: &mut Vm<'_>, a: ObjId) -> bool {
     world(vm).player.is_some_and(|pc| get(vm, pc, "Pawn").as_obj() == Some(a))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cylinder(at: Vec3, radius: f32, height: f32) -> Shape {
+        Shape { collide: true, location: at, radius, height, half: None, obox: None }
+    }
+
+    fn turned_box(at: Vec3, half: Vec3, yaw: i32) -> Shape {
+        let ax = hp3_script::natives::rot_axes([0, yaw, 0]);
+        let axes = [Vec3::from(ax[0]), Vec3::from(ax[1]), Vec3::from(ax[2])];
+        Shape { collide: true, location: at, radius: half.truncate().length(), height: world_half(half, &axes).z, half: None, obox: Some((half, axes)) }
+    }
+
+    #[test]
+    fn thin_box_across_a_doorway_is_touched_along_its_whole_width() {
+        // A 10 deep, 200 wide line trigger (the crab room's cutscene line) and a pawn of radius 15.
+        let line = turned_box(Vec3::ZERO, Vec3::new(10.0, 200.0, 100.0), 0);
+        assert!(overlaps(&line, &cylinder(Vec3::new(0.0, 150.0, 0.0), 15.0, 38.0)));
+        assert!(overlaps(&cylinder(Vec3::new(20.0, -190.0, 0.0), 15.0, 38.0), &line));
+        assert!(!overlaps(&line, &cylinder(Vec3::new(30.0, 0.0, 0.0), 15.0, 38.0)));
+        assert!(!overlaps(&line, &cylinder(Vec3::new(0.0, 220.0, 0.0), 15.0, 38.0)));
+        assert!(!overlaps(&line, &cylinder(Vec3::new(0.0, 0.0, 140.0), 15.0, 38.0)));
+    }
+
+    #[test]
+    fn a_turned_box_is_tested_in_its_own_frame() {
+        // Turned a quarter: its width now runs along x.
+        let line = turned_box(Vec3::ZERO, Vec3::new(10.0, 200.0, 100.0), 16384);
+        assert!(overlaps(&line, &cylinder(Vec3::new(150.0, 0.0, 0.0), 15.0, 38.0)));
+        assert!(!overlaps(&line, &cylinder(Vec3::new(0.0, 150.0, 0.0), 15.0, 38.0)));
+    }
+
+    #[test]
+    fn two_boxes_meet_only_without_a_gap() {
+        let a = turned_box(Vec3::ZERO, Vec3::new(10.0, 100.0, 50.0), 0);
+        let b = turned_box(Vec3::new(50.0, 0.0, 0.0), Vec3::new(10.0, 100.0, 50.0), 8192);
+        assert!(overlaps(&a, &b));
+        let c = turned_box(Vec3::new(200.0, 0.0, 0.0), Vec3::new(10.0, 100.0, 50.0), 0);
+        assert!(!overlaps(&a, &c));
+    }
 }

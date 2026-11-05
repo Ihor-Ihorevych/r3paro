@@ -540,6 +540,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
     movie::register(vm);
     anim::register(vm);
     nav::register(vm);
+    perception::register(vm);
     canvas::register(vm);
     interactions::register(vm);
     gui::register(vm);

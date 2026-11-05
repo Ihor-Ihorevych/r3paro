@@ -570,11 +570,26 @@ pub fn register(vm: &mut Vm<'_>) {
         }
         Ok(Value::Bool(moved))
     });
+    // SetRelativeLocation(vector): on a bone the offset is only stored; on a base the actor moves to that offset in
+    // the base's frame (a spell placed at a creature's mouth) and keeps its offset from the base; otherwise nothing.
     vm.register("Actor.SetRelativeLocation", |vm, this, a| {
-        if let Some(o) = this {
+        let Some(o) = this else { return Ok(Value::Bool(false)) };
+        if get(vm, o, "AttachmentBone").as_name() != hp3_script::Name::NONE {
             set(vm, o, "RelativeLocation", a[0].clone());
+            return Ok(Value::Bool(true));
         }
-        Ok(Value::Bool(true))
+        let Some(base) = get(vm, o, "Base").as_obj() else { return Ok(Value::Bool(false)) };
+        let offset = crate::physics::vec(&a[0]);
+        let base_at = crate::physics::vec(&get(vm, base, "Location"));
+        let r: Vec<i32> = get(vm, base, "Rotation").fields().iter().map(Value::as_int).collect();
+        let axes = hp3_script::natives::rot_axes([r.first().copied().unwrap_or(0), r.get(1).copied().unwrap_or(0), r.get(2).copied().unwrap_or(0)]);
+        let to = base_at + glam::Vec3::from(axes[0]) * offset.x + glam::Vec3::from(axes[1]) * offset.y + glam::Vec3::from(axes[2]) * offset.z;
+        let moved = crate::physics::far_move(vm, o, to, false, true);
+        if get(vm, o, "Base").as_obj().is_some() {
+            let now = crate::physics::vec(&get(vm, o, "Location"));
+            set(vm, o, "RelativeLocation", crate::physics::value(now - base_at));
+        }
+        Ok(Value::Bool(moved))
     });
     vm.register("Actor.SetRelativeRotation", |vm, this, a| {
         if let Some(o) = this {
