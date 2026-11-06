@@ -21,6 +21,9 @@ pub enum Blend {
     Modulate,
 }
 
+/// How wide the line segments of a spark are (the original draws 1-pixel lines).
+const SPARK_WIDTH: f32 = 0.6;
+
 /// A particle (or a piece of a beam) as a quad in world space.
 #[derive(Clone, Debug)]
 pub struct Quad {
@@ -137,6 +140,19 @@ struct Config {
     beam_segments: i32,
     noise: RangeVec,
     beam_u_scale: f32,
+    // Mesh emitters: each particle is this static mesh, spinning on three axes, and may bounce off the floor.
+    // Spark emitters: each particle is a trail of line segments along its path (`LineSegmentsRange`, `TimeBetweenSegmentsRange`).
+    is_spark: bool,
+    line_segments: Range,
+    time_between_segments: Range,
+    is_mesh: bool,
+    mesh: Option<ObjId>,
+    spins3: RangeVec,
+    start_spin3: RangeVec,
+    collide: bool,
+    damping: RangeVec,
+    use_max_collisions: bool,
+    max_collisions: Range,
 }
 
 fn float(vm: &mut Vm<'_>, o: ObjId, name: &str) -> f32 {
@@ -151,10 +167,11 @@ fn vec3(vm: &mut Vm<'_>, o: ObjId, name: &str) -> Vec3 {
     crate::physics::vec(&get(vm, o, name))
 }
 
+/// An Unreal `Color` (declared `B, G, R, A`) as red, green, blue, alpha in 0..1.
 fn colour(v: &Value) -> [f32; 4] {
     let f = v.fields();
     let c = |i: usize| f.get(i).map(|x| x.as_int() as f32 / 255.0).unwrap_or(1.0);
-    [c(0), c(1), c(2), c(3)]
+    [c(2), c(1), c(0), c(3)]
 }
 
 impl Config {
@@ -248,6 +265,17 @@ impl Config {
             beam_segments: get(vm, o, "BeamSegments").as_int().max(1),
             noise: RangeVec::of(&get(vm, o, "LowFrequencyNoiseRange")),
             beam_u_scale: float(vm, o, "RotatingSheets").max(1.0),
+            is_spark: class.contains("sparkemitter"),
+            line_segments: Range::of(&get(vm, o, "LineSegmentsRange")),
+            time_between_segments: Range::of(&get(vm, o, "TimeBetweenSegmentsRange")),
+            is_mesh: class.contains("meshemitter"),
+            mesh: get(vm, o, "StaticMesh").as_obj(),
+            spins3: RangeVec::of(&get(vm, o, "SpinsPerSecondRange")),
+            start_spin3: RangeVec::of(&get(vm, o, "StartSpinRange")),
+            collide: flag(vm, o, "UseCollision"),
+            damping: RangeVec::of(&get(vm, o, "DampingFactorRange")),
+            use_max_collisions: flag(vm, o, "UseMaxCollisions"),
+            max_collisions: Range::of(&get(vm, o, "MaxCollisions")),
         }
     }
 }
@@ -268,6 +296,16 @@ struct Particle {
     /// Skeletal emitters: the bone it was born at and where that bone (scaled) was last seen.
     bone: usize,
     old_mesh: Vec3,
+    /// Where it was at the last step, and for a mesh particle its turn and spin (radians, per axis), scale and bounces so far.
+    /// Sparks: where and how fast it was born, and the time between the points of its trail.
+    start: Vec3,
+    start_vel: Vec3,
+    segment_dt: f32,
+    prev: Vec3,
+    rot3: Vec3,
+    spin3: Vec3,
+    scale3: Vec3,
+    hits: u32,
 }
 
 /// A line the script gives an emitter to spawn along (`LineExpression`): points of the line from its start to its
@@ -429,6 +467,14 @@ fn spawn(config: &Config, rng: &mut Rng, origin: Vec3, rot: Mat3, fill_age: f32,
         end: Vec3::ZERO,
         bone,
         old_mesh,
+        start: pos,
+        start_vel: vel,
+        segment_dt: if config.is_spark { config.time_between_segments.pick(rng) } else { 0.0 },
+        prev: pos,
+        rot3: if config.is_mesh { config.start_spin3.pick(rng) * std::f32::consts::TAU } else { Vec3::ZERO },
+        spin3: if config.is_mesh && config.spin { config.spins3.pick(rng) * std::f32::consts::TAU } else { Vec3::ZERO },
+        scale3: if config.uniform_size { Vec3::splat(size.x.abs().max(0.01)) } else { Vec3::new(size.x.abs().max(0.01), size.y.abs().max(0.01), size.z.abs().max(0.01)) },
+        hits: 0,
     }
 }
 
@@ -496,8 +542,35 @@ pub fn debug_emitter(vm: &mut Vm<'_>, a: ObjId) -> String {
 }
 
 /// Steps every emitter actor's emitters by `dt`.
+/// An emitter set on an actor (a creature's flames: `SetBase` with a relative location, not on a bone) rides with it. The
+/// engine carries the riders of movers only, so without this the flames stay where the creature was when it spawned them.
+fn follow_bases(vm: &mut Vm<'_>) {
+    let mut emitters: Vec<ObjId> = world(vm).particles.states.keys().map(|k| k.0).collect();
+    emitters.sort_unstable();
+    emitters.dedup();
+    for a in emitters {
+        if vm.db.objects.get(a).deleted {
+            continue;
+        }
+        let Some(base) = get(vm, a, "Base").as_obj() else { continue };
+        if base == a || vm.db.objects.get(base).deleted || get(vm, base, "bWorldGeometry").as_bool() {
+            continue;
+        }
+        // A bone attachment is placed by the animation, and a mover carries its own riders.
+        if world(vm).anim.attachments.contains_key(&a) || get(vm, a, "AttachmentBone").as_name() != hp3_script::Name::NONE || world(vm).collision.mover(base).is_some() {
+            continue;
+        }
+        let want = crate::physics::vec(&get(vm, base, "Location")) + crate::physics::vec(&get(vm, a, "RelativeLocation"));
+        if want.distance_squared(crate::physics::vec(&get(vm, a, "Location"))) > 1e-4 {
+            set(vm, a, "Location", crate::physics::value(want));
+        }
+    }
+}
+
 pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     let Some(emitter_class) = vm.db.find("Emitter") else { return };
+    follow_bases(vm);
+    collide_meshes(vm);
     let actors = world(vm).actors.clone();
     let frame = world(vm).frame;
     let mut seen: Vec<(ObjId, usize)> = Vec::new();
@@ -554,13 +627,21 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
             };
             let name = vm.db.objects.get(a).name;
             let name = vm.db.names.get(name).to_string();
+            if std::env::var_os("HP3_PARTICLE_DEBUG").is_some() && name.starts_with("ChallengeShield") && world(vm).frame % 120 == 0 {
+                let mat = world(vm).particles.states.get(&key).and_then(|s| s.config.material).map(|m| hp3_script::natives::object_path(vm, m));
+                eprintln!("emitter-material {name} #{i} {mat:?}");
+                if let Some(s) = world(vm).particles.states.get(&key) {
+                    let c = &s.config;
+                    eprintln!("emitter-config {name} #{i}: size {:?} uniform {} velocity {:?} accel {} start_range {:?} shape {} spin {} {}..{} grid {}x{} sub {}..{} random_sub {} coords {} respawn {} opacity {}", c.start_size.0.map(|r| (r.0, r.1)), c.uniform_size, c.start_velocity.0.map(|r| (r.0, r.1)), c.acceleration, c.start_range.0.map(|r| (r.0, r.1)), c.shape, c.spin, c.spins_per_second.0, c.spins_per_second.1, c.u_div, c.v_div, c.sub_start, c.sub_end, c.random_sub, c.coordinates, c.respawn, c.opacity);
+                }
+            }
             let Some(s) = world(vm).particles.states.get_mut(&key) else { continue };
             s.line = line.clone();
             step(s, dt, origin, rot, hidden, &bones);
             if needs && std::env::var_os("HP3_PARTICLE_DEBUG").is_some() {
                 let c = &s.config;
                 eprintln!(
-                    "emitter {} #{i}: beam {} disabled {} max {} pps {} initial {} auto {} life {}..{} size {}..{} material {:?} blend {:?} coords {} alive {}",
+                    "emitter {} #{i}: hidden {hidden} beam {} disabled {} max {} pps {} initial {} auto {} life {}..{} size {}..{} material {:?} blend {:?} coords {} alive {}",
                     name,
                     c.beam, c.disabled, c.max_particles, c.pps, c.initial_pps, c.auto_initial, c.lifetime.0, c.lifetime.1,
                     c.start_size.0[0].0, c.start_size.0[0].1, c.material, c.blend, c.coordinates, s.particles.len()
@@ -630,6 +711,8 @@ fn step(s: &mut EmitterState, dt: f32, origin: Vec3, rot: Mat3, hidden: bool, bo
     let mut i = 0;
     while i < s.particles.len() {
         let p = &mut s.particles[i];
+        p.prev = p.pos;
+        p.rot3 += p.spin3 * dt;
         p.vel += c.acceleration * dt;
         p.pos += p.vel * dt;
         // Particles of an emitter that follows its bones move with the bone they were born at.
@@ -681,6 +764,87 @@ fn step(s: &mut EmitterState, dt: f32, origin: Vec3, rot: Mat3, hidden: bool, bo
     s.accum = s.accum.min(1.0);
 }
 
+/// Mesh particles that moved last step bounce off the level's geometry: they are put back where they met it and their
+/// velocity is mirrored and damped (`DampingFactorRange`), and after `MaxCollisions` bounces they are done.
+fn collide_meshes(vm: &mut Vm<'_>) {
+    let keys: Vec<(ObjId, usize)> = world(vm).particles.states.iter().filter(|(_, s)| s.config.is_mesh && s.config.collide && s.config.coordinates == 0).map(|(k, _)| *k).collect();
+    for key in keys {
+        let Some(s) = world(vm).particles.states.get_mut(&key) else { continue };
+        let mut particles = std::mem::take(&mut s.particles);
+        let (config, mut rng) = (s.config.clone(), Rng(s.rng.0));
+        for p in &mut particles {
+            if p.prev == p.pos {
+                continue;
+            }
+            let Some(hit) = world(vm).collision.trace_static(p.prev, p.pos, Vec3::splat(2.0)) else { continue };
+            if hit.time <= 0.0 && p.prev == hit.location {
+                continue;
+            }
+            p.pos = hit.location + hit.normal * 0.5;
+            let bounced = p.vel - 2.0 * p.vel.dot(hit.normal) * hit.normal;
+            let damp = config.damping.pick(&mut rng);
+            let damp = if damp == Vec3::ZERO { Vec3::splat(0.5) } else { damp };
+            p.vel = bounced * damp;
+            p.spin3 *= 0.7;
+            p.hits += 1;
+            if config.use_max_collisions && p.hits as f32 >= config.max_collisions.pick(&mut rng).max(1.0) {
+                p.age = p.life;
+            }
+        }
+        if let Some(s) = world(vm).particles.states.get_mut(&key) {
+            s.rng = rng;
+            s.particles = particles;
+        }
+    }
+}
+
+/// A piece thrown by a mesh emitter, to draw as the static mesh `mesh` at `pos`, turned by `rot` and scaled by `scale`.
+#[derive(Clone, Debug)]
+pub struct MeshParticle {
+    pub mesh: ObjId,
+    pub pos: Vec3,
+    pub rot: Mat3,
+    pub scale: Vec3,
+}
+
+/// The live particles of mesh emitters. A piece shrinks away over its fade-out (meshes have no alpha here).
+pub fn collect_meshes(vm: &mut Vm<'_>) -> Vec<MeshParticle> {
+    let keys: Vec<(ObjId, usize)> = world(vm).particles.states.iter().filter(|(_, s)| s.config.is_mesh).map(|(k, _)| *k).collect();
+    let mut out = Vec::new();
+    for key in keys {
+        let a = key.0;
+        if get(vm, a, "bHidden").as_bool() {
+            continue;
+        }
+        let origin = crate::physics::vec(&get(vm, a, "Location"));
+        let rot = rotation_of(vm, a);
+        let Some(s) = world(vm).particles.states.get(&key) else { continue };
+        let c = &s.config;
+        let Some(mesh) = c.mesh else { continue };
+        for p in &s.particles {
+            let t = (p.age / p.life).clamp(0.0, 1.0);
+            let mut grow = 1.0;
+            if !c.size_scale.is_empty() {
+                let u = (t * c.size_repeats).fract();
+                grow = interpolate(&c.size_scale, if t >= 1.0 { 1.0 } else { u }, |a, b, f| a + (b - a) * f).unwrap_or(1.0);
+            }
+            if let Some(start) = c.fade_out
+                && start < 1.0
+                && t > start
+            {
+                grow *= ((1.0 - t) / (1.0 - start)).max(0.0);
+            }
+            if grow <= 0.001 {
+                continue;
+            }
+            let pos = if c.coordinates == 1 { origin + rot * p.pos } else { p.pos };
+            let turn = Mat3::from_quat(glam::Quat::from_euler(glam::EulerRot::XYZ, p.rot3.x, p.rot3.y, p.rot3.z));
+            out.push(MeshParticle { mesh, pos, rot: turn, scale: p.scale3 * grow });
+        }
+    }
+    out
+}
+
 /// All live particles as quads facing the camera (`right` and `up` are the camera's axes).
 pub fn collect(vm: &mut Vm<'_>, right: Vec3, up: Vec3) -> Vec<Quad> {
     let keys: Vec<(ObjId, usize)> = world(vm).particles.states.keys().copied().collect();
@@ -694,6 +858,9 @@ pub fn collect(vm: &mut Vm<'_>, right: Vec3, up: Vec3) -> Vec<Quad> {
         let rot = rotation_of(vm, a);
         let Some(s) = world(vm).particles.states.get(&key) else { continue };
         let c = &s.config;
+        if c.is_mesh {
+            continue;
+        }
         for p in &s.particles {
             let t = (p.age / p.life).clamp(0.0, 1.0);
             let mut size_scale = 1.0;
@@ -731,6 +898,32 @@ pub fn collect(vm: &mut Vm<'_>, right: Vec3, up: Vec3) -> Vec<Quad> {
             let (fu, fv) = (frame.rem_euclid(ud), (frame / ud).rem_euclid(vd));
             let uv = [fu as f32 / ud as f32, fv as f32 / vd as f32, (fu + 1) as f32 / ud as f32, (fv + 1) as f32 / vd as f32];
             let centre = if c.coordinates == 1 { origin + rot * p.pos } else { p.pos };
+            if c.is_spark {
+                // A trail of `NumSegments` lines, each from where the particle was `k` steps ago to `k + 1` steps ago (the original draws
+                // them as 1-pixel lines; here thin quads facing the camera). Positions come from the birth state, not the live one.
+                let segments = c.line_segments.1.max(c.line_segments.0).max(2.0) as usize;
+                let lift = if c.coordinates == 1 { origin } else { Vec3::ZERO };
+                let turn = if c.coordinates == 1 { rot } else { Mat3::IDENTITY };
+                let at = |time: f32| lift + turn * (p.start + p.start_vel * time + c.acceleration * time * time);
+                let forward = right.cross(up);
+                for k in 0..segments {
+                    let (t0, t1) = ((p.age - k as f32 * p.segment_dt).max(0.0), (p.age - (k + 1) as f32 * p.segment_dt).max(0.0));
+                    let (a, b) = (at(t0), at(t1));
+                    let along = b - a;
+                    if along.length_squared() < 1e-6 {
+                        continue;
+                    }
+                    let side = along.cross(forward).normalize_or_zero() * SPARK_WIDTH * 0.5;
+                    out.push(Quad {
+                        material: c.material,
+                        blend: c.blend,
+                        corners: [a - side, a + side, b + side, b - side],
+                        uv: [0.0, k as f32 / segments as f32, 1.0, (k + 1) as f32 / segments as f32],
+                        color: colour,
+                    });
+                }
+                continue;
+            }
             if c.beam {
                 let start = centre;
                 let end = if c.coordinates == 2 { p.end } else { origin + rot * p.end };

@@ -67,6 +67,16 @@ pub extern "C" fn SDL_main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         // SAFETY: as above.
         unsafe { std::env::set_var("HP3_TRACE_STATES", "1") };
     }
+    // A file named `env.flag` sets debugging switches: one `NAME=value` a line (lines starting with `#` are skipped).
+    if let Some(text) = args.get(1).and_then(|root| std::fs::read_to_string(std::path::Path::new(root).join("env.flag")).ok()) {
+        for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+            if let Some((k, v)) = line.split_once('=') {
+                log_line(&format!("env.flag: {}={}", k.trim(), v.trim()));
+                // SAFETY: as above.
+                unsafe { std::env::set_var(k.trim(), v.trim()) };
+            }
+        }
+    }
     let Some(root) = args.get(1).map(PathBuf::from) else {
         log_line("no game folder given");
         return 2;
@@ -278,4 +288,15 @@ pub extern "system" fn Java_io_github_flipendo_spike_FlipendoActivity_nativeDebu
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_ut2004_android_GameActivity_nativeSavedCount(_env: Env, _class: *mut c_void) -> i32 {
     SAVED.load(Ordering::Relaxed)
+}
+
+/// The phone's display runs at the game's own rate: no blending between ticks.
+pub fn interpolate() -> bool {
+    false
+}
+
+pub fn set_fps_limit(_fps: u32) {}
+
+pub fn fps_limit() -> u32 {
+    FPS_LIMIT.load(Ordering::Relaxed) as u32
 }

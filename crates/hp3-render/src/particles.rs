@@ -11,7 +11,12 @@ use wgpu::util::DeviceExt;
 use crate::gpu::{Renderer, DEPTH_FORMAT};
 
 const SHADER: &str = r#"
-struct Globals { view_proj: mat4x4<f32> };
+struct Globals { view_proj: mat4x4<f32>, fog_color: vec4<f32>, fog: vec4<f32> };
+// How much of the picture's own color is left at a fragment (1 outside the fog): linear fog by depth from `fog.x` to `fog.y`.
+fn fog_factor(w: f32) -> f32 {
+    if (globals.fog.z < 0.5) { return 1.0; }
+    return clamp((globals.fog.y - 1.0 / w) / max(globals.fog.y - globals.fog.x, 1.0), 0.0, 1.0);
+}
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
@@ -28,15 +33,24 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @l
 
 // Alpha and additive blending use the texture's colour times the particle's, with alpha from both.
 @fragment fn fs(i: VsOut) -> @location(0) vec4<f32> {
-    let c = textureSample(tex, samp, i.uv) * i.color;
+    let c = textureSample(tex, samp, i.uv) * i.color * vec4<f32>(1.0, 1.0, 1.0, fog_factor(i.pos.w));
     if (c.a < 0.004) { discard; }
     return c;
+}
+
+// A blob shadow decal: a round soft disc worked out from the quad's own coordinates (no picture), darkest in the middle and
+// fading to no change at the edge, with the falloff of the original's blobshadow picture. Modulation is neutral at 0.5.
+@fragment fn fs_decal(i: VsOut) -> @location(0) vec4<f32> {
+    let r = clamp(length(i.uv - vec2<f32>(0.5)) * 2.0, 0.0, 1.0);
+    let dark = pow(1.0 - r, 3.0) * i.color.a;
+    let c = vec3<f32>(0.5 * (1.0 - dark));
+    return vec4<f32>(mix(vec3<f32>(0.5), c, fog_factor(i.pos.w)), 1.0);
 }
 
 // Modulation scales what is behind by the particle's colour, fading to no change with its alpha.
 @fragment fn fs_modulate(i: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, i.uv) * i.color;
-    return vec4<f32>(mix(vec3<f32>(0.5), c.rgb, c.a), 1.0);
+    return vec4<f32>(mix(vec3<f32>(0.5), mix(vec3<f32>(0.5), c.rgb, c.a), fog_factor(i.pos.w)), 1.0);
 }
 "#;
 
@@ -45,6 +59,8 @@ pub enum ParticleBlend {
     Alpha,
     Additive,
     Modulate,
+    /// Modulate by the picture's colour only, faded by the quad's alpha (the picture's alpha is ignored).
+    Decal,
 }
 
 /// A particle quad in world space (corners top-left, top-right, bottom-right, bottom-left).
@@ -76,6 +92,7 @@ pub struct ParticleRenderer {
     alpha: wgpu::RenderPipeline,
     additive: wgpu::RenderPipeline,
     modulate: wgpu::RenderPipeline,
+    decal: wgpu::RenderPipeline,
     binds: RefCell<HashMap<Option<ObjKey>, Rc<wgpu::BindGroup>>>,
 }
 
@@ -88,7 +105,7 @@ fn blend_state(b: ParticleBlend) -> wgpu::BlendState {
             alpha: BlendComponent { src_factor: F::Zero, dst_factor: F::One, operation: Add },
         },
         // result = 2 * source * destination (the source being centred on 0.5).
-        ParticleBlend::Modulate => wgpu::BlendState {
+        ParticleBlend::Modulate | ParticleBlend::Decal => wgpu::BlendState {
             color: BlendComponent { src_factor: F::Dst, dst_factor: F::Src, operation: Add },
             alpha: BlendComponent { src_factor: F::Zero, dst_factor: F::One, operation: Add },
         },
@@ -142,6 +159,7 @@ impl ParticleRenderer {
             alpha: pipeline(ParticleBlend::Alpha, "fs"),
             additive: pipeline(ParticleBlend::Additive, "fs"),
             modulate: pipeline(ParticleBlend::Modulate, "fs_modulate"),
+            decal: pipeline(ParticleBlend::Decal, "fs_decal"),
             binds: RefCell::new(HashMap::new()),
         }
     }
@@ -198,6 +216,7 @@ impl ParticleRenderer {
                 ParticleBlend::Alpha => &self.alpha,
                 ParticleBlend::Additive => &self.additive,
                 ParticleBlend::Modulate => &self.modulate,
+                ParticleBlend::Decal => &self.decal,
             });
             pass.set_bind_group(1, bind.as_ref(), &[]);
             pass.draw(*start..*start + *count, 0..1);

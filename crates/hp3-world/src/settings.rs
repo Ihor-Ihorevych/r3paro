@@ -197,6 +197,14 @@ pub fn look(vm: &Vm<'_>) -> [f32; 3] {
     [(gamma0 / gamma.max(0.1)).clamp(0.2, 5.0), (bright - bright0) * 0.6, (1.0 + (contrast - contrast0)).clamp(0.2, 2.0)]
 }
 
+/// Puts Gamma, Brightness and Contrast back to what the install's `Default.ini` says (the neutral point of `look`).
+pub fn reset_look(vm: &mut Vm<'_>) {
+    for (key, fallback) in [("Gamma", 0.8f32), ("Brightness", 0.8), ("Contrast", 0.7)] {
+        let default = world(vm).config.ini.get(DISPLAY, key).and_then(|t| t.trim().parse::<f32>().ok()).unwrap_or(fallback);
+        store(vm, DISPLAY, key, &format!("{:.6}", display_value(key, default)));
+    }
+}
+
 /// The mouse speed (relative to the engine's own default of 3) and whether looking up and down is inverted, as the
 /// player set them in the Input options: the player's `PlayerInput` when it has one, else what was stored.
 pub fn mouse_look(vm: &mut Vm<'_>, pc: hp3_script::ObjId) -> (f32, bool) {

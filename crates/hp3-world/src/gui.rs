@@ -337,6 +337,8 @@ fn draw_component(vm: &mut Vm<'_>, o: ObjId, canvas_obj: ObjId, screen: Screen, 
     call_delegate(vm, o, "OnPreDraw", &mut [Value::Object(Some(canvas_obj))]);
     let tiles_before = world(vm).canvas.tiles.len();
     let handled = call_delegate(vm, o, "OnDraw", &mut [Value::Object(Some(canvas_obj))]).as_bool();
+    // What a page draws itself, as tile indices (moved below once the background goes under it).
+    let mut own = tiles_before..world(vm).canvas.tiles.len();
     if !handled {
         if is_a(vm, o, "GUIPage") {
             let bg = get(vm, o, "Background").as_obj();
@@ -348,6 +350,7 @@ fn draw_component(vm: &mut Vm<'_>, o: ObjId, canvas_obj: ObjId, screen: Screen, 
             if tiles.len() > tiles_before + 1 {
                 let bg_tile = tiles.pop().unwrap();
                 tiles.insert(tiles_before, bg_tile);
+                own = own.start + 1..own.end + 1;
             }
         } else if is_a(vm, o, "GUIImage") {
             let img = get(vm, o, "Image").as_obj();
@@ -413,6 +416,23 @@ fn draw_component(vm: &mut Vm<'_>, o: ObjId, canvas_obj: ObjId, screen: Screen, 
                 continue;
             }
             draw_component(vm, c, canvas_obj, screen, depth + 1, late);
+        }
+    }
+    // A page's own drawing ends up over its controls too: the vendor's price is written on the plate image under it
+    // (HPPageVendor.Vendor_OnDraw over imgScroll), which would otherwise hide it.
+    if !handled && is_a(vm, o, "GUIPage") && own.start < own.end {
+        let tiles = &mut world(vm).canvas.tiles;
+        if own.end <= tiles.len() {
+            let mut mine: Vec<_> = tiles.drain(own).collect();
+            // The vendor's price is centred at 272 of 800, a little right of its plate's middle (about 249 of 800):
+            // set onto the plate's middle, as the user asked.
+            if is_a(vm, o, "HPPageVendor") {
+                let shift = 23.0 / 800.0 * screen.w;
+                for t in &mut mine {
+                    t.x -= shift;
+                }
+            }
+            world(vm).canvas.tiles.extend(mine);
         }
     }
 }

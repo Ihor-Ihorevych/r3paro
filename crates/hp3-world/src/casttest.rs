@@ -6,8 +6,14 @@ use std::collections::{BTreeMap, HashSet};
 
 use glam::Vec3;
 use hp3_script::{ObjId, Value, Vm};
-use hp3_world::physics::vec;
-use hp3_world::{fire, get, set};
+use crate::physics::vec;
+use crate::{fire, get, set};
+
+/// The tick the scripted cast began (0 until it does), so screenshots can be taken at offsets from it.
+pub static START_TICK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// `HP3_CAST_CAM=<distance>[,<height>]`: where the game should put its camera (position, pitch/yaw/roll) to look at the cast's target close up.
+pub static CAMERA: std::sync::Mutex<Option<(Vec3, [i32; 3])>> = std::sync::Mutex::new(None);
 
 pub struct CastTest {
     spell: String,
@@ -99,7 +105,7 @@ pub fn step(vm: &mut Vm<'_>, t: &mut CastTest, frame: u32) {
     let r = frame - t.at;
     if t.target.is_none() {
         // Wait until the player has control (opening cutscenes and loading screens are over).
-        let ready = hp3_world::world(vm).player.is_some_and(|pc| {
+        let ready = crate::world(vm).player.is_some_and(|pc| {
             get(vm, pc, "Pawn").as_obj().is_some() && state_name(vm, pc) == "PlayerWalking"
         });
         if !ready {
@@ -116,8 +122,9 @@ pub fn step(vm: &mut Vm<'_>, t: &mut CastTest, frame: u32) {
     }
     if t.target.is_none() {
         println!("cast: starting at tick {frame}");
+        START_TICK.store(frame, std::sync::atomic::Ordering::Relaxed);
     }
-    let Some(pc) = hp3_world::world(vm).player else { return };
+    let Some(pc) = crate::world(vm).player else { return };
     if t.target.is_some() {
         drive_flame(vm, t, pc, r);
     }
@@ -142,7 +149,7 @@ pub fn step(vm: &mut Vm<'_>, t: &mut CastTest, frame: u32) {
         place(vm, t, pc, pawn);
         if std::env::var_os("HP3_CAST_SPAWNTEST").is_some()
             && let Some(c) = vm.db.find(&t.spell).map(|s| vm.db.get(s).object)
-            && let Ok(Value::Object(Some(sp))) = hp3_world::natives::spawn(vm, None, &[Value::Object(Some(c))])
+            && let Ok(Value::Object(Some(sp))) = crate::natives::spawn(vm, None, &[Value::Object(Some(c))])
         {
             println!("cast: spawn test {} speed {:?}", name_of(vm, sp), get(vm, sp, "Speed"));
             if let Some(cls) = vm.db.find(&t.spell) {
@@ -176,7 +183,8 @@ pub fn step(vm: &mut Vm<'_>, t: &mut CastTest, frame: u32) {
         return;
     }
     // Keep the camera on the target while the cursor settles.
-    if (30..110).contains(&r)
+    let aim_end = std::env::var("HP3_CAST_AIM").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(110);
+    if (30..aim_end).contains(&r)
         && let Some(cam) = get(vm, pc, "Camera").as_obj()
     {
         let from = vec(&get(vm, cam, "Location"));
@@ -189,6 +197,19 @@ pub fn step(vm: &mut Vm<'_>, t: &mut CastTest, frame: u32) {
             set(vm, cam, name, rot(pitch, yaw));
         }
         set(vm, pc, "Rotation", rot(pitch, yaw));
+    }
+    // HP3_CAST_CAM: a close-up camera on the target, on the side Harry is.
+    if let Ok(spec) = std::env::var("HP3_CAST_CAM") {
+        let mut it = spec.split(',').filter_map(|v| v.parse::<f32>().ok());
+        let (dist, height) = (it.next().unwrap_or(160.0), it.next().unwrap_or(60.0));
+        let at = vec(&get(vm, target, "Location"));
+        let from_harry = (vec(&get(vm, pawn, "Location")) - at).truncate().normalize_or_zero();
+        let side = if from_harry == glam::Vec2::ZERO { glam::Vec2::X } else { from_harry };
+        let eye = at + Vec3::new(-side.y * dist, side.x * dist, height);
+        let d = at + Vec3::Z * 20.0 - eye;
+        let k = 65536.0 / std::f32::consts::TAU;
+        let rotation = [(d.z.atan2(d.truncate().length()) * k).round() as i32, (d.y.atan2(d.x) * k).round() as i32, 0];
+        *CAMERA.lock().unwrap() = Some((eye, rotation));
     }
     let now_state = behaviour(vm, target);
     if t.history.last().is_none_or(|(_, s)| *s != now_state) {
@@ -248,12 +269,27 @@ pub fn step(vm: &mut Vm<'_>, t: &mut CastTest, frame: u32) {
             }
         }
     }
-    if r == 50 {
-        hp3_world::world(vm).input.key_down("LeftMouse");
+    // HP3_CAST_NOFIRE=1: Harry does not cast himself (with HP3_CAST_DIRECT only the direct hit lands).
+    if r == 50 && std::env::var_os("HP3_CAST_NOFIRE").is_none() {
+        crate::world(vm).input.key_down("LeftMouse");
+    }
+    // HP3_CAST_RELEASE=<r>: lets go of the fire button at that tick (otherwise Harry keeps casting).
+    if std::env::var("HP3_CAST_RELEASE").ok().and_then(|v| v.parse::<u32>().ok()) == Some(r) {
+        crate::world(vm).input.key_up("LeftMouse");
+    }
+    if std::env::var_os("HP3_CAST_FADE").is_some() && r >= 95 && r % 10 == 0 {
+        for f in actors_of(vm, "FadeActorDelegate") {
+            let (n, s, d, h) = (name_of(vm, f), state_name(vm, f), vm.db.objects.get(f).deleted, get(vm, f, "bHidden").as_bool());
+            let target = get(vm, f, "ActorToFade").as_obj().map(|o| name_of(vm, o));
+            let (cur, total, start, end, fading) = (get(vm, f, "CurTime"), get(vm, f, "FadeTime"), get(vm, f, "FadeStart"), get(vm, f, "FadeEnd"), get(vm, f, "bIsFading"));
+            println!("cast: r={r} fade delegate {n} state {s} deleted {d} bHidden {h} target {target:?} cur {cur:?} total {total:?} start {start:?} end {end:?} fading {fading:?}");
+        }
     }
     // HP3_CAST_DIRECT=1: the spell is born on the target instead of flying there, which exercises the target's
     // reaction without depending on the geometry between Harry and it.
-    if r == 100 && std::env::var_os("HP3_CAST_DIRECT").is_some() {
+    // HP3_CAST_DIRECT=<n>: n spells, 120 ticks apart.
+    let direct = std::env::var("HP3_CAST_DIRECT").ok().map(|v| v.parse::<u32>().unwrap_or(1).max(1));
+    if direct.is_some_and(|n| r >= 100 && (r - 100) % 120 == 0 && (r - 100) / 120 < n) {
         direct_hit(vm, &t.spell, pawn, target);
     }
     // HP3_CAST_THEN=<SpellClass>@<ticks after the cast starts>: a second spell born on the same target.
@@ -269,15 +305,16 @@ pub fn step(vm: &mut Vm<'_>, t: &mut CastTest, frame: u32) {
     // HP3_CAST_HOLD=<ticks>: keep fire held that much longer (a charged spell such as Patronum needs it).
     let hold = std::env::var("HP3_CAST_HOLD").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
     if r == 110 + hold {
-        hp3_world::world(vm).input.key_up("LeftMouse");
+        crate::world(vm).input.key_up("LeftMouse");
     }
     // HP3_CAST_TAP=<r>: press and release fire again at that tick (letting go of a hook, for one).
-    if let Some(tap) = std::env::var("HP3_CAST_TAP").ok().and_then(|v| v.parse::<u32>().ok()) {
+    // HP3_CAST_TAP=<r>,<r>,...: several taps, one per tick listed (a spell cast again and again).
+    for tap in std::env::var("HP3_CAST_TAP").unwrap_or_default().split(',').filter_map(|v| v.trim().parse::<u32>().ok()) {
         if r == tap {
-            hp3_world::world(vm).input.key_down("LeftMouse");
+            crate::world(vm).input.key_down("LeftMouse");
         }
         if r == tap + std::env::var("HP3_CAST_TAPHOLD").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(6) {
-            hp3_world::world(vm).input.key_up("LeftMouse");
+            crate::world(vm).input.key_up("LeftMouse");
         }
     }
     if std::env::var_os("HP3_CAST_STATES").is_some() && r >= 30 && r <= 600 && r % 8 == 0 {
@@ -327,7 +364,7 @@ fn finish(vm: &mut Vm<'_>, t: &CastTest, target: ObjId) {
 
 fn place(vm: &mut Vm<'_>, t: &mut CastTest, pc: ObjId, pawn: ObjId) {
     let class = vm.db.find(&t.class);
-    let actors = hp3_world::world(vm).actors.clone();
+    let actors = crate::world(vm).actors.clone();
     t.start_actors = actors.iter().copied().collect();
     let list: Vec<ObjId> = actors
         .iter()
@@ -354,7 +391,7 @@ fn place(vm: &mut Vm<'_>, t: &mut CastTest, pc: ObjId, pawn: ObjId) {
             let ang = yaw as f32 * std::f32::consts::TAU / 65536.0;
             let dir = Vec3::new(ang.cos(), ang.sin(), 0.0);
             let pos = at - dir * dist;
-            let col = &hp3_world::world(vm).collision;
+            let col = &crate::world(vm).collision;
             let Some(f) = col.trace_static(pos + Vec3::Z * 80.0, pos - Vec3::Z * 300.0, Vec3::ZERO) else { continue };
             let stand = f.location + Vec3::Z * 40.0;
             let corridor = Vec3::new(10.0, 10.0, 10.0);
@@ -417,7 +454,7 @@ fn drive_flame(vm: &mut Vm<'_>, t: &mut CastTest, pc: ObjId, r: u32) {
             }
             return;
         }
-        let actors = hp3_world::world(vm).actors.clone();
+        let actors = crate::world(vm).actors.clone();
         let burns: Vec<ObjId> = actors
             .into_iter()
             .filter(|&a| get(vm, a, "vulnerableToClass").as_obj().is_some_and(|c| name_of(vm, c) == "DraconisForsFireSpell"))
@@ -469,7 +506,7 @@ fn drive_flame(vm: &mut Vm<'_>, t: &mut CastTest, pc: ObjId, r: u32) {
             get(vm, trigger, "CollisionRadius").as_float(),
             get(vm, trigger, "CollisionHeight").as_float()
         );
-        hp3_world::world(vm).input.key_down("LeftMouse");
+        crate::world(vm).input.key_down("LeftMouse");
         t.flame = Some(trigger);
         t.flame_from = r;
     }
@@ -510,13 +547,13 @@ fn drive_flame(vm: &mut Vm<'_>, t: &mut CastTest, pc: ObjId, r: u32) {
 /// Every actor of a class (or a subclass of it).
 fn actors_of(vm: &mut Vm<'_>, class: &str) -> Vec<ObjId> {
     let Some(want) = vm.db.find(class) else { return Vec::new() };
-    let all = hp3_world::world(vm).actors.clone();
+    let all = crate::world(vm).actors.clone();
     all.into_iter().filter(|&a| vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, want))).collect()
 }
 
 fn report_cursor(vm: &mut Vm<'_>) {
     let Some(sc) = vm.db.find("SpellCursor") else { return };
-    let actors = hp3_world::world(vm).actors.clone();
+    let actors = crate::world(vm).actors.clone();
     let Some(cursor) = actors.into_iter().find(|&a| vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, sc))) else {
         println!("cast: no cursor actor");
         return;
@@ -547,7 +584,7 @@ fn report_cursor(vm: &mut Vm<'_>) {
 fn report_result(vm: &mut Vm<'_>, t: &CastTest, target: ObjId) {
     let after = behaviour(vm, target);
     let moved = vec(&get(vm, target, "Location")).distance(t.start_loc);
-    let now = hp3_world::world(vm).actors.clone();
+    let now = crate::world(vm).actors.clone();
     let mut kinds: BTreeMap<String, usize> = Default::default();
     for a in now.into_iter().filter(|a| !t.start_actors.contains(a)) {
         let n = name_of(vm, a);
@@ -582,7 +619,7 @@ fn report_result(vm: &mut Vm<'_>, t: &CastTest, target: ObjId) {
 /// Position and motion of any spell actor in flight.
 fn report_spell(vm: &mut Vm<'_>, r: u32) {
     let Some(sc) = vm.db.find("baseSpell") else { return };
-    let actors = hp3_world::world(vm).actors.clone();
+    let actors = crate::world(vm).actors.clone();
     for a in actors {
         if !vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, sc)) {
             continue;
@@ -614,7 +651,7 @@ fn direct_hit(vm: &mut Vm<'_>, spell_name: &str, pawn: ObjId, target: ObjId) {
     let Some(class) = vm.db.find(spell_name).map(|s| vm.db.get(s).object) else { return };
     let at = get(vm, target, "Location");
     let args = [Value::Object(Some(class)), Value::Object(Some(pawn)), Value::Empty, at.clone(), Value::Empty];
-    let Ok(Value::Object(Some(spell))) = hp3_world::natives::spawn(vm, None, &args) else {
+    let Ok(Value::Object(Some(spell))) = crate::natives::spawn(vm, None, &args) else {
         println!("cast: direct spawn failed");
         return;
     };

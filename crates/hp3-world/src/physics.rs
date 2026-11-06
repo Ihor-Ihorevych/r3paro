@@ -108,6 +108,7 @@ pub struct Slots {
     physics: Option<usize>,
     is_static: Option<usize>,
     owner: Option<usize>,
+    velocity: Option<usize>,
 }
 
 impl Slots {
@@ -123,6 +124,7 @@ impl Slots {
             physics: crate::actor_slot(vm, "Physics"),
             is_static: crate::actor_slot(vm, "bStatic"),
             owner: crate::actor_slot(vm, "Owner"),
+            velocity: crate::actor_slot(vm, "Velocity"),
         }
     }
 }
@@ -650,6 +652,13 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         let (v, capped) = ground_velocity(vm, a, accel, vel, dt, human);
         set(vm, a, "Acceleration", value(capped));
         set(vm, a, "Velocity", value(v));
+        // The pawn's script may change the new speed (a sliding pawn turned backwards is pushed on down the slide).
+        fire(vm, a, "ModifyVelocity", &mut [Value::Float(dt), value(vel)]);
+        if vm.db.objects.get(a).deleted || get(vm, a, "Physics").as_byte() != PHYS_WALKING {
+            return;
+        }
+        let mut v = vec(&get(vm, a, "Velocity"));
+        v.z = 0.0;
         v
     };
     let start = vec(&get(vm, a, "Location"));
@@ -711,6 +720,7 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         match floor_found {
             Some(floor) => {
                 let loc = vec(&get(vm, a, "Location"));
+                set(vm, a, "Floor", value(floor.normal));
                 let drop = (MAX_STEP_HEIGHT + 2.0) * floor.time;
                 if drop > 0.5 {
                     set(vm, a, "Location", value(loc - Vec3::Z * (drop - 0.5)));
@@ -798,11 +808,42 @@ fn log_block(vm: &mut Vm<'_>, a: ObjId, hit: &Hit) {
 fn notify_hit_wall(vm: &mut Vm<'_>, a: ObjId, hit: &Hit) {
     log_block(vm, a, hit);
     let human = world(vm).player.is_some_and(|pc| get(vm, pc, "Pawn").as_obj() == Some(a));
-    let hit_pawn = hit.actor.is_some_and(|o| is_pawn(vm, o));
-    let pushing = vec(&get(vm, a, "Acceleration")).length_squared() > 1e-6 || human;
-    if !hit_pawn && pushing {
-        fire(vm, a, "HitWall", &mut [value(hit.normal), Value::Object(hit.actor)]);
+    if hit.actor.is_some_and(|o| is_pawn(vm, o)) {
+        return;
     }
+    let wall = hit.actor.or(world(vm).level_info);
+    let mut normal = hit.normal;
+    // A pawn a controller steers hears about a wall only when it pushes into it head on, and the controller may take
+    // the event for itself first (the fire crab's flip, an idle wanderer turning round). The player's pawn always
+    // hears it. A pawn nobody controls, or one that wants every hit (bDirectHitWall), hears it directly.
+    if !human
+        && !get(vm, a, "bDirectHitWall").as_bool()
+        && let Some(c) = get(vm, a, "Controller").as_obj()
+    {
+        if vec(&get(vm, a, "Acceleration")).length_squared() < 1e-6 {
+            return;
+        }
+        let at = vec(&get(vm, a, "Location"));
+        let mut dir = (vec(&get(vm, c, "Destination")) - at).normalize_or_zero();
+        let walking = get(vm, a, "Physics").as_byte() == PHYS_WALKING;
+        if walking {
+            normal.z = 0.0;
+            dir.z = 0.0;
+            normal = normal.normalize_or_zero();
+            dir = dir.normalize_or_zero();
+        }
+        if get(vm, c, "MinHitWall").as_float() < dir.dot(normal) {
+            return;
+        }
+        if fire(vm, c, "NotifyHitWall", &mut [value(normal), Value::Object(wall)]).as_bool() {
+            return;
+        }
+        if get(vm, a, "Physics").as_byte() != PHYS_FALLING {
+            // Back down from any step the move had taken.
+            move_actor(vm, a, Vec3::new(0.0, 0.0, -MAX_STEP_HEIGHT));
+        }
+    }
+    fire(vm, a, "HitWall", &mut [value(normal), Value::Object(wall)]);
 }
 
 /// Takes a walker past the barrier it met: raised by a step's height (and 2), the rest of the move is made at
@@ -926,6 +967,11 @@ fn try_mount(vm: &mut Vm<'_>, a: ObjId, up: Vec3, hit: &Hit) -> bool {
         mount_note(vm, format!("mount: ledge {:.0} up on {name} (bIsMountable {mountable}) from {loc} -> script {} [{how}]", destination.z - loc.z, if taken { "took it" } else { "refused" }));
     }
     taken
+}
+
+thread_local! {
+    /// Whether the last tick of the player was logged as sliding (HP3_SLIDE_DEBUG), to log the tick it leaves the slide.
+    static SLIDE_LOGGED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 thread_local! {
@@ -1173,10 +1219,19 @@ fn fall(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         accel = accel.normalize_or_zero() * max_accel;
     }
     // A pawn can be pushed by a steady acceleration of its own (Carpe Retractum pulls with it) on top of gravity.
-    let push = vec(&get(vm, a, "ConstantAcceleration"));
+    let pawn = is_pawn(vm, a);
+    let push = if pawn { vec(&get(vm, a, "ConstantAcceleration")) } else { Vec3::ZERO };
     let g = Vec3::new(0.0, 0.0, gravity(vm, a));
-    let terminal = 4000.0;
-    // Slices of at most 0.05 s, so a long frame lands and bounces off walls like a short one.
+    let volume = get(vm, a, "PhysicsVolume").as_obj();
+    let (terminal, drift) = match volume {
+        Some(v) => (get(vm, v, "TerminalVelocity").as_float(), vec(&get(vm, v, "ZoneVelocity"))),
+        None => (0.0, Vec3::ZERO),
+    };
+    // Slices of at most 0.05 s, so a long frame lands and bounces off walls like a short one. Each slice moves
+    // at the speed halfway through it (half the slice's acceleration added), then takes the speed it really
+    // moved at and carries it on to the slice's end (twice the average less the start), as the original's falling
+    // does; a pawn's script may change the speed in between (ModifyVelocity: the hippogriff holds its course
+    // with it), and a script that puts the pawn elsewhere (bJustTeleported) keeps the speed it set.
     let mut left = dt;
     for _ in 0..8 {
         if left <= 0.0 {
@@ -1184,14 +1239,62 @@ fn fall(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         }
         let tick = if left > 0.05 { 0.05f32.min(left * 0.5) } else { left };
         left -= tick;
-        let mut vel = vec(&get(vm, a, "Velocity")) + (accel + g + push) * tick;
-        vel.z = vel.z.max(-terminal);
+        let from = vec(&get(vm, a, "Location"));
+        set(vm, a, "bJustTeleported", Value::Bool(false));
+        let mut start_vel = vec(&get(vm, a, "Velocity"));
+        let mut vel = start_vel + (accel + g + push) * (0.5 * tick);
+        set(vm, a, "Velocity", value(vel));
+        if pawn {
+            fire(vm, a, "ModifyVelocity", &mut [Value::Float(tick), value(start_vel)]);
+            if vm.db.objects.get(a).deleted || get(vm, a, "Physics").as_byte() != PHYS_FALLING {
+                return;
+            }
+            vel = vec(&get(vm, a, "Velocity"));
+            // The top of a jump the controller asked to hear about (NotifyJumpApex: the hero starts its falling
+            // animation there): said once, as the speed turns downward.
+            if let Some(c) = get(vm, a, "Controller").as_obj()
+                && vel.z <= 0.0
+                && get(vm, c, "bNotifyApex").as_bool()
+            {
+                set(vm, a, "bJustTeleported", Value::Bool(true));
+                set(vm, c, "bNotifyApex", Value::Bool(false));
+                fire(vm, c, "NotifyJumpApex", &mut []);
+                set(vm, c, "bJumpOverWall", Value::Bool(false));
+                vel = vec(&get(vm, a, "Velocity"));
+            }
+        }
         if bound != 0.0 && vel.truncate().length_squared() > bound * bound {
             let flat = vel.truncate().normalize_or_zero() * bound;
             vel = Vec3::new(flat.x, flat.y, vel.z);
         }
         set(vm, a, "Velocity", value(vel));
-        let Some(hit) = move_and_slide(vm, a, vel * tick) else { continue };
+        let hit = move_and_slide(vm, a, (vel + drift) * tick);
+        if vm.db.objects.get(a).deleted {
+            return;
+        }
+        let refine = |vm: &mut Vm<'_>, start_vel: Vec3| {
+            if get(vm, a, "bJustTeleported").as_bool() {
+                return;
+            }
+            let mut v = (vec(&get(vm, a, "Location")) - from) / tick - drift;
+            if v.z < start_vel.z || start_vel.z >= 0.0 {
+                v = 2.0 * v - start_vel;
+            }
+            if terminal > 0.0 && v.length_squared() > terminal * terminal {
+                v = v.normalize() * terminal;
+            }
+            set(vm, a, "Velocity", value(v));
+        };
+        let Some(hit) = hit else {
+            if pawn {
+                set(vm, a, "Floor", value(Vec3::Z));
+            }
+            refine(vm, start_vel);
+            continue;
+        };
+        if pawn {
+            set(vm, a, "Floor", value(hit.normal));
+        }
         if crate::envc::var_os("HP3_FALL_DEBUG").is_some() {
             eprintln!("fall: {} vel {vel} step {} hit time {} normal {} actor {:?}", hp3_script::natives::object_path(vm, a), vel * tick, hit.time, hit.normal, hit.actor.map(|o| hp3_script::natives::object_path(vm, o)));
         }
@@ -1208,12 +1311,32 @@ fn fall(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         }
         if landing.z >= WALKABLE_Z {
             let hit = Hit { normal: landing, ..hit };
+            // Lands with the speed it really came down at (when it moved far enough to tell).
+            if !get(vm, a, "bJustTeleported").as_bool() && hit.time > 0.1 && hit.time * tick > 0.003 {
+                let v = (vec(&get(vm, a, "Location")) - from) / (tick * hit.time);
+                set(vm, a, "Velocity", value(v));
+            }
+            if pawn {
+                set(vm, a, "Floor", value(hit.normal));
+            }
             let mut v = vec(&get(vm, a, "Velocity"));
             if vm.db.objects.get(a).class.is_some_and(|c| vm.db.names.get(vm.db.get(c).name) == "WizardCracker") {
                 let at = vec(&get(vm, a, "Location"));
                 vm.log.push(format!("cracker landed at {at}"));
             }
-            fire(vm, a, "Landed", &mut [value(hit.normal)]);
+            // What the landing spot overlaps is known before the landing is announced (the original's move updates its touches
+            // itself): a spongify pad under the feet is in `Touching` when the character's `Landed` looks for it, so a jump
+            // or step down onto it bounces instead of only a fast fall.
+            if pawn {
+                crate::touch::settle(vm, a);
+            }
+            // The controller hears the landing first and can keep it from the pawn (the hero's slide takes the
+            // falling speed there, the fire crab's flip counts its bounces).
+            let held = pawn
+                && get(vm, a, "Controller").as_obj().is_some_and(|c| fire(vm, c, "NotifyLanded", &mut [value(hit.normal)]).as_bool());
+            if !held {
+                fire(vm, a, "Landed", &mut [value(hit.normal)]);
+            }
             if get(vm, a, "Physics").as_byte() == PHYS_FALLING {
                 set(vm, a, "Physics", Value::Byte(PHYS_WALKING));
             }
@@ -1223,13 +1346,88 @@ fn fall(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         } else if try_mount(vm, a, Vec3::Z, &hit) {
             return;
         } else {
-            log_block(vm, a, &hit);
-            fire(vm, a, "HitWall", &mut [value(hit.normal), Value::Object(hit.actor)]);
+            if pawn {
+                notify_hit_wall(vm, a, &hit);
+            } else {
+                log_block(vm, a, &hit);
+                fire(vm, a, "HitWall", &mut [value(hit.normal), Value::Object(hit.actor)]);
+            }
+            if vm.db.objects.get(a).deleted || get(vm, a, "Physics").as_byte() != PHYS_FALLING {
+                return;
+            }
+            // Against a wall the start speed is the one it slid along at (keeping its rise or fall), so the
+            // carry-on does not push it back into the wall.
+            let slid = (vec(&get(vm, a, "Location")) - from) / tick;
+            start_vel = Vec3::new(slid.x, slid.y, start_vel.z);
+            refine(vm, start_vel);
         }
     }
 }
 
+/// A pawn in the air under its own power, as the original flies it: the speed drifts toward the way it is pushed with
+/// the volume's fluid friction (half of it), caps at `AirSpeed` (scaled by `DesiredSpeed` when no player steers),
+/// lets the script change it (`ModifyVelocity`), slides along what it meets and says `HitWall`, and ends with the
+/// speed it really moved at.
+fn fly_pawn(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
+    if dt <= 0.0 {
+        return;
+    }
+    let human = world(vm).player.is_some_and(|pc| get(vm, pc, "Pawn").as_obj() == Some(a));
+    let accel_rate = get(vm, a, "AccelRate").as_float();
+    let mut accel = vec(&get(vm, a, "Acceleration"));
+    let dir = accel.normalize_or_zero();
+    if accel.length_squared() > accel_rate * accel_rate {
+        accel = dir * accel_rate;
+        set(vm, a, "Acceleration", value(accel));
+    }
+    let volume = get(vm, a, "PhysicsVolume").as_obj();
+    let friction = 0.5 * volume.map_or(0.0, |v| get(vm, v, "FluidFriction").as_float());
+    let drift = match volume {
+        Some(v) => vec(&get(vm, v, "ZoneVelocity")),
+        None => Vec3::ZERO,
+    };
+    let old = vec(&get(vm, a, "Velocity"));
+    let speed = old.length();
+    let mut vel = old - (old - dir * speed) * dt * friction;
+    vel = vel * (1.0 - friction * dt) + accel * dt;
+    set(vm, a, "Velocity", value(vel));
+    fire(vm, a, "ModifyVelocity", &mut [Value::Float(dt), value(old)]);
+    if vm.db.objects.get(a).deleted || get(vm, a, "Physics").as_byte() != PHYS_FLYING {
+        return;
+    }
+    let mut max = get(vm, a, "AirSpeed").as_float();
+    if !human {
+        let desired = get(vm, a, "DesiredSpeed").as_float();
+        if desired > 0.0 {
+            max *= desired;
+        }
+    }
+    vel = vec(&get(vm, a, "Velocity"));
+    if max > 0.0 && vel.length_squared() > max * max {
+        vel = vel.normalize() * max;
+    }
+    set(vm, a, "Velocity", value(vel));
+    let from = vec(&get(vm, a, "Location"));
+    set(vm, a, "bJustTeleported", Value::Bool(false));
+    let zone = if human || drift.length_squared() > 90000.0 { drift } else { Vec3::ZERO };
+    if let Some(hit) = move_and_slide(vm, a, (vel + zone) * dt) {
+        notify_hit_wall(vm, a, &hit);
+    }
+    if vm.db.objects.get(a).deleted {
+        return;
+    }
+    if !get(vm, a, "bJustTeleported").as_bool() && !get(vm, a, "bNoVelocityUpdate").as_bool() {
+        let moved = (vec(&get(vm, a, "Location")) - from) / dt;
+        set(vm, a, "Velocity", value(moved));
+    }
+    set(vm, a, "bNoVelocityUpdate", Value::Bool(false));
+}
+
 fn fly(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
+    if is_pawn(vm, a) && get(vm, a, "Physics").as_byte() == PHYS_FLYING {
+        fly_pawn(vm, a, dt);
+        return;
+    }
     let accel = vec(&get(vm, a, "Acceleration"));
     let mut vel = vec(&get(vm, a, "Velocity"));
     let max = get(vm, a, "AirSpeed").as_float().max(1.0);
@@ -1254,14 +1452,55 @@ fn projectile(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     }
 }
 
+/// One angle of a rotating actor moved by `step` this tick: toward `want` when it rotates to its desired rotation
+/// (the short way, or always forward in the step's direction with a fixed direction), round and round by the step
+/// with only a fixed direction, as the original's rotating physics turns each angle.
+fn rotating_turn(cur: i32, want: i32, step: i32, fixed_dir: bool, to_desired: bool) -> i32 {
+    let (cur, want) = (cur & 0xFFFF, want & 0xFFFF);
+    match (fixed_dir, to_desired) {
+        (true, true) if step > 0 => (cur + step.min((want - cur).rem_euclid(65536))) & 0xFFFF,
+        (true, true) => (cur - (-step).min((cur - want).rem_euclid(65536))) & 0xFFFF,
+        (true, false) => (cur + step) & 0xFFFF,
+        (false, true) => fixed_turn(cur, want, step),
+        (false, false) => cur,
+    }
+}
+
 fn rotate(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
+    // A pawn someone controls is turned by its own rules (pawn_rotation), not by the rotating physics as well: the
+    // hippogriff in COMC's win cutscene spun round its pitch at its 80000 rate when both turned it.
+    if is_pawn(vm, a) && get(vm, a, "Controller").as_obj().is_some() {
+        return;
+    }
+    let (to_desired, fixed_dir) = (get(vm, a, "bRotateToDesired").as_bool(), get(vm, a, "bFixedRotationDir").as_bool());
+    if !to_desired && !fixed_dir {
+        return;
+    }
     let rate = get(vm, a, "RotationRate");
     let rot = get(vm, a, "Rotation");
     let (r, c) = (rate.fields(), rot.fields());
     if r.len() == 3 && c.len() == 3 {
-        let v: Vec<Value> = (0..3).map(|i| Value::Int(c[i].as_int().wrapping_add((r[i].as_int() as f32 * dt) as i32) & 0xFFFF)).collect();
-        let (old_rot, new_rot) = (rotator_ints(&rot), rotator_ints(&Value::Struct(v.clone().into())));
+        let old_rot = rotator_ints(&rot);
+        let want = rotator_ints(&get(vm, a, "DesiredRotation"));
+        let same = |x: [i32; 3], y: [i32; 3]| (0..3).all(|i| x[i] & 0xFFFF == y[i] & 0xFFFF);
+        if to_desired && same(old_rot, want) {
+            return;
+        }
+        let mut new_rot = old_rot;
+        for i in 0..3 {
+            let step = (r[i].as_int() as f32 * dt) as i32;
+            if step != 0 && (!to_desired || old_rot[i] & 0xFFFF != want[i] & 0xFFFF) {
+                new_rot[i] = rotating_turn(old_rot[i], want[i], step, fixed_dir, to_desired);
+            }
+        }
+        if same(old_rot, new_rot) {
+            return;
+        }
+        let v: Vec<Value> = new_rot.iter().map(|&x| Value::Int(x & 0xFFFF)).collect();
         set(vm, a, "Rotation", Value::Struct(v.into()));
+        if to_desired && same(new_rot, want) {
+            fire(vm, a, "EndedRotation", &mut []);
+        }
         // A spinning platform (a mover) takes its collision and what stands on it round with it.
         if world(vm).collision.mover(a).is_some() {
             place_mover_shape(vm, a);
@@ -1586,12 +1825,30 @@ pub fn step_actor(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         let thin = world(vm).collision.trace_as(false, at, at - Vec3::Z * 30.0, Vec3::new(1.0, 1.0, ext.z), Some(a));
         eprintln!("step: {} phys {} at {} ext {ext} vel {} down {:?} thin {:?}", hp3_script::natives::object_path(vm, a), crate::read(vm, a, s.physics).as_byte(), at, vec(&get(vm, a, "Velocity")), down.map(|h| (h.time, h.normal)), thin.map(|h| (h.time, h.normal)));
     }
+    // HP3_SLIDE_DEBUG: the player's pawn, every tick it is in the slide or has just left it (state, place, speed, floor).
+    if crate::envc::var_os("HP3_SLIDE_DEBUG").is_some() && is_player_pawn(vm, a) {
+        let ctl = get(vm, a, "Controller").as_obj();
+        let state = ctl.and_then(|c| vm.state_of(c)).map(|s| vm.db.names.get(vm.db.get(s).name).to_string()).unwrap_or_default();
+        let sliding = state == "PlayerSliding";
+        if sliding || SLIDE_LOGGED.with(|l| l.replace(sliding)) {
+            SLIDE_LOGGED.with(|l| l.set(sliding));
+            let volume = get(vm, a, "PhysicsVolume").as_obj().map(|v| hp3_script::natives::object_path(vm, v)).unwrap_or_default();
+            let frame = world(vm).frame;
+            let phys = crate::read(vm, a, s.physics).as_byte();
+            let (at, vel, floor) = (vec(&get(vm, a, "Location")), vec(&get(vm, a, "Velocity")), vec(&get(vm, a, "Floor")));
+            let (r, h) = (get(vm, a, "CollisionRadius").as_float(), get(vm, a, "CollisionHeight").as_float());
+            let crouched = get(vm, a, "bIsCrouched").as_bool();
+            eprintln!("slide: frame {frame} state {state} phys {phys} at {at} vel {vel} floor {floor} vol {volume} size {r}x{h} crouched {crouched}");
+        }
+    }
     if MOUNT_GOAL.with(|g| g.get().is_some()) {
         finish_mount(vm, a);
     }
     if MOUNT_GLIDE.with(|g| g.get().is_some()) && glide_to_ledge(vm, a, dt) {
         return;
     }
+    // The speed before this step: a pawn leans into the change (pawn_rotation).
+    let old_vel = crate::read_vec(vm, a, s.velocity);
     match crate::read(vm, a, s.physics).as_byte() {
         PHYS_MOVING_BRUSH => {
             moving_brush(vm, a, dt);
@@ -1622,8 +1879,11 @@ pub fn step_actor(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         _ => return,
     }
     if is_pawn(vm, a) {
-        pawn_rotation(vm, a, dt);
+        pawn_rotation(vm, a, dt, old_vel);
         crate::update_physics_volume(vm, a);
+        if let Some(c) = get(vm, a, "Controller").as_obj() {
+            crate::update_controller_volume(vm, c);
+        }
     } else {
         turn_to_desired(vm, a, dt);
     }
@@ -1709,7 +1969,45 @@ pub fn fixed_turn(cur: i32, want: i32, delta: i32) -> i32 {
 /// (`bRotateToDesired`), toward the controller's `DesiredRotation`, at twice `EnemyTurnSpeed`. Any other pawn
 /// always turns toward its own `DesiredRotation` at `RotationRate.Yaw`, up to twice that when the angle left is
 /// large. Pitch settles to level while on the floor, and roll to none.
-fn pawn_rotation(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
+/// How far a pawn leans (roll) after this tick when it does not roll to a desired rotation: as the original's pawns
+/// bank into their acceleration. Slow walkers settle level; otherwise the sideways part of the real acceleration
+/// (the speed change over the step) sets the roll the pawn eases toward, within `RotationRate.Roll`. `rot` is the
+/// pawn's rotation after turning.
+fn lean_roll(vm: &mut Vm<'_>, a: ObjId, dt: f32, old_vel: Vec3, rot: [i32; 3], max_lean: i32) -> i32 {
+    let roll = rot[2] & 0xFFFF;
+    let level = |roll: i32, smooth: f32| -> i32 {
+        if roll < 32768 { (roll as f32 * (1.0 - smooth)) as i32 } else { (roll as f32 + (65536 - roll) as f32 * smooth) as i32 }
+    };
+    // The roll stays within the lean the pawn may have.
+    let roll = if roll < 32768 { roll.min(max_lean) } else if roll < 65536 - max_lean { 65536 - max_lean } else { roll };
+    let vel = vec(&get(vm, a, "Velocity"));
+    let walking = get(vm, a, "Physics").as_byte() == PHYS_WALKING;
+    if walking && vel.length_squared() < 40000.0 {
+        return level(roll, (8.0 * dt).min(1.0));
+    }
+    let real = (vel - old_vel) / dt.max(1e-4);
+    if real.length_squared() <= 10000.0 {
+        return level(roll, (8.0 * dt).min(1.0));
+    }
+    let max_roll = if walking { 4096.0 } else { 28000.0 };
+    let right = hp3_anim::rotator_matrix([rot[0], rot[1], 0]).y_axis.truncate();
+    let side = real.dot(right);
+    let accel_rate = get(vm, a, "AccelRate").as_float().max(1.0);
+    let target = if side > 0.0 { max_lean.min((side * max_roll / accel_rate) as i32) } else { (65536 - max_lean).max((65536.0 + side * max_roll / accel_rate) as i32) };
+    // Ease from the roll it has (on the same side of the turn as the target) to the target.
+    let mut cur = roll;
+    if target > 32768 {
+        if cur < 32768 {
+            cur += 65536;
+        }
+    } else if cur > 32768 {
+        cur -= 65536;
+    }
+    let smooth = (5.0 * dt).min(1.0);
+    (target as f32 * smooth + cur as f32 * (1.0 - smooth)) as i32 & 0xFFFF
+}
+
+fn pawn_rotation(vm: &mut Vm<'_>, a: ObjId, dt: f32, old_vel: Vec3) {
     let Some(c) = get(vm, a, "Controller").as_obj() else { return };
     let ints = |v: Value| -> [i32; 3] {
         let f = v.fields();
@@ -1717,10 +2015,18 @@ fn pawn_rotation(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     };
     let rot = ints(get(vm, a, "Rotation"));
     let human = world(vm).player == Some(c);
-    let (desired, delta) = if human {
-        if !get(vm, c, "bRotateToDesired").as_bool() {
-            return;
+    let max_lean = ints(get(vm, a, "RotationRate"))[2];
+    // A player's pawn that no input turns still leans into its movement.
+    if human && !get(vm, c, "bRotateToDesired").as_bool() {
+        if max_lean > 0 && !get(vm, a, "bRollToDesired").as_bool() {
+            let roll = lean_roll(vm, a, dt, old_vel, rot, max_lean);
+            if roll != rot[2] & 0xFFFF {
+                set(vm, a, "Rotation", Value::Struct(vec![Value::Int(rot[0]), Value::Int(rot[1]), Value::Int(roll)].into()));
+            }
         }
+        return;
+    }
+    let (desired, delta) = if human {
         let mut d = ints(get(vm, c, "DesiredRotation"));
         // The pawn keeps its own desired roll (a pawn that rolls to its desired rotation, such as one hanging from a
         // Carpe Retractum, is leaned by the script).
@@ -1742,7 +2048,13 @@ fn pawn_rotation(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     let want_pitch = if !roll_to_desired && (on_floor || get(vm, a, "Physics").as_byte() == PHYS_FALLING) { 0 } else { desired[0] };
     let yaw = fixed_turn(rot[1], desired[1], delta);
     let pitch = fixed_turn(rot[0], want_pitch, delta);
-    let roll = if roll_to_desired { fixed_turn(rot[2], desired[2], delta) } else { 0 };
+    let roll = if roll_to_desired {
+        fixed_turn(rot[2], desired[2], delta)
+    } else if max_lean > 0 {
+        lean_roll(vm, a, dt, old_vel, [pitch, yaw, rot[2]], max_lean)
+    } else {
+        0
+    };
     if yaw != rot[1] & 0xFFFF || pitch != rot[0] & 0xFFFF || roll != rot[2] & 0xFFFF {
         set(vm, a, "Rotation", Value::Struct(vec![Value::Int(pitch), Value::Int(yaw), Value::Int(roll)].into()));
     }
@@ -1982,4 +2294,48 @@ pub fn far_move(vm: &mut Vm<'_>, a: ObjId, to: Vec3, test: bool, attached_move: 
     set(vm, a, "Location", value(at));
     crate::touch::settle(vm, a);
     true
+}
+
+/// A snapshot of the player's pawn and what is around it, for a bug report (the app's F9 key writes it to the log): the
+/// place, turn, speed, physics, controller state, floor, volume, collision size, what it touches and every actor within 400
+/// units with its class, place and collision, then the floor sweeps.
+pub fn mark(vm: &mut Vm<'_>) -> String {
+    let Some(pc) = world(vm).player else { return "mark: no player".into() };
+    let Some(a) = get(vm, pc, "Pawn").as_obj() else { return "mark: no pawn".into() };
+    let state = vm.state_of(pc).map(|s| vm.db.names.get(vm.db.get(s).name).to_string()).unwrap_or_default();
+    let li = world(vm).level_info;
+    let map = li.map(|l| hp3_script::natives::object_path(vm, l)).unwrap_or_default();
+    let at = vec(&get(vm, a, "Location"));
+    let phys = get(vm, a, "Physics").as_byte();
+    let vel = vec(&get(vm, a, "Velocity"));
+    let floor = vec(&get(vm, a, "Floor"));
+    let rot = rotator_ints(&get(vm, a, "Rotation"));
+    let (r, h) = (get(vm, a, "CollisionRadius").as_float(), get(vm, a, "CollisionHeight").as_float());
+    let volume = get(vm, a, "PhysicsVolume").as_obj().map(|v| hp3_script::natives::object_path(vm, v)).unwrap_or_default();
+    let base = get(vm, a, "Base").as_obj().map(|v| hp3_script::natives::object_path(vm, v)).unwrap_or_default();
+    let crouched = get(vm, a, "bIsCrouched").as_bool();
+    let (frame, who) = (world(vm).frame, hp3_script::natives::object_path(vm, a));
+    let mut out = format!(
+        "MARK map {map} frame {}\n  pawn {} at {at} rot {rot:?} vel {vel} phys {phys} controller state {state} floor {floor} base {base} volume {volume} size {r}x{h} crouched {crouched}\n",
+        frame, who
+    );
+    if let Value::Array(touching) = get(vm, a, "Touching") {
+        let names: Vec<String> = touching.iter().filter_map(Value::as_obj).map(|o| hp3_script::natives::object_path(vm, o)).collect();
+        out += &format!("  touching {names:?}\n");
+    }
+    for o in world(vm).actors.clone() {
+        if o == a || vm.db.objects.get(o).deleted {
+            continue;
+        }
+        let p = vec(&get(vm, o, "Location"));
+        if (p - at).length() > 400.0 {
+            continue;
+        }
+        let class = vm.db.objects.get(o).class.map(|c| vm.db.names.get(vm.db.get(c).name).to_string()).unwrap_or_default();
+        let (cr, ch) = (get(vm, o, "CollisionRadius").as_float(), get(vm, o, "CollisionHeight").as_float());
+        let (ca, cb) = (get(vm, o, "bCollideActors").as_bool(), get(vm, o, "bBlockActors").as_bool());
+        out += &format!("  near {} [{class}] at {p} dist {:.0} coll {cr}x{ch} collideActors {ca} block {cb}\n", hp3_script::natives::object_path(vm, o), (p - at).length());
+    }
+    out += &format!("  floor sweeps: {}\n", debug_floor(vm, a));
+    out
 }

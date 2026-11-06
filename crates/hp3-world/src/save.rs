@@ -682,6 +682,7 @@ pub fn restore(vm: &mut Vm<'_>, slot: &Slot) {
     w.time = slot.time;
     w.spawned = w.spawned.max(slot.spawned as usize);
     resync(vm);
+    crate::fill_level_enter_text(vm);
 }
 
 /// The engine's own tables follow the actors' restored places and links.

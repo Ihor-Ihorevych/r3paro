@@ -145,6 +145,7 @@ fn line_hits(vm: &mut Vm<'_>, source: ObjId, start: glam::Vec3, end: glam::Vec3,
     let (collide, block_flag, owner) = (crate::actor_slot(vm, "bCollideActors"), crate::actor_slot(vm, if extent == glam::Vec3::ZERO { "bBlockZeroExtentTraces" } else { "bBlockNonZeroExtentTraces" }), crate::actor_slot(vm, "Owner"));
     let (proj_target, block_actors, static_mesh, world_geometry) = (crate::actor_slot(vm, "bProjTarget"), crate::actor_slot(vm, "bBlockActors"), crate::actor_slot(vm, "StaticMesh"), crate::actor_slot(vm, "bWorldGeometry"));
     let (radius, height, location) = (crate::actor_slot(vm, "CollisionRadius"), crate::actor_slot(vm, "CollisionHeight"), crate::actor_slot(vm, "Location"));
+    let (collide_type, collision_width, rotation) = (crate::actor_slot(vm, "CollideType"), crate::actor_slot(vm, "CollisionWidth"), crate::actor_slot(vm, "Rotation"));
     for b in crate::touch::along(vm, start, end, extent.max_element()) {
         if b == source || Some(b) == own_pawn || vm.db.objects.get(b).deleted {
             continue;
@@ -166,7 +167,19 @@ fn line_hits(vm: &mut Vm<'_>, source: ObjId, start: glam::Vec3, end: glam::Vec3,
         } else {
             let (r, h) = (crate::read(vm, b, radius).as_float(), crate::read(vm, b, height).as_float());
             let center = crate::read_vec(vm, b, location);
-            crate::collision::cylinder_trace(center, r, h, start, end, extent)
+            // A `CollideType` box (the big ambient sound triggers over the grounds, the walls along stairs) is met as its turned
+            // box: a line starting inside it only hits when it goes deeper. As a cylinder of its long radius, every trace from
+            // a camera inside one heading towards its middle stopped at once, so the spell cursor could not lock on there.
+            if crate::read(vm, b, collide_type).as_byte() == 1 {
+                let width = crate::read(vm, b, collision_width).as_float();
+                let rot: Vec<i32> = crate::read(vm, b, rotation).fields().iter().map(Value::as_int).collect();
+                let ax = hp3_script::natives::rot_axes([rot.first().copied().unwrap_or(0), rot.get(1).copied().unwrap_or(0), rot.get(2).copied().unwrap_or(0)]);
+                let axes = [glam::Vec3::from(ax[0]), glam::Vec3::from(ax[1]), glam::Vec3::from(ax[2])];
+                let half = glam::Vec3::new(r, if width > 0.0 { width } else { r }, h);
+                crate::collision::turned_box_trace(b, center, half, axes, start, end, extent)
+            } else {
+                crate::collision::cylinder_trace(center, r, h, start, end, extent)
+            }
         };
         if let Some(mut h) = hit {
             h.actor = Some(b);
@@ -174,6 +187,18 @@ fn line_hits(vm: &mut Vm<'_>, source: ObjId, start: glam::Vec3, end: glam::Vec3,
         }
     }
     hits
+}
+
+/// Debugging: what `TraceActors` from `source` would meet between two points (actors, then the level), nearest first.
+pub fn debug_trace_actors(vm: &mut Vm<'_>, source: ObjId, start: glam::Vec3, end: glam::Vec3, extent: glam::Vec3) -> Vec<(String, f32, glam::Vec3)> {
+    let filter = LineFilter { class: None, projectile_targets: false, movers: true };
+    let mut hits = line_hits(vm, source, start, end, extent, &filter);
+    let ghost = crate::collision::Mover { player: false, blocks_actors: false, collide_world: true };
+    if let Some(h) = world(vm).collision.trace_for(ghost, start, end, extent, None) {
+        hits.push(h);
+    }
+    hits.sort_by(|x, y| x.time.total_cmp(&y.time));
+    hits.into_iter().map(|h| (h.actor.map_or("level".to_string(), |a| hp3_script::natives::object_path(vm, a)), h.time, h.location)).collect()
 }
 
 /// Creates an actor of `class`: defaults, owner, tag, location, rotation, then the begin-play events.
@@ -482,6 +507,13 @@ pub fn register(vm: &mut Vm<'_>) {
         }
         Ok(Value::Empty)
     });
+    // SetStaticMesh(mesh): the actor shows another static mesh (the debris generator picks one for each piece).
+    vm.register("Actor.SetStaticMesh", |vm, this, a| {
+        if let Some(o) = this {
+            set(vm, o, "StaticMesh", Value::Object(obj_arg(a, 0)));
+        }
+        Ok(Value::Empty)
+    });
     vm.register("Actor.SetOwner", |vm, this, a| {
         if let Some(o) = this {
             set(vm, o, "Owner", Value::Object(obj_arg(a, 0)));
@@ -596,6 +628,21 @@ pub fn register(vm: &mut Vm<'_>) {
             set(vm, o, "RelativeRotation", a[0].clone());
         }
         Ok(Value::Bool(true))
+    });
+    // SetSkinColor(optional byte R, G, B, A): tints the actor's skin (`SkinColorModifier`, a `Color` declared B, G, R, A, 128 being
+    // no change in a channel); a channel left out keeps its value. The fade delegates call it every tick.
+    vm.register("Actor.SetSkinColor", |vm, this, a| {
+        let Some(o) = this else { return Ok(Value::Empty) };
+        let now = get(vm, o, "SkinColorModifier");
+        let old = |i: usize| now.fields().get(i).map_or(128, Value::as_int) as u8;
+        let pick = |arg: usize, field: usize| match a.get(arg) {
+            Some(Value::Empty) | None => old(field),
+            Some(v) => v.as_byte(),
+        };
+        let (r, g, b, alpha) = (pick(0, 2), pick(1, 1), pick(2, 0), pick(3, 3));
+        set(vm, o, "SkinColorModifier", Value::Struct(vec![Value::Byte(b), Value::Byte(g), Value::Byte(r), Value::Byte(alpha)].into()));
+        set(vm, o, "bUseSkinColorMod", Value::Bool(true));
+        Ok(Value::Empty)
     });
     vm.register("Actor.SetDrawScale3D", |vm, this, a| {
         if let Some(o) = this {
@@ -852,7 +899,6 @@ pub fn register(vm: &mut Vm<'_>) {
         let at = to_world.inverse().transform_point3(crate::physics::vec(&get(vm, other, "Location")));
         Ok(Value::Bool(crate::collision::point_inside(&model, at)))
     });
-    // Emitters are not simulated yet; triggering one does nothing.
     // SetOpacity(float): kept for the renderer.
     vm.register("Actor.SetOpacity", |vm, this, a| {
         if let Some(o) = this {
@@ -861,12 +907,9 @@ pub fn register(vm: &mut Vm<'_>) {
         }
         Ok(Value::Empty)
     });
-    // AI hearing and music: nothing to do until those systems exist.
+    // AI hearing: no game script listens (no HearNoise handler anywhere), so a noise is not heard.
     vm.register("Actor.MakeNoise", |_vm, _this, _a| Ok(Value::Empty));
-    vm.register("Actor.StopAllMusic", |_vm, _this, _a| Ok(Value::Empty));
     vm.register("LevelInfo.IsDemoBuild", |_vm, _this, _a| Ok(Value::Bool(false)));
-    // Skin tint: a placeholder until rendering uses it.
-    vm.register("Actor.SetSkinColor", |_vm, _this, _a| Ok(Value::Empty));
     vm.register("Object.DynamicLoadObject", |vm, _this, a| {
         let path = a[0].as_str().to_string();
         // The class argument is a class object; its name picks among objects sharing the path.

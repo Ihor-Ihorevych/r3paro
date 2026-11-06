@@ -25,12 +25,20 @@ pub struct MeshGeom {
     pub batches: Vec<MeshBatch>,
     /// Mesh space to actor space (origin, scale and rotation offsets of vertex and skeletal meshes).
     pub local: Mat4,
+    /// Skeletal meshes: -1 when the face normals must be turned round to point out of the mesh.
+    pub normal_flip: f32,
 }
 
 fn texture(loader: &Loader<'_>, pkg: &Rc<Package>, material: ObjRef) -> Option<(ObjKey, MaterialBlend)> {
     let (tp, ti) = loader.base_texture(pkg, material)?;
     // A material that uses the texture's alpha channel (Harry's hair, the salamanders' flames) keeps it.
     let blend = loader.material_blend(pkg, material);
+    // A shader with an opacity map blends by that map: its own combined picture.
+    if blend == MaterialBlend::Alpha
+        && let Some((sp, si)) = loader.shader_with_opacity(pkg, material)
+    {
+        return Some((loader::key(&sp, si), blend));
+    }
     if blend == MaterialBlend::Opaque {
         loader.image(&tp, ti)?;
     } else {
@@ -71,15 +79,25 @@ pub fn build_posed(
                     let out = *remap.entry(vi).or_insert_with(|| {
                         let p = sm.vertices.get(vi as usize).map(|v| v.position).unwrap_or_default();
                         let uv = uvs.get(vi as usize).copied().unwrap_or([0.0, 0.0]);
-                        vertices.push(Vertex::unlit([p.x, p.y, p.z], uv));
+                        let n = sm.vertices.get(vi as usize).map(|v| v.normal).unwrap_or_default();
+                        vertices.push(Vertex { color: [n.x, n.y, n.z], ..Vertex::unlit([p.x, p.y, p.z], uv) });
                         next
                     });
                     indices.push(out);
                 }
+                if std::env::var_os("HP3_MESH_DEBUG").is_some() {
+                    let name = materials.get(si).map(|m| pkg.ref_path(*m));
+                    let resolved = skin(si).is_some() || materials.get(si).copied().and_then(|m| texture(loader, pkg, m)).is_some();
+                    let zero = idx.iter().filter(|&&vi| sm.vertices.get(vi as usize).is_none_or(|v| (v.normal.x * v.normal.x + v.normal.y * v.normal.y + v.normal.z * v.normal.z) < 1e-6)).count();
+                    eprintln!("mesh section {si}: zero-normal corners {zero}/{} faces", idx.len());
+                    let sum = idx.iter().filter_map(|&vi| sm.vertices.get(vi as usize)).fold(Vec3::ZERO, |a, v| a + Vec3::new(v.normal.x, v.normal.y, v.normal.z)) / idx.len().max(1) as f32;
+                    eprintln!("mesh section {si}: average normal {sum:.2} of {} corners", idx.len());
+                    eprintln!("mesh section {si}: faces {} skin override {} material {name:?} resolved {resolved}", section.num_faces, skins.get(si).is_some_and(|(_, r)| !r.is_none()));
+                }
                 let (tex, blend) = skin(si).or_else(|| materials.get(si).copied().and_then(|m| texture(loader, pkg, m))).unzip();
                 batches.push(MeshBatch { texture: tex, blend: blend.unwrap_or_default(), vertices, indices, points: Vec::new() });
             }
-            Some(MeshGeom { batches, local: Mat4::IDENTITY })
+            Some(MeshGeom { batches, local: Mat4::IDENTITY, normal_flip: 1.0 })
         }
         Asset::SkeletalMesh(m) => {
             let h = &m.header;
@@ -122,8 +140,56 @@ pub fn build_posed(
             let scale = Vec3::new(h.mesh_scale.x, h.mesh_scale.y, h.mesh_scale.z);
             let origin = Vec3::new(h.mesh_origin.x, h.mesh_origin.y, h.mesh_origin.z);
             let local = rotation_matrix(h.rot_origin) * Mat4::from_scale(scale) * Mat4::from_translation(-origin);
-            Some(MeshGeom { batches, local })
+            let mut geom = MeshGeom { batches, local, normal_flip: 1.0 };
+            let rest: Vec<Vec3> = match points {
+                Some(pts) => pts.to_vec(),
+                None => m.points.iter().map(|p| Vec3::new(p.x, p.y, p.z)).collect(),
+            };
+            geom.normal_flip = normal_flip(&geom, &rest);
+            let normals = point_normals(&geom, &rest);
+            for b in &mut geom.batches {
+                for (v, &p) in b.vertices.iter_mut().zip(&b.points) {
+                    v.color = normals.get(p as usize).copied().unwrap_or(Vec3::Z).to_array();
+                }
+            }
+            Some(geom)
         }
         _ => None,
     }
+}
+
+/// Smooth vertex normals of a skeletal mesh per mesh point, from the faces of every batch around it (area weighted), turned
+/// the way `geom.normal_flip` says (worked out once from the rest pose, as the winding of the source faces is not relied on).
+pub fn point_normals(geom: &MeshGeom, points: &[Vec3]) -> Vec<Vec3> {
+    let flip = geom.normal_flip;
+    face_sums(geom, points).into_iter().map(|n| (n * flip).normalize_or(Vec3::Z)).collect()
+}
+
+/// The sum of the (area weighted) normals of the faces around each mesh point.
+fn face_sums(geom: &MeshGeom, points: &[Vec3]) -> Vec<Vec3> {
+    let mut sum = vec![Vec3::ZERO; points.len()];
+    for b in &geom.batches {
+        if b.points.len() != b.vertices.len() {
+            continue;
+        }
+        for t in b.indices.chunks_exact(3) {
+            let id = |k: usize| b.points[t[k] as usize] as usize;
+            let (i0, i1, i2) = (id(0), id(1), id(2));
+            let (Some(&p0), Some(&p1), Some(&p2)) = (points.get(i0), points.get(i1), points.get(i2)) else { continue };
+            let n = (p1 - p0).cross(p2 - p0);
+            sum[i0] += n;
+            sum[i1] += n;
+            sum[i2] += n;
+        }
+    }
+    sum
+}
+
+/// -1 when the faces' normals mostly point into the middle of the mesh (its faces are wound the other way), else 1.
+fn normal_flip(geom: &MeshGeom, points: &[Vec3]) -> f32 {
+    let sum = face_sums(geom, points);
+    let used: Vec<usize> = (0..sum.len()).filter(|&i| sum[i] != Vec3::ZERO).collect();
+    let centre = used.iter().map(|&i| points[i]).sum::<Vec3>() / used.len().max(1) as f32;
+    let outward: f32 = used.iter().map(|&i| sum[i].normalize_or_zero().dot((points[i] - centre).normalize_or_zero())).sum();
+    if outward < 0.0 { -1.0 } else { 1.0 }
 }

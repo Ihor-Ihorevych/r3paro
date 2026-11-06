@@ -188,7 +188,7 @@ fn pose(root: &Path, package: &str, mesh: &str, out: &Path, seq: Option<&str>, f
     let gpu_scene = renderer.upload_scene(&scene::Scene::default());
     let camera = Camera { position: Vec3::new(180.0, 0.0, 10.0), rotation: [0, 32768, 0], fov_degrees: 70.0 };
     let (w, h) = (800, 800);
-    let refs = [(&gpu, glam::Mat4::IDENTITY, glam::Vec3::splat(0.5))];
+    let refs = [(&gpu, glam::Mat4::IDENTITY, hp3_render::dynamic::ActorLight { ambient: glam::Vec3::splat(0.5), lights: Vec::new() })];
     let rgba = renderer.render_frame_to_rgba(w, h, |c, d| dynamic.draw(&renderer, &gpu_scene, &refs, &camera, c, d, 1.0));
     write_png(out, w, h, &rgba)
 }
@@ -285,6 +285,19 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
         }
     }
     // HP3_OPEN_MENU=<package.Page> opens a menu page (the pause menu is HGame.HPPageMainMenu) before rendering.
+    // HP3_VENDOR_ITEM=<class>: the vendor's item is the level's first actor of that class (for HGame.HPPageVendor).
+    if let Ok(class) = std::env::var("HP3_VENDOR_ITEM") {
+        let actors = hp3_world::world(&mut vm).actors.clone();
+        let of = |vm: &mut Vm<'_>, name: &str| {
+            let c = vm.db.find(name);
+            actors.iter().copied().find(|&a| c.is_some_and(|c| vm.db.objects.get(a).class.is_some_and(|k| vm.is_child_of(k, c))))
+        };
+        let (mgr, item) = (of(&mut vm, "VendorManager"), of(&mut vm, &class));
+        eprintln!("vendor {mgr:?} item {item:?}");
+        if let Some(m) = mgr {
+            hp3_world::set(&mut vm, m, "item", Value::Object(item));
+        }
+    }
     if let Ok(page) = std::env::var("HP3_OPEN_MENU") {
         let opened = hp3_world::interactions::open_menu(&mut vm, &page);
         eprintln!("open menu {page}: {opened}");
@@ -327,7 +340,7 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
     let renderer = Renderer::new_headless()?;
     let dynamic = Dynamic::new(&renderer);
     let mut cache = hp3_engine::MeshCache::default();
-    let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut cache, lighting.as_ref(), None, None);
+    let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut cache, lighting.as_ref(), None, None, 1.0);
     eprintln!("{} static batches, {} live actors drawn", scene.batches.len(), instances.len());
     // HP3_SOAK=<n>: keeps ticking and drawing for n more frames (HP3_HOLD=<key> held), to find per-frame leaks.
     if let Some(n) = std::env::var("HP3_SOAK").ok().and_then(|v| v.parse::<u32>().ok()) {
@@ -345,7 +358,7 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
             let _ = hp3_world::player_view(&mut vm);
             let view_ms = t.elapsed().as_secs_f32() * 1000.0;
             let t = std::time::Instant::now();
-            let _ = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut cache, lighting.as_ref(), None, None);
+            let _ = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut cache, lighting.as_ref(), None, None, 1.0);
             let inst_ms = t.elapsed().as_secs_f32() * 1000.0;
             let t = std::time::Instant::now();
             let _ = hp3_engine::hud_quads(&mut vm, &loader, &mut soak_hud, 1280, 720);
@@ -397,8 +410,14 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
         .ok()
         .and_then(|s| s.split_once('x').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?))))
         .unwrap_or((1280, 720));
+    if std::env::var_os("HP3_FOG_DEBUG").is_some() {
+        hp3_engine::debug_zone(&mut vm, map, camera.position);
+    }
+    let fog = hp3_engine::still_fog(&mut vm, map, camera.position);
+    eprintln!("fog at the camera: {fog:?}");
+    renderer.set_fog(fog);
     let gpu_scene = renderer.upload_scene(&scene);
-    let refs: Vec<_> = instances.iter().map(|(m, t, l)| (m.as_ref(), *t, *l)).collect();
+    let refs: Vec<_> = instances.iter().map(|(m, t, l)| (m.as_ref(), *t, l.clone())).collect();
     // The HUD over the scene (HP3_NO_HUD=1 leaves it out).
     let mut hud_cache = hp3_engine::HudCache::default();
     let quads = if std::env::var_os("HP3_NO_HUD").is_none() {

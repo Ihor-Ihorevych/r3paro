@@ -46,8 +46,8 @@ Milestones are from the plan (M0 to M12).
   to HP3's renderer; `HP3_UNLIT=1` turns lighting off. Terrain: every layer of each terrain, textured by its
   stored `TerrainMatrix` and blended over the ones below by its alpha map, lit per vertex, with holes from
   `QuadVisibilityBitmap`. Sky: the level is first drawn from the `SkyZoneInfo` with the camera's rotation
-  (the whole level for now, to be culled to the sky zone), then the scene over it. Not yet: emitters,
-  translucency, fog, dynamic lights, deco layers, HUD.
+  (the whole level for now, to be culled to the sky zone), then the scene over it. Terrain decoration layers (the Adv1Express pines) are scattered with the original's random generator and baked in, with no distance fade-out yet. Not yet: emitters,
+  translucency, fog, dynamic lights, HUD.
 - **M6 Movement, started**: swept-box collision against the level BSP, static mesh and terrain triangles and
   blocking actors; walking (friction, step-up of 24, sliding, floor snapping; going down a stair the floor sweep's
   graze of the tread corner counts as the tread, not a wall, so pawns step down instead of falling off each tread;
@@ -176,3 +176,71 @@ launcher writes; `int` is English) picks both the texts and the voices; with no 
   20 bytes of the copy-protection digest only. Everything else is identical.
 - **Subtitle fonts:** Russian voices need system fonts for the subtitles whatever the menus speak; English voices use HP3's own fonts.
 - **Phone:** the launcher's own English `HpMenu.int` / `SaveTips.int` (made for a Russian-only install) are not copied when `HpDialog.int` is there.
+
+## Matching the original: 2026-11-05/06 pass
+
+Gaps found by comparing against `flipendo-droid-2004/Source` and the game's own scripts, and what was done.
+
+Done:
+- **Falling** follows the original's step: half-step speed for the move, then the speed it really moved at; volume `TerminalVelocity` (total
+  speed) and `ZoneVelocity`; `ModifyVelocity` is raised each slice (the hippogriff's track steering lives there); the controller hears
+  `NotifyJumpApex` and `NotifyLanded` (the hero's slide takes its landing speed there) before the pawn's `Landed`.
+- **Flying pawns** (`PHYS_FLYING`) use the volume's fluid friction, `AirSpeed` (times `DesiredSpeed` for AI), slide with `HitWall`, take their
+  speed from the distance moved.
+- **Wall hits** for AI pawns follow `processHitWall`: no event without acceleration, only head-on (`MinHitWall` against the direction to the
+  controller's `Destination`), the controller's `NotifyHitWall` may take it. The player's pawn still hears every hit.
+- **Pawn lean**: pawns with `RotationRate.Roll > 0` (all HP3 characters) bank into their acceleration and settle level when slow.
+- **Rotating physics** (`PHYS_ROTATING`): one angle at a time, `bFixedRotationDir`, `EndedRotation`; a controlled pawn is not turned twice.
+- **Enable / Disable** of events (the probe mask) work; the mask resets on every `GotoState`, so a `Disable` in `PostBeginPlay` is lost to
+  `SetInitialState`, as in the original.
+- **Terrain**: layers stop at the first slot without texture or alpha map; holes (`QuadVisibilityBitmap`) are holes for collision too.
+- **Editor-only map objects** (cameras, brush builders: exports flagged not-for-client and not-for-server) are not loaded.
+- **Bottom-aligned meshes** drop by the collision height and keep their mesh origin height (no lowest-bone rule).
+- **LevelEnterText** is filled with the map name on load (the game reads the level it leaves from it for the next level's SmartStart).
+
+Open (found, not done):
+- **Dynamic shadows**: characters have `ShadowProjector`s (a `ShadowBitmapMaterial` projected on the floor); `Projector.AttachActor` /
+  `DetachActor` are unimplemented and nothing draws projectors on actors.
+- `FluidSurfaceInfo.Pling` (water ripples; water is a flat grid).
+- `Controller.AdjustFromWall` (nudges an AI mover off a wall that belongs to its target).
+- Pawn lean and fly/swim physics are checked only by headless runs; swimming (`PHYS_SWIMMING`) still uses the simple flight step.
+
+## Lighting matched to the original (2026-11-06)
+
+Found by comparing with `flipendo-droid-2004/Source/Engine` (`UnTex.cpp FGetHSV`, `UnActor.cpp UpdateRenderData`, `UnRenderLight.cpp`,
+`UnRenderBatch.cpp`, `UnRenderVisibility.cpp`):
+- **Colors**: light and zone-ambient colors come from `FGetHSV` (three-sector hue blend, brightness curve, about 0.82 at 255), not a
+  plain HSV; light colors are scaled by `LevelInfo.Brightness`. The computed zone ambient equals the map's saved `AmbientVector` to
+  1e-7, which confirms the function. Warm lights stay orange instead of clipping to white.
+- **Ambient per actor**: an actor takes the strongest per channel of the zones its bounding sphere reaches into (plus `AmbientGlow`),
+  worked out again when it moves; static meshes and terrain take the ambient of the zone they stand in, instead of one average for the map.
+- **Same as the original already** (checked, not changed): lightmap math, actor light picking, fades and the D3D attenuation fit, the
+  fixed-function vertex shader. The maps ship no baked lightmap pixels, so the original builds them at load from the same shadow bitmaps.
+- **Gamma**: the original's Windows client defaults (Brightness 0.5, Contrast 0.5, Gamma 1.0) make the ramp the identity; nothing to apply.
+- ~~Not done: the dynamic-light pass~~: done 2026-11-07, see below.
+
+## HP3's own lighting changes, read from its binaries (2026-11-07)
+
+UT2004's source is not HP3's: `spike-hp3/System/Engine.dll` and `D3DDrv.dll` were disassembled (`dumpbin /disasm`; Unreal exports
+its C++ symbols, e.g. `?SampleIntensity@FDynamicLight@@...`) and compared function by function with the UT2004 code:
+- **Lightmap palette**: HP3's `MergeLightMap` shifts by the light's factor, UT2004's by one less, so a light adds `level x color`,
+  half of UT2004's. Our BSP lights were twice too bright (`HP3_LIGHTMAP_SCALE` in `scene.rs`). The ambient fill (half the zone's
+  HSV) and `FDynamicLight::SampleIntensity` / `Update` are the same as UT2004's.
+- **Static meshes**: HP3's `CalculateStaticMeshLighting` scales every light by `ScaleGlow * 0.5`, which is why the maps' saved
+  `StaticMeshInstance` colors are half of what UT2004's formula gives (they are what HP3 computes, so we keep using them). Both the
+  batched and the single static-mesh paths add the zone ambient **halved** (UT2004: whole); characters keep all of it.
+- **D3D**: the lightmap stage is 2x unless the draw also uses vertex colors (HP3 added that condition), which only the dynamic-light
+  pass does: its attenuation stage is 1x, its vertex color 2x.
+- **Dynamic lights** (`bDynamicLight`; a wand's glow while charging, `WandEmitter`, `LE_QuadraticNonIncidence`, radius 125): the
+  level's surfaces now take up to four of them per frame (`MovingLight`, `Renderer::set_moving_lights`), added in the world shader.
+  BSP: the original's projected disc, `color * sqrt(1 - h^2/R^2) * (1 - along/disc)`; static meshes: the D3D point light
+  (`1 / (8 d^2 / R^2)` for the quadratic kind) by the cosine, doubled. `HP3_MOVING_LIGHTS=1` prints them, `=0` turns them off;
+  `HP3_DYN_LIGHTS=<every>` in hp3-run lists the live dynamic lights.
+- Against a frame of the original (Carpe Retractum font room, `original_light.jpg`): median luminance of the room's sides 59 -> 48
+  (original 22). The wall lit by the windows now matches (64 vs 54); ambient-lit walls are still about twice the original's,
+  with nothing left in the code paths compared that explains it (capture gamma of that frame unknown).
+
+Phone performance (POCO F6, OpenGL ES), InsideHub: 30 -> 55 fps. Posed character vertices are drawn from a ring of three buffers
+(writing into a buffer the GPU still read made the driver wait about 10 ms a frame); the default physics volume is found once;
+actor lights are looked up through a ground grid. `perf:` lines on Android now include posed KB, upload ms and draw calls;
+`env.flag` in the game folder sets debug switches (`NAME=value` lines).

@@ -29,6 +29,7 @@ hp3-audio = { path = "../../crates/hp3-audio" }
 
 # Desktop: SDL3 built from its source and linked in. Android: the SDL3 library of the APK, linked dynamically.
 [target.'cfg(not(target_os = "android"))'.dependencies]
+png = "0.17"
 sdl3 = { version = "0.20", features = ["build-from-source-static", "raw-window-handle"] }
 
 [target.'cfg(target_os = "android")'.dependencies]

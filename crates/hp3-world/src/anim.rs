@@ -191,6 +191,12 @@ pub fn rest_bottom(vm: &mut Vm<'_>, mesh: ObjId) -> f32 {
     skeleton_of(vm, mesh).map_or(0.0, |s| s.bottom)
 }
 
+/// How far up the mesh-to-actor transform moves the mesh by taking its origin off (the gargoyle's origin is 75 above its
+/// feet, so its mesh is drawn 75 lower than modelled); a bottom-aligned actor keeps that height, as in the original.
+pub fn origin_drop(vm: &mut Vm<'_>, mesh: ObjId) -> f32 {
+    skeleton_of(vm, mesh).map_or(0.0, |s| -s.to_actor.transform_point3(glam::Vec3::ZERO).z)
+}
+
 /// An actor's transform: actor space to world.
 pub fn actor_matrix(vm: &mut Vm<'_>, a: ObjId) -> glam::Mat4 {
     let loc = crate::physics::vec(&get(vm, a, "Location"));
@@ -435,7 +441,7 @@ pub fn update_attachments(vm: &mut Vm<'_>) {
     }
 }
 
-fn channel_mut<'a>(vm: &'a mut Vm<'_>, actor: ObjId, index: usize) -> &'a mut Channel {
+pub(crate) fn channel_mut<'a>(vm: &'a mut Vm<'_>, actor: ObjId, index: usize) -> &'a mut Channel {
     let a = world(vm).anim.actors.entry(actor).or_default();
     while a.channels.len() <= index {
         a.channels.push(Channel { alpha: 1.0, target_alpha: 1.0, ..Default::default() });
@@ -444,7 +450,7 @@ fn channel_mut<'a>(vm: &'a mut Vm<'_>, actor: ObjId, index: usize) -> &'a mut Ch
 }
 
 /// Starts a sequence on a channel. Returns false when the actor has no such sequence.
-fn play(vm: &mut Vm<'_>, actor: ObjId, seq: Name, rate: f32, tween: f32, channel: usize, looping: bool) -> bool {
+pub(crate) fn play(vm: &mut Vm<'_>, actor: ObjId, seq: Name, rate: f32, tween: f32, channel: usize, looping: bool) -> bool {
     let Some(set) = set_of(vm, actor) else {
         if crate::envc::var("HP3_ANIM_TRACE").is_ok() {
             eprintln!("anim: {actor:?} has no animation set for {}", vm.db.names.get(seq));
@@ -1218,6 +1224,37 @@ pub fn register(vm: &mut Vm<'_>) {
                 // of one whole or more cannot be a share of the sequence, so it is read as frames.
                 channel_mut(vm, o, ci).frame = if in_frames || t >= 1.0 { t.min(f) } else { t * f };
             }
+        }
+        Ok(Value::Empty)
+    });
+    // HasBone(name): whether the actor's skeletal mesh has that bone (the Patronum spell asks the target before it picks
+    // a move).
+    vm.register("Actor.HasBone", |vm, this, a| {
+        let bone = a.first().map(|v| vm.db.names.get(v.as_name()).to_ascii_lowercase()).unwrap_or_default();
+        let found = this
+            .and_then(|o| get(vm, o, "Mesh").as_obj())
+            .and_then(|m| skeleton_of(vm, m))
+            .is_some_and(|s| s.skeleton.find(&bone).is_some());
+        Ok(Value::Bool(found))
+    });
+    // FreezeAnimAt(Frame, optional Channel): the channel stops at that frame, with no tween and no AnimEnd (a cast's
+    // wind-down pins the pose it holds, then fades the channel out).
+    vm.register("Actor.FreezeAnimAt", |vm, this, a| {
+        let Some(o) = this else { return Ok(Value::Empty) };
+        let frame = a.first().map(Value::as_float).unwrap_or(0.0);
+        let ci = channel_arg(a, 1);
+        let frames = set_of(vm, o).and_then(|s| {
+            let si = world(vm).anim.actors.get(&o)?.channels.get(ci)?.sequence?;
+            Some(s.sequences[si].frames as f32)
+        });
+        if let Some(f) = frames {
+            let ch = channel_mut(vm, o, ci);
+            ch.frame = frame.clamp(0.0, f);
+            ch.rate = 0.0;
+            ch.from = None;
+            ch.tween_total = 0.0;
+            ch.tween_t = 0.0;
+            ch.tween_only = false;
         }
         Ok(Value::Empty)
     });

@@ -12,6 +12,18 @@ use std::thread::JoinHandle;
 /// Off-screen images in flight: one being shown, one being drawn.
 const RING: usize = 2;
 
+/// The shot clock: world ticks since the scripted cast began when there is one (`HP3_CAST`), else since the start.
+fn elapsed() -> u64 {
+    let now = TICKS.load(Ordering::Relaxed);
+    match hp3_world::casttest::START_TICK.load(Ordering::Relaxed) {
+        0 if std::env::var_os("HP3_CAST").is_some() => 0,
+        s => now.saturating_sub(s as u64),
+    }
+}
+
+/// World ticks so far (counted by the game loop), which `HP3_SHOT` frames are measured in: the display may run faster than the 60 Hz world.
+pub static TICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 enum Msg {
     Frame { slot: usize, image: wgpu::Texture, width: u32, height: u32 },
     /// The window got a new native surface (the app came back from the background): present to this one from now on.
@@ -185,6 +197,13 @@ fn present_loop(
     };
     let mut configured = (0, 0);
     let mut look = NEUTRAL;
+    // Debug: `HP3_SHOT=file.png[@frame]` saves that frame (default the 300th) and quits, to look at what the game draws.
+    #[cfg(not(target_os = "android"))]
+    let shot: Option<(String, Vec<u64>)> = std::env::var("HP3_SHOT").ok().map(|s| match s.rsplit_once('@') {
+        Some((p, n)) if n.split(',').all(|f| f.parse::<u64>().is_ok()) => (p.to_string(), n.split(',').map(|f| f.parse().unwrap()).collect()),
+        _ => (s, vec![300]),
+    });
+    let mut frames_seen = 0u64;
     let mut adjust: Option<Adjust> = None;
     for message in messages {
         match message {
@@ -198,6 +217,18 @@ fn present_loop(
                 configured = if configure(&surface, width, height) { (width, height) } else { (0, 0) };
             }
             Msg::Frame { slot, image, width, height } => {
+                #[cfg(not(target_os = "android"))]
+                if let Some((path, at)) = &shot
+                    && let Some(&due) = at.get(frames_seen as usize)
+                    && elapsed() >= due
+                {
+                    let file = if at.len() > 1 { format!("{}-{due}.png", path.trim_end_matches(".png")) } else { path.clone() };
+                    save_shot(&device, &queue, &image, format, width, height, &file);
+                    frames_seen += 1;
+                    if frames_seen as usize == at.len() {
+                        std::process::exit(0);
+                    }
+                }
                 if configured != (width, height) {
                     configured = if configure(&surface, width, height) { (width, height) } else { (0, 0) };
                 }
@@ -320,5 +351,47 @@ impl Adjust {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &bind, &[]);
         pass.draw(0..3, 0..1);
+    }
+}
+
+/// Writes a finished frame to a PNG (debugging: see `HP3_SHOT`).
+#[cfg(not(target_os = "android"))]
+fn save_shot(device: &wgpu::Device, queue: &wgpu::Queue, image: &wgpu::Texture, format: wgpu::TextureFormat, width: u32, height: u32, path: &str) {
+    let bytes_per_row = (width * 4).div_ceil(256) * 256;
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("shot"),
+        size: (bytes_per_row * height) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        image.as_image_copy(),
+        wgpu::TexelCopyBufferInfo { buffer: &readback, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(bytes_per_row), rows_per_image: Some(height) } },
+        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+    );
+    queue.submit([encoder.finish()]);
+    let slice = readback.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    let _ = device.poll(wgpu::PollType::Wait);
+    let data = slice.get_mapped_range();
+    let bgr = matches!(format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb);
+    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+    for row in 0..height {
+        let start = (row * bytes_per_row) as usize;
+        for px in data[start..start + (width * 4) as usize].chunks_exact(4) {
+            let p: [u8; 4] = if bgr { [px[2], px[1], px[0], 255] } else { [px[0], px[1], px[2], 255] };
+            rgba.extend_from_slice(&p);
+        }
+    }
+    let result = std::fs::File::create(path).map_err(|e| e.to_string()).and_then(|f| {
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(f), width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.write_header().and_then(|mut w| w.write_image_data(&rgba)).map_err(|e| e.to_string())
+    });
+    match result {
+        Ok(()) => eprintln!("shot: wrote {path} ({width}x{height})"),
+        Err(e) => eprintln!("shot: {path}: {e}"),
     }
 }

@@ -148,6 +148,10 @@ fn play(vm: &mut Vm<'_>, this: Option<ObjId>, a: &[Value], attenuate_by_default:
         no_3d,
     };
     world(vm).audio.events.push(event);
+    // A face envelope on the sound moves the speaker's mouth.
+    if let Some(key) = a.first().and_then(|v| key_of(vm, v)) {
+        crate::lipsync::start(vm, emitter, &key);
+    }
 }
 
 pub fn register(vm: &mut Vm<'_>) {

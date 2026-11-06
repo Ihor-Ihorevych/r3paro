@@ -42,10 +42,22 @@ mod platform {
         true
     }
     pub fn tick_frame() {}
-    /// The desktop game runs at 60 frames a second; `HP3_FPS=<n>` changes it and 0 lifts the limit.
+    /// The world ticks at a fixed 60 Hz and what is drawn is blended between ticks (a faster display shows smooth motion).
+    pub fn interpolate() -> bool {
+        true
+    }
+    /// The desktop game is not limited (the display paces it); `HP3_FPS=<n>` limits it.
     pub fn frame_budget() -> Option<f32> {
-        let fps = std::env::var("HP3_FPS").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(60.0);
-        (fps > 0.0).then(|| 1.0 / fps)
+        let fps = FPS_LIMIT.load(std::sync::atomic::Ordering::Relaxed);
+        (fps > 0).then(|| 1.0 / fps as f32)
+    }
+    /// The frame rate limit (0 for none), set from `HP3_FPS` and the F10 key.
+    pub static FPS_LIMIT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    pub fn set_fps_limit(fps: u32) {
+        FPS_LIMIT.store(fps, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub fn fps_limit() -> u32 {
+        FPS_LIMIT.load(std::sync::atomic::Ordering::Relaxed)
     }
     /// Degrees added to the game's field of view: 20 by default (as on the phone), `HP3_FOV_OFFSET=<degrees>` changes it.
     pub fn fov_offset() -> f32 {
@@ -136,6 +148,8 @@ fn mouse_name(b: MouseButton) -> Option<&'static str> {
 const CAMERA_PULL_BACK: f32 = 24.0;
 /// How far in front of the head's centre the first-person camera sits, so it is outside the head's mesh.
 const FIRST_PERSON_AHEAD: f32 = 12.0;
+/// The first-person eye sits at this fraction of the eye height, so Harry does not look a head taller than everyone else.
+const FIRST_PERSON_EYE_SCALE: f32 = 0.5;
 /// How high above the pawn's location the camera's line to the player starts, and how far (Unreal units) the camera keeps
 /// from a wall; the near plane is 4, so this is enough for it never to see through.
 const CAMERA_HEAD_HEIGHT: f32 = 40.0;
@@ -236,7 +250,7 @@ fn game_camera(vm: &mut Vm<'_>) -> Option<Camera> {
                     h if h > 1.0 => h,
                     _ => hp3_world::get(vm, pawn, "CollisionHeight").as_float() * 0.8,
                 };
-                let head = hp3_world::physics::vec(&hp3_world::get(vm, pawn, "Location")) + Vec3::Z * eye;
+                let head = hp3_world::physics::vec(&hp3_world::get(vm, pawn, "Location")) + Vec3::Z * (eye * FIRST_PERSON_EYE_SCALE);
                 return Some(Camera { position: head + forward * FIRST_PERSON_AHEAD, rotation, fov_degrees: fov + platform::fov_offset() });
             }
             // The camera stays on the player's side of a wall: it comes in along the line from the head to where it
@@ -391,9 +405,19 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
     sdl.mouse().set_relative_mouse_mode(&window, true);
     let mut events = sdl.event_pump()?;
     let mut last = Instant::now();
+    // HP3_CAST=<Spell>:<TargetClass>[:n[:distance]]@<tick> casts a spell at a creature, as in hp3-run (with HP3_SHOT to see it).
+    let mut cast = hp3_world::casttest::CastTest::from_env();
+    let mut cast_ticks = 0u32;
     let mut accumulator = 0.0f32;
+    let (mut cam_from, mut cam_to, mut cam_tick) = (camera, camera, 0u64);
+    let mut fog_state = hp3_engine::FogState::default();
     let fixed_step = std::env::var_os("HP3_FIXED_STEP").is_some();
+    // The frame rate limit: `HP3_FPS` wins, then the one chosen with F10 last time, else none.
+    let saved_fps = hp3_world::settings::float(&vm, "hp3.app", "FpsLimit", 0.0) as u32;
+    platform::set_fps_limit(std::env::var("HP3_FPS").ok().and_then(|v| v.parse().ok()).unwrap_or(saved_fps));
     let mut frames = 0u32;
+    // When the limit was last changed (the window title says so for a few seconds).
+    let mut fps_note: Option<(Instant, u32)> = None;
     let mut perf = PerfStats::default();
     let mut fps_timer = Instant::now();
     let mut free_camera = false;
@@ -423,6 +447,18 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             match event {
                 Event::Quit { .. } => break 'main,
                 Event::KeyDown { scancode: Some(Scancode::F11), repeat: false, .. } => levels.toggle(&current_map),
+                // F7: gamma, brightness and contrast back to the defaults (also while a menu is open).
+                Event::KeyDown { scancode: Some(Scancode::F7), repeat: false, .. } => commands::push("resetpicture"),
+                // F10: the frame rate limit steps through the usual refresh rates, then none.
+                Event::KeyDown { scancode: Some(Scancode::F10), repeat: false, .. } => {
+                    const STEPS: [u32; 8] = [30, 60, 90, 120, 144, 165, 240, 0];
+                    let now = platform::fps_limit();
+                    let next = STEPS.iter().position(|&s| s == now).map_or(STEPS[0], |i| STEPS[(i + 1) % STEPS.len()]);
+                    platform::set_fps_limit(next);
+                    hp3_world::settings::store(&mut vm, "hp3.app", "FpsLimit", &next.to_string());
+                    fps_note = Some((Instant::now(), next));
+                    eprintln!("fps limit: {}", if next == 0 { "none".to_string() } else { next.to_string() });
+                }
                 // While the level list is open it takes the keyboard and the mouse.
                 Event::KeyDown { scancode: Some(sc), .. } if levels.open => match sc {
                     Scancode::Up => levels.step(-1),
@@ -443,6 +479,27 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                         _ => hp3_world::debug_move::Mode::Walk,
                     };
                     eprintln!("movement: {mode:?} ({})", if hp3_world::debug_move::set_mode(&mut vm, mode) { "ok" } else { "no pawn" });
+                }
+                // Character switch: 1, 2, 3 pick Harry, Ron, Hermione; C goes to the next one (the phone's switch button sends C).
+                // F9: writes where the player is and what is around to logs/marks.log (for bug reports).
+                Event::KeyDown { scancode: Some(Scancode::F8), repeat: false, .. } if !in_menu => {
+                    let text = hp3_world::physics::mark(&mut vm);
+                    eprint!("{text}");
+                    let path = root.join("logs").join("marks.log");
+                    let _ = std::fs::create_dir_all(root.join("logs"));
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                        use std::io::Write;
+                        let _ = f.write_all(text.as_bytes());
+                    }
+                }
+                Event::KeyDown { scancode: Some(sc @ (Scancode::_1 | Scancode::_2 | Scancode::_3 | Scancode::C)), repeat: false, .. } if !in_menu => {
+                    let which = match sc {
+                        Scancode::_1 => Some(0),
+                        Scancode::_2 => Some(1),
+                        Scancode::_3 => Some(2),
+                        _ => None,
+                    };
+                    eprintln!("switch character: {}", hp3_world::character_switch::switch(&mut vm, which));
                 }
                 Event::KeyDown { scancode: Some(sc), repeat, .. } if in_menu => {
                     if let Some(k) = menu_key(sc) {
@@ -626,12 +683,27 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
 
         let frame_start = Instant::now();
         let mut stages: Vec<(&str, f32)> = Vec::new();
-        // One world tick per drawn frame, with the real time since the last one (at most a thirtieth of a second,
-        // so a stall does not make the world jump), but not more than 60 times a second. HP3_FIXED_STEP=1 keeps a fixed 60 Hz instead.
-        if fixed_step {
+        // The world ticks at 60 Hz: scripts (the imp cutscene's among them) advance by whole ticks. On the desktop each tick
+        // is a fixed 1/60 second and a faster display draws the state blended between the last two ticks (`blend`).
+        // HP3_FIXED_STEP=1 keeps the plain fixed step without blending.
+        let mut blend = 1.0f32;
+        if platform::interpolate() && !fixed_step {
+            accumulator += dt;
+            let mut ticks = 0;
+            while accumulator >= 1.0 / 60.0 && ticks < 6 {
+                tick_world(&mut vm, 1.0 / 60.0, &mut cast, &mut cast_ticks);
+                accumulator -= 1.0 / 60.0;
+                ticks += 1;
+            }
+            if accumulator >= 1.0 / 60.0 {
+                // Too far behind: the rest of the lag is dropped, not played later in a rush.
+                accumulator = 0.0;
+            }
+            blend = (accumulator * 60.0).clamp(0.0, 1.0);
+        } else if fixed_step {
             accumulator += dt;
             while accumulator >= 1.0 / 60.0 {
-                hp3_world::tick(&mut vm, 1.0 / 60.0);
+                tick_world(&mut vm, 1.0 / 60.0, &mut cast, &mut cast_ticks);
                 accumulator -= 1.0 / 60.0;
             }
         } else {
@@ -639,7 +711,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             // ticks, so a faster monitor would play them too fast. A slower frame ticks with the time it took.
             accumulator += dt;
             if accumulator >= 1.0 / 60.0 - 0.0005 {
-                hp3_world::tick(&mut vm, accumulator.min(1.0 / 30.0));
+                tick_world(&mut vm, accumulator.min(1.0 / 30.0), &mut cast, &mut cast_ticks);
                 accumulator = 0.0;
             }
         }
@@ -666,6 +738,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             gpu_scene = renderer.upload_scene(&scene);
             lighting = inputs.lighting;
             mesh_cache = hp3_engine::MeshCache::default();
+            fog_state = hp3_engine::FogState::default();
             particle_cache = hp3_engine::ParticleCache::default();
             current_map = pkg.name.to_string();
             platform::set_level(&current_map);
@@ -679,7 +752,18 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         }
 
         if !free_camera && let Some(c) = game_camera(&mut vm) {
-            camera = c;
+            let tick = hp3_world::world(&mut vm).frame;
+            if tick != cam_tick {
+                // A new tick: the camera of the last one is where the blend starts (a cut or a jump starts at the new place).
+                cam_from = if cam_tick + 1 == tick && cam_to.position.distance(c.position) < 400.0 { cam_to } else { c };
+                cam_tick = tick;
+            }
+            cam_to = c;
+            camera = blend_cameras(&cam_from, &cam_to, blend);
+        }
+        if let Some((position, rotation)) = *hp3_world::casttest::CAMERA.lock().unwrap() {
+            camera.position = position;
+            camera.rotation = rotation;
         }
         if let Some(a) = &mut audio {
             a.update(&mut vm, camera.position, camera.rotation[1]);
@@ -687,13 +771,14 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         game_log.update(&mut vm);
         stages.push(("camera", frame_start.elapsed().as_secs_f32() * 1000.0));
         // In first person the player's own body and what it carries are not drawn.
+        renderer.set_fog(hp3_engine::view_fog(&mut vm, &mut fog_state, &current_map, camera.position, dt));
         let hidden_pawn = if platform::first_person() && !platform::in_cutscene() {
             hp3_world::world(&mut vm).player.and_then(|pc| hp3_world::get(&mut vm, pc, "Pawn").as_obj())
         } else {
             None
         };
-        let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut mesh_cache, lighting.as_ref(), Some(hp3_engine::View { eye: camera.position, forward: camera.forward(), fov_degrees: camera.fov_degrees }), hidden_pawn);
-        let refs: Vec<_> = instances.iter().map(|(m, t, l)| (m.as_ref(), *t, *l)).collect();
+        let instances = hp3_engine::actor_instances(&mut vm, &loader, &renderer, &dynamic, &mut mesh_cache, lighting.as_ref(), Some(hp3_engine::View { eye: camera.position, forward: camera.forward(), fov_degrees: camera.fov_degrees }), hidden_pawn, blend);
+        let refs: Vec<_> = instances.iter().map(|(m, t, l)| (m.as_ref(), *t, l.clone())).collect();
         stages.push(("instances", frame_start.elapsed().as_secs_f32() * 1000.0));
         let particle_quads = hp3_engine::particle_quads(&mut vm, &loader, &mut particle_cache, &camera);
         stages.push(("particles", frame_start.elapsed().as_secs_f32() * 1000.0));
@@ -740,6 +825,14 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                 eprintln!("perf: {fps:.0} fps, {}", perf.report());
                 let (skinned, plain, drawn, transform, total) = hp3_engine::take_instance_times();
                 eprintln!("perf: instances: skinned meshes {skinned:.0} ms/s ({} per frame), other meshes {plain:.0} ms/s, placing drawn actors {transform:.0} ms/s, whole function {total:.0} ms/s", drawn / perf.frames.max(1) as u64);
+                let (posed, draws, upload_ns) = hp3_render::dynamic::take_draw_counts();
+                let n = perf.frames.max(1) as u64;
+                eprintln!(
+                    "perf: draw: posed vertices {} KB per frame ({:.1} ms to upload), actor draw calls {} per frame",
+                    posed / n / 1024,
+                    upload_ns as f64 / n as f64 / 1e6,
+                    draws / n
+                );
                 // Where the world's ticks spent their time this second (ms per second), biggest first.
                 let mut phases: Vec<_> = std::mem::take(&mut hp3_world::world(&mut vm).tick_profile).into_iter().collect();
                 phases.sort_by(|a, b| b.1.cmp(&a.1));
@@ -759,10 +852,134 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                 }
             }
             perf = PerfStats::default();
-            let _ = window.set_title(&format!("hp3 - {current_map} - {fps:.0} fps"));
+            let limit = match fps_note {
+                Some((t, n)) if t.elapsed().as_secs() < 6 => format!(" (limit {}, F10 changes)", if n == 0 { "none".to_string() } else { n.to_string() }),
+                _ => String::new(),
+            };
+            let _ = window.set_title(&format!("hp3 - {current_map} - {fps:.0} fps{limit}"));
             frames = 0;
             fps_timer = Instant::now();
         }
     }
     Ok(())
+}
+
+/// The camera `t` of the way from `a` to `b` (angles the short way round).
+fn blend_cameras(a: &Camera, b: &Camera, t: f32) -> Camera {
+    let turn = |x: i32, y: i32| {
+        let d = ((y - x) as i64).rem_euclid(65536) as i32;
+        let d = if d > 32768 { d - 65536 } else { d };
+        x + (d as f32 * t) as i32
+    };
+    if t >= 1.0 {
+        return *b;
+    }
+    Camera {
+        position: a.position.lerp(b.position, t),
+        rotation: [turn(a.rotation[0], b.rotation[0]), turn(a.rotation[1], b.rotation[1]), turn(a.rotation[2], b.rotation[2])],
+        fov_degrees: a.fov_degrees + (b.fov_degrees - a.fov_degrees) * t,
+    }
+}
+
+/// One tick of the world, first stepping the scripted spell cast (`HP3_CAST`) when there is one.
+fn tick_world(vm: &mut hp3_script::Vm<'_>, dt: f32, cast: &mut Option<hp3_world::casttest::CastTest>, cast_ticks: &mut u32) {
+    present::TICKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // HP3_SPAWN=<Class>[,<Class>...]: once the player has control, spawns these at the player's pawn (to look at an effect on its own).
+    if let Ok(list) = std::env::var("HP3_SPAWN") {
+        static SPAWNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !SPAWNED.load(std::sync::atomic::Ordering::Relaxed)
+            && let Some(pawn) = hero_actor(vm)
+            && present::TICKS.load(std::sync::atomic::Ordering::Relaxed) > std::env::var("HP3_SPAWN_AFTER").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(60)
+        {
+            SPAWNED.store(true, std::sync::atomic::Ordering::Relaxed);
+            for name in list.split(',') {
+                let class = vm.db.find(name).map(|s| vm.db.get(s).object);
+                let made = class.map(|c| hp3_world::natives::spawn(vm, Some(pawn), &[hp3_script::Value::Object(Some(c))]));
+                let path = made.as_ref().and_then(|r| r.as_ref().ok()).and_then(|v| v.as_obj()).map(|o| hp3_script::natives::object_path(vm, o));
+                eprintln!("spawn: {name} -> {path:?}");
+            }
+        }
+    }
+    // HP3_SPAWN_CAM=<distance>,<height>: a close-up camera on the player's pawn (with HP3_SPAWN).
+    if let Ok(spec) = std::env::var("HP3_SPAWN_CAM") {
+        let mut it = spec.split(',').filter_map(|v| v.parse::<f32>().ok());
+        let (dist, height) = (it.next().unwrap_or(120.0), it.next().unwrap_or(30.0));
+        if let Some(pawn) = hero_actor(vm) {
+            let at = hp3_world::physics::vec(&hp3_world::get(vm, pawn, "Location"));
+            let yaw = hp3_world::get(vm, pawn, "Rotation").fields().get(1).map_or(0, hp3_script::Value::as_int) as f32 * std::f32::consts::TAU / 65536.0;
+            let eye = at + glam::Vec3::new(yaw.cos() * dist, yaw.sin() * dist, height);
+            let d = at + glam::Vec3::Z * (height * 0.9) - eye;
+            let k = 65536.0 / std::f32::consts::TAU;
+            *hp3_world::casttest::CAMERA.lock().unwrap() = Some((eye, [(d.z.atan2(d.truncate().length()) * k).round() as i32, (d.y.atan2(d.x) * k).round() as i32, 0]));
+        }
+    }
+    // HP3_TRACK=<every>: prints the player's pawn (state, place, speed, floor) every that many ticks.
+    if let Ok(every) = std::env::var("HP3_TRACK") {
+        let tick = present::TICKS.load(std::sync::atomic::Ordering::Relaxed);
+        if let Some(pc) = hp3_world::world(vm).player
+            && tick % every.parse::<u64>().unwrap_or(10).max(1) == 0
+            && let Some(pawn) = hp3_world::get(vm, pc, "Pawn").as_obj()
+        {
+            let st = vm.state_of(pc).map(|s| vm.db.names.get(vm.db.get(s).name).to_string()).unwrap_or_default();
+            let (at, vel, floor) = (hp3_world::physics::vec(&hp3_world::get(vm, pawn, "Location")), hp3_world::physics::vec(&hp3_world::get(vm, pawn, "Velocity")), hp3_world::physics::vec(&hp3_world::get(vm, pawn, "Floor")));
+            let phys = hp3_world::get(vm, pawn, "Physics").as_byte();
+            let vol = hp3_world::get(vm, pawn, "PhysicsVolume").as_obj().map(|v| hp3_script::natives::object_path(vm, v)).unwrap_or_default();
+            eprintln!("track: tick {tick} {st} phys {phys} at {at:.1} vel {vel:.1} speed {:.0} floor {floor:.4} vol {vol}", vel.length());
+        }
+    }
+    // HP3_TELEPORT=<x>,<y>,<z>@<tick>[;...]: puts the player's pawn there at that tick (as in hp3-run), HP3_TELEPORT_YAW turns it.
+    if let Ok(list) = std::env::var("HP3_TELEPORT") {
+        static DONE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let tick = present::TICKS.load(std::sync::atomic::Ordering::Relaxed);
+        for (i, spec) in list.split(';').enumerate() {
+            let bit = 1u32 << i.min(31);
+            let Some((at, when)) = spec.split_once('@') else { continue };
+            let c: Vec<f32> = at.split(',').filter_map(|v| v.parse().ok()).collect();
+            if DONE.load(std::sync::atomic::Ordering::Relaxed) & bit != 0 || when.parse::<u64>().is_ok_and(|w| tick < w) {
+                continue;
+            }
+            // Waits for the player to have control (the opening cutscene is over).
+            let Some(pc) = hp3_world::world(vm).player else { continue };
+            if tick % 20 == 0 && tick <= 400 {
+                let st = vm.state_of(pc).map(|s| vm.db.names.get(vm.db.get(s).name).to_string());
+                let pw = hp3_world::get(vm, pc, "Pawn").as_obj();
+                eprintln!("teleport: waiting at tick {tick}: controller state {st:?}, pawn {pw:?}");
+            }
+            let Some(pawn) = hp3_world::get(vm, pc, "Pawn").as_obj() else { continue };
+            let walking = vm.state_of(pc).is_some_and(|s| vm.db.names.get(vm.db.get(s).name) == "PlayerWalking");
+            // A fourth number is the heading (65536 to a turn).
+            if let (&[x, y, z, ..], true) = (c.as_slice(), walking) {
+                hp3_world::physics::far_move(vm, pawn, glam::Vec3::new(x, y, z), false, false);
+                let yaw = c.get(3).map(|y| *y as i32).or_else(|| std::env::var("HP3_TELEPORT_YAW").ok().and_then(|v| v.parse::<i32>().ok()));
+                if let Some(yaw) = yaw {
+                    let r = hp3_script::Value::Struct(vec![hp3_script::Value::Int(0), hp3_script::Value::Int(yaw), hp3_script::Value::Int(0)].into());
+                    hp3_world::set(vm, pawn, "Rotation", r.clone());
+                    hp3_world::set(vm, pawn, "DesiredRotation", r.clone());
+                    hp3_world::set(vm, pc, "Rotation", r);
+                }
+                DONE.fetch_or(bit, std::sync::atomic::Ordering::Relaxed);
+                eprintln!("teleport: player to {x},{y},{z} at tick {tick}");
+            }
+        }
+    }
+    if let Some(t) = cast.as_mut() {
+        *cast_ticks += 1;
+        hp3_world::casttest::step(vm, t, *cast_ticks);
+    }
+    hp3_world::tick(vm, dt);
+}
+
+/// The player's pawn, or else the first hero pawn in the level (an opening cutscene has no player pawn).
+fn hero_actor(vm: &mut hp3_script::Vm<'_>) -> Option<hp3_script::ObjId> {
+    if let Some(s) = hp3_world::lipsync::speaker(vm) {
+        return Some(s);
+    }
+    if let Some(pc) = hp3_world::world(vm).player
+        && let Some(p) = hp3_world::get(vm, pc, "Pawn").as_obj()
+    {
+        return Some(p);
+    }
+    let hero = vm.db.find("HPHeroPawn")?;
+    let actors = hp3_world::world(vm).actors.clone();
+    actors.into_iter().find(|&a| !vm.db.objects.get(a).deleted && vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, hero)))
 }

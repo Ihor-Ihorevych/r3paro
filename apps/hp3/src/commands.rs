@@ -42,6 +42,10 @@ pub fn run(vm: &mut Vm<'_>, command: &str, level: &mut Option<String>) {
                 eprintln!("quick load: no quick save yet");
             }
         }
+        "resetpicture" => {
+            hp3_world::settings::reset_look(vm);
+            eprintln!("settings: gamma, brightness and contrast are back to the defaults");
+        }
         "level" => *level = arg.map(str::to_string),
         "cheat" => cheat(vm, arg.unwrap_or("")),
         _ => eprintln!("command: unknown '{command}'"),

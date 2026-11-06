@@ -225,6 +225,13 @@ impl MoverShape {
 /// (`radius`, `half_height`, centered on `center`), or `None`. A sweep that starts inside the cylinder only
 /// counts when it moves toward the axis (it is then stopped at once); moving outward or sideways it is let
 /// through.
+/// A line (or box swept along it) against an actor whose `CollideType` is a box: half sizes along the box's own axes. As the
+/// original's box check, a line that starts inside only hits when its end is deeper in (it can leave the box).
+pub fn turned_box_trace(actor: ObjId, center: Vec3, half: Vec3, axes: [Vec3; 3], start: Vec3, end: Vec3, extent: Vec3) -> Option<Hit> {
+    let b = ActorBox { actor, center, extent: half, blocks_actors: false, blocks_players: false, is_pawn: false, owner: None, axes: Some(axes) };
+    oriented_box_trace(&b, axes, start, end, extent)
+}
+
 pub fn cylinder_trace(center: Vec3, radius: f32, half_height: f32, start: Vec3, end: Vec3, extent: Vec3) -> Option<Hit> {
     let reach = radius + extent.x;
     let half = half_height + extent.z;
@@ -476,7 +483,9 @@ impl Collision {
             }
         }
         for m in &self.movers {
-            if Some(m.actor) == ignore || self.passes_actors {
+            // A mover whose collision the script turned off (COMC hides the obstacle logs a track does not use with
+            // SetCollision(false)) stops nothing, like any other actor.
+            if Some(m.actor) == ignore || self.passes_actors || self.inactive.contains(&m.actor) || !self.blocks_mover(m.actor) {
                 continue;
             }
             if let Some(h) = m.trace(start, end, extent) {
@@ -970,5 +979,35 @@ mod oriented_box_tests {
         let pawn = Vec3::new(10.0, 10.0, 20.0);
         assert!(box_trace(&b, Vec3::new(0.0, 8.0, 0.0), Vec3::new(0.0, 40.0, 0.0), pawn).is_none());
         assert!(box_trace(&b, Vec3::new(0.0, 8.0, 0.0), Vec3::new(0.0, 0.0, 0.0), pawn).is_some());
+    }
+}
+
+impl Collision {
+    /// The index of the zone the level's BSP puts `p` in (a point's region): the zone the last plane on the way down holds
+    /// on the side `p` is, as `UModel::PointRegion` finds it.
+    pub fn zone_at(&self, p: Vec3) -> Option<usize> {
+        let model = self.model.as_ref()?;
+        if model.nodes.is_empty() {
+            return None;
+        }
+        let mut node = 0usize;
+        let mut zone = None;
+        for _ in 0..model.nodes.len() {
+            let (n, w) = plane_of(model, node);
+            let nd = &model.nodes[node];
+            let front = n.dot(p) - w > 0.0;
+            zone = Some(nd.zone[front as usize] as usize);
+            let child = if front { nd.front } else { nd.back };
+            if child < 0 {
+                break;
+            }
+            node = child as usize;
+        }
+        zone
+    }
+
+    /// The export index (in the map) of the zone actor for a zone index.
+    pub fn zone_actor_export(&self, zone: usize) -> Option<usize> {
+        self.model.as_ref()?.zones.get(zone)?.actor.export()
     }
 }

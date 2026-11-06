@@ -6,7 +6,9 @@
 pub mod anim;
 pub mod audio;
 pub mod debug_move;
+pub mod character_switch;
 pub mod canvas;
+pub mod casttest;
 pub mod collision;
 pub mod config;
 pub mod fonts;
@@ -16,11 +18,13 @@ pub mod input;
 pub mod movie;
 pub mod interactions;
 pub mod interpolation;
+pub mod lipsync;
 pub mod natives;
 pub mod particles;
 mod perception;
 pub mod physics;
 pub mod save;
+pub mod shadows;
 pub mod settings;
 pub mod touch;
 
@@ -80,6 +84,8 @@ pub struct World {
     pub loaded_from_save: bool,
     /// Sounds and music the game asked for, for the platform to play.
     pub audio: audio::Audio,
+    /// Mouths following the sounds that are playing (`lipsync`).
+    pub lip_syncs: Vec<lipsync::LipSync>,
     pub movies: movie::Movies,
     pub particles: particles::Particles,
     /// The pawn's own `AirSpeed`, kept while flying in the debug modes.
@@ -106,6 +112,8 @@ pub struct World {
     scenery_classes: HashMap<hp3_script::StructId, bool>,
     /// Where each pawn was when its physics volume was last worked out, and the volume it had after.
     volume_checked: hp3_script::fx::FxHashMap<ObjId, ([u32; 3], Option<ObjId>)>,
+    /// The level's default physics volume once found (the search walks every actor).
+    default_volume: Option<ObjId>,
     ambient_classes: HashMap<hp3_script::StructId, bool>,
     /// Since when each student has been in the trade's camera-setup state (game time), for `vendor_watchdog`.
     vendor_setup_since: HashMap<ObjId, f32>,
@@ -579,6 +587,15 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
     let level_info_class = vm.db.find("LevelInfo");
     for r in level_order {
         let Some(e) = r.export() else { continue };
+        // Editor-only objects (the viewport cameras a map is saved with) are marked not for the client and not
+        // for the server: the game never loads them. Left in, those cameras are player controllers that scripts
+        // looking for "the" player controller find first (COMC's countdown went to a camera's HUD, so the ring
+        // counter never showed).
+        const NOT_FOR_CLIENT: u32 = 0x0010_0000;
+        const NOT_FOR_SERVER: u32 = 0x0020_0000;
+        if map.exports[e].flags & (NOT_FOR_CLIENT | NOT_FOR_SERVER) == NOT_FOR_CLIENT | NOT_FOR_SERVER {
+            continue;
+        }
         let id = vm.db.obj_for(map, e);
         let Some(class) = vm.db.objects.get(id).class else { continue };
         if !vm.is_child_of(class, actor_class) {
@@ -632,9 +649,11 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         tick_profile: Default::default(),
         scenery_classes: Default::default(),
         volume_checked: Default::default(),
+        default_volume: None,
         ambient_classes: Default::default(),
         vendor_setup_since: Default::default(),
         far_owed: Default::default(),
+        lip_syncs: Vec::new(),
         ever_base: Default::default(),
         ever_base_valid: false,
         tick_classes: Default::default(),
@@ -657,6 +676,11 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
     if let (Some(li), Some(wi)) = (level_info, world_info) {
         set(vm, li, "WorldInfo", Value::Object(Some(wi)));
     }
+    // Loading a map puts the map's name into an empty LevelEnterText, as the original's LoadMap does. The game reads
+    // the level it is leaving from it (KWHeroController.PreClientTravel -> KWPawn.PreviousLevelName), and the next
+    // level's SmartStart for that name places the player: left empty, no SmartStart matched and the player arrived
+    // at the plain PlayerStart (the inside hub's is in its storage room for actors and props).
+    fill_level_enter_text(vm);
     // The game exists before the level's actors begin play; they read Level.Game.
     if let Some(gc) = game_class.and_then(|g| find_object(vm, g)) {
         let game = natives::spawn(vm, level_info, &[Value::Object(Some(gc))])?.as_obj();
@@ -967,6 +991,16 @@ pub fn refresh_baked_collision(vm: &mut Vm<'_>, a: ObjId) {
     world(vm).collision.set_active(a, active);
 }
 
+/// Puts the loaded map's name into an empty `LevelEnterText` (see `load_with`); also run after a save is restored,
+/// since a save written before the name was filled carries the empty text back.
+pub fn fill_level_enter_text(vm: &mut Vm<'_>) {
+    let Some(li) = world(vm).level_info else { return };
+    if get(vm, li, "LevelEnterText").as_str().is_empty() {
+        let name = world(vm).map.name.clone();
+        set(vm, li, "LevelEnterText", Value::Str(name));
+    }
+}
+
 /// A level switch the game asked for (`Level.NextURL`) happens when its countdown runs out.
 fn count_down_travel(vm: &mut Vm<'_>, li: ObjId, dt: f32) {
     let next = get(vm, li, "NextURL").as_str().to_string();
@@ -1014,6 +1048,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         set(vm, li, "TimeSeconds", Value::Float(t));
         movie::tick(vm);
         let t_particles = std::time::Instant::now();
+        lipsync::tick(vm);
         particles::tick(vm, dt);
         if std::env::var_os("HP3_TICK_PROFILE").is_some() {
             let p = &mut world(vm).tick_profile;
@@ -1362,10 +1397,12 @@ pub fn mesh_offset(vm: &mut Vm<'_>, a: ObjId) -> glam::Vec3 {
             0.0 => 1.0,
             s => s,
         };
-        // A mesh whose origin is not at its feet (a gargoyle's is at its middle) is set down on its lowest bone.
-        let bottom = get(vm, a, "Mesh").as_obj().map_or(0.0, |m| anim::rest_bottom(vm, m)) * scale;
+        // As the original: the mesh drops by the collision height and keeps the height of its origin (the vertical part
+        // of the mesh origin is not taken off), so a gargoyle modelled with its origin at its middle stands on its shelf
+        // and a knight mesh that carries pieces far below its feet is not lifted by them.
+        let keep = get(vm, a, "Mesh").as_obj().map_or(0.0, |m| anim::origin_drop(vm, m)) * scale;
         let height = get(vm, a, "CollisionHeight").as_float();
-        offset.z -= if bottom.abs() > 15.0 { height + bottom } else { height };
+        offset.z -= height - keep;
         if get(vm, a, "Physics").as_byte() != 0 {
             offset.z -= 5.0;
         }
@@ -1644,18 +1681,8 @@ fn update_physics_volume_now(vm: &mut Vm<'_>, a: ObjId) {
         let hulls = build_volume_hulls(vm);
         world(vm).volume_hulls = Some(hulls);
     }
-    let p = vec_of(&get(vm, a, "Location"));
-    let mut best: Option<(i32, ObjId)> = None;
-    if let Some(hulls) = &world(vm).volume_hulls {
-        for h in hulls {
-            if p.cmplt(h.lo).any() || p.cmpgt(h.hi).any() || best.is_some_and(|(pr, _)| pr > h.priority) {
-                continue;
-            }
-            if h.planes.iter().all(|(n, d)| n.dot(p) - d <= 0.5) {
-                best = Some((h.priority, h.actor));
-            }
-        }
-    }
+    let here = vec_of(&get(vm, a, "Location"));
+    let best = volume_holding(vm, here);
     let current = get(vm, a, "PhysicsVolume").as_obj();
     let new = match best {
         Some((_, v)) => Some(v),
@@ -1682,6 +1709,17 @@ fn update_physics_volume_now(vm: &mut Vm<'_>, a: ObjId) {
 
 /// The level's default physics volume (what an actor is in when no brush holds it).
 fn default_physics_volume(vm: &mut Vm<'_>) -> Option<ObjId> {
+    if let Some(v) = world(vm).default_volume
+        && !vm.db.objects.get(v).deleted
+    {
+        return Some(v);
+    }
+    let found = find_default_physics_volume(vm);
+    world(vm).default_volume = found;
+    found
+}
+
+fn find_default_physics_volume(vm: &mut Vm<'_>) -> Option<ObjId> {
     let class = vm.db.find("DefaultPhysicsVolume")?;
     let actors = world(vm).actors.clone();
     let found = actors.into_iter().find(|&a| !vm.db.objects.get(a).deleted && vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, class)));
@@ -1936,8 +1974,37 @@ fn build_collision(vm: &mut Vm<'_>, map: &Rc<Package>, model: Option<ObjRef>, ac
         let Some(Asset::Terrain(t)) = native_asset(map, i, &chain) else { continue };
         let (w, h) = (t.heightmap_x as usize, t.heightmap_y as usize);
         let v = |x: usize, y: usize| t.vertices.get(y * w + x).map(|p| Vec3::new(p.x, p.y, p.z));
+        // Holes (a tunnel's mouth cut into a hill) collide as little as they are drawn: one bit per heightmap
+        // cell, set where the quad is there (an empty bitmap keeps every quad).
+        let terrain_actor = vm.db.obj_for(map, i);
+        let visible: Vec<u32> = match get(vm, terrain_actor, "QuadVisibilityBitmap") {
+            Value::Array(bits) => bits.iter().map(|b| b.as_int() as u32).collect(),
+            _ => Vec::new(),
+        };
+        if crate::envc::var_os("HP3_TERRAIN_DEBUG").is_some() {
+            let hidden: u32 = visible.iter().map(|b| b.count_zeros()).sum();
+            eprintln!("terrain collision {i}: {w}x{h}, {} visibility words, {hidden} quads hidden", visible.len());
+            let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+            for y in 0..h.saturating_sub(1) {
+                for x in 0..w.saturating_sub(1) {
+                    let q = y * w + x;
+                    if !visible.is_empty() && visible.get(q / 32).is_some_and(|b| b & (1 << (q % 32)) == 0) && let Some(p) = v(x, y) {
+                        lo = lo.min(p);
+                        hi = hi.max(p);
+                    }
+                }
+            }
+            eprintln!("  hidden quads span {lo} .. {hi}");
+        }
+        let quad_there = |x: usize, y: usize| {
+            let q = y * w + x;
+            visible.is_empty() || visible.get(q / 32).is_some_and(|b| b & (1 << (q % 32)) != 0)
+        };
         for y in 0..h.saturating_sub(1) {
             for x in 0..w.saturating_sub(1) {
+                if !quad_there(x, y) {
+                    continue;
+                }
                 if let (Some(a0), Some(b0), Some(c0), Some(d0)) = (v(x, y), v(x + 1, y), v(x, y + 1), v(x + 1, y + 1)) {
                     col.add_triangle([a0, b0, d0], None);
                     col.add_triangle([a0, d0, c0], None);
@@ -2002,4 +2069,59 @@ pub(crate) mod envc {
             None => Err(std::env::VarError::NotPresent),
         }
     }
+}
+
+/// The highest priority physics volume whose brush holds the point (none when only the level's default does).
+fn volume_holding(vm: &mut Vm<'_>, p: glam::Vec3) -> Option<(i32, ObjId)> {
+    if world(vm).volume_hulls.is_none() {
+        let hulls = build_volume_hulls(vm);
+        world(vm).volume_hulls = Some(hulls);
+    }
+    let mut best: Option<(i32, ObjId)> = None;
+    if let Some(hulls) = &world(vm).volume_hulls {
+        for h in hulls {
+            if p.cmplt(h.lo).any() || p.cmpgt(h.hi).any() || best.is_some_and(|(pr, _)| pr > h.priority) {
+                continue;
+            }
+            if h.planes.iter().all(|(n, d)| n.dot(p) - d <= 0.5) {
+                best = Some((h.priority, h.actor));
+            }
+        }
+    }
+    best
+}
+
+/// Keeps a pawn's controller in the volume its own place is in (the hero's script reads the controller's volume for the
+/// slide's gravity and jumps; the original updates every actor's volume when it moves, silently for a controller).
+pub fn update_controller_volume(vm: &mut Vm<'_>, c: ObjId) {
+    let mut p = vec_of(&get(vm, c, "Location"));
+    // A controller whose place was never set is where its pawn is.
+    if p == glam::Vec3::ZERO
+        && let Some(pawn) = get(vm, c, "Pawn").as_obj()
+    {
+        p = vec_of(&get(vm, pawn, "Location"));
+    }
+    // The volumes do not move: a controller still where it was last looked at, in the volume it was then put in, is done.
+    let key = p.to_array().map(f32::to_bits);
+    let current = get(vm, c, "PhysicsVolume").as_obj();
+    if world(vm).volume_checked.get(&c) == Some(&(key, current)) {
+        return;
+    }
+    let new = match volume_holding(vm, p) {
+        Some((_, v)) => Some(v),
+        None => default_physics_volume(vm),
+    };
+    if let Some(v) = new
+        && current != Some(v)
+    {
+        set(vm, c, "PhysicsVolume", Value::Object(Some(v)));
+    }
+    let after = get(vm, c, "PhysicsVolume").as_obj();
+    world(vm).volume_checked.insert(c, (key, after));
+}
+
+/// The physics volume (the highest priority one) whose brush holds the point, when one does: the level's default volume is not
+/// returned.
+pub fn physics_volume_holding(vm: &mut Vm<'_>, p: glam::Vec3) -> Option<ObjId> {
+    volume_holding(vm, p).map(|(_, v)| v)
 }

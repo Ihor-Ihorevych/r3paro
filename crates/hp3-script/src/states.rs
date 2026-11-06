@@ -63,6 +63,9 @@ impl Vm<'_> {
     pub fn event(&mut self, obj: ObjId, name: &str, args: &mut [Value]) -> VmResult<Value> {
         // Interned lookup: no lowercasing allocation for names already seen (events fire every tick).
         let n = self.db.names.intern(name);
+        if !self.disabled_events.is_empty() && self.disabled_events.get(&obj).is_some_and(|off| off.contains(&n)) {
+            return Ok(Value::Empty);
+        }
         match self.find_function(Some(obj), None, n) {
             Some(f) if !self.is_trivial(f) => self.invoke(f, Some(obj), args),
             _ => Ok(Value::Empty),
@@ -72,6 +75,9 @@ impl Vm<'_> {
     /// Moves an object to a state (`Name::NONE` leaves all states) and starts its state code at `label`.
     pub fn goto_state(&mut self, obj: ObjId, state_name: Name, label: Name) -> VmResult<()> {
         let Some(class) = self.db.objects.get(obj).class else { return Ok(()) };
+        // Any GotoState (even to no state, even to the same one) starts again with every event switched on: a
+        // Disable made before the initial state is entered is gone with it, as in the original.
+        self.disabled_events.remove(&obj);
         // `Auto` names the class's auto state.
         let state_name = if self.db.names.get(state_name).eq_ignore_ascii_case("Auto") {
             match self.auto_state(class) {
@@ -96,12 +102,23 @@ impl Vm<'_> {
             self.log.push(line);
         }
         if old != new_state {
-            if old.is_some() {
-                self.event(obj, "EndState", &mut [])?;
+            // The old state hears EndState once: a GotoState made from inside it does not send it again, and when
+            // EndState itself moved the object to another state, that move stands (this one is preempted), as in
+            // the original (COMC's countdown goes from FadeIn to DoCountdown in FadeIn's EndState).
+            if old.is_some() && !self.in_end_state.contains(&obj) {
+                let sets = self.state_sets.get(&obj).copied().unwrap_or(0);
+                self.in_end_state.insert(obj);
+                let r = self.event(obj, "EndState", &mut []);
+                self.in_end_state.remove(&obj);
+                r?;
+                if self.state_sets.get(&obj).copied().unwrap_or(0) != sets {
+                    return Ok(());
+                }
             }
             if let ObjKind::Instance { state, .. } = &mut self.db.objects.get_mut(obj).kind {
                 *state = new_state;
             }
+            *self.state_sets.entry(obj).or_insert(0) += 1;
             self.last_state.insert(obj, old);
         }
         self.state_changed.insert(obj);
@@ -189,9 +206,24 @@ pub fn register(vm: &mut Vm<'_>) {
         let last = this.and_then(|o| vm.last_state.get(&o).copied().flatten());
         Ok(Value::Name(last.map(|s| vm.db.get(s).name).unwrap_or(Name::NONE)))
     });
-    // Probe masks only filter which events reach script; every event is delivered for now.
-    vm.register("Object.Enable", |_vm, _this, _a| Ok(Value::Empty));
-    vm.register("Object.Disable", |_vm, _this, _a| Ok(Value::Empty));
+    // Enable / Disable switch an event of the object on and off (the probe mask of its state frame).
+    vm.register("Object.Enable", |vm, this, a| {
+        if let (Some(o), Some(n)) = (this, a.first().map(Value::as_name))
+            && let Some(off) = vm.disabled_events.get_mut(&o)
+        {
+            off.retain(|&x| x != n);
+        }
+        Ok(Value::Empty)
+    });
+    vm.register("Object.Disable", |vm, this, a| {
+        if let (Some(o), Some(n)) = (this, a.first().map(Value::as_name)) {
+            let off = vm.disabled_events.entry(o).or_default();
+            if !off.contains(&n) {
+                off.push(n);
+            }
+        }
+        Ok(Value::Empty)
+    });
     vm.register("Actor.Sleep", |vm, this, a| {
         let Some(o) = this else { return Err(VmError::Runtime("Sleep without an object".into())) };
         vm.latent.insert(o, Latent::Sleep(a.first().map(Value::as_float).unwrap_or(0.0)));

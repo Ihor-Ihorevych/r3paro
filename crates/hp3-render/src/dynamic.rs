@@ -11,41 +11,89 @@ use crate::gpu::{GpuScene, Renderer, DEPTH_FORMAT};
 use crate::meshes::MeshGeom;
 use crate::scene::{Camera, Vertex};
 
+/// Posed vertex bytes uploaded and actor draw calls made since the last `take_draw_counts` (for the perf log).
+static POSED_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ACTOR_DRAWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static UPLOAD_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// (posed vertex bytes, actor draw calls, nanoseconds spent uploading posed vertices) since the last call.
+pub fn take_draw_counts() -> (u64, u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (POSED_BYTES.swap(0, Relaxed), ACTOR_DRAWS.swap(0, Relaxed), UPLOAD_NS.swap(0, Relaxed))
+}
+
 const SHADER: &str = r#"
-struct Globals { view_proj: mat4x4<f32> };
-// The model matrix and the light reaching the actor (halved, like vertex colors).
-struct Model { model: mat4x4<f32>, light: vec4<f32> };
+struct Globals { view_proj: mat4x4<f32>, fog_color: vec4<f32>, fog: vec4<f32> };
+// How much of the picture's own color is left at a fragment (1 outside the fog): linear fog by depth from `fog.x` to `fog.y`.
+fn fog_factor(w: f32) -> f32 {
+    if (globals.fog.z < 0.5) { return 1.0; }
+    return clamp((globals.fog.y - 1.0 / w) / max(globals.fog.y - globals.fog.x, 1.0), 0.0, 1.0);
+}
+// One light as the original hands it to Direct3D: a = position and kind (0 point, 1 sun, 2 spot), b = direction and range,
+// c = diffuse color and cos(phi/2), d = attenuation 0, 1, 2 and cos(theta/2).
+struct Light { a: vec4<f32>, b: vec4<f32>, c: vec4<f32>, d: vec4<f32> };
+// The model matrix, the actor's ambient light (w = how many lights) and its lights.
+struct Model { model: mat4x4<f32>, ambient: vec4<f32>, lights: array<Light, 8> };
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
 @group(2) @binding(0) var<uniform> m: Model;
 
-struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) light: vec3<f32> };
 
+// Fixed-function style lighting per vertex (smooth, clamped to 0..1 before it modulates the texture, doubled).
 @vertex fn vs(@location(0) position: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) light_uv: vec2<f32>,
-              @location(3) color: vec3<f32>) -> VsOut {
+              @location(3) normal: vec3<f32>) -> VsOut {
     var o: VsOut;
-    o.pos = globals.view_proj * m.model * vec4<f32>(position, 1.0);
+    let wp = m.model * vec4<f32>(position, 1.0);
+    o.pos = globals.view_proj * wp;
     o.uv = uv;
+    let n = normalize((m.model * vec4<f32>(normal, 0.0)).xyz);
+    var lit = m.ambient.rgb;
+    let count = i32(m.ambient.w);
+    for (var i = 0; i < count; i = i + 1) {
+        let l = m.lights[i];
+        let kind = u32(l.a.w);
+        if (kind == 1u) {
+            lit = lit + l.c.rgb * max(dot(n, -l.b.xyz), 0.0);
+        } else {
+            let to = l.a.xyz - wp.xyz;
+            let d = length(to);
+            if (d < l.b.w && d > 0.001) {
+                let att = 1.0 / (l.d.x + l.d.y * d + l.d.z * d * d);
+                let dir = to / d;
+                var f = max(dot(n, dir), 0.0);
+                if (kind == 2u) {
+                    let rho = dot(-dir, l.b.xyz);
+                    if (rho <= l.c.w) { f = 0.0; } else if (rho < l.d.w) { f = f * (rho - l.c.w) / (l.d.w - l.c.w); }
+                }
+                lit = lit + l.c.rgb * f * att;
+            }
+        }
+    }
+    o.light = clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0));
     return o;
 }
 
 @fragment fn fs(i: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, i.uv);
     if (c.a < 0.5) { discard; }
-    return vec4<f32>(c.rgb * m.light.rgb * 2.0, 1.0);
+    return vec4<f32>(mix(globals.fog_color.rgb, c.rgb * i.light * 2.0, fog_factor(i.pos.w)), 1.0);
 }
 
 // Sections blended by their alpha (flame cards): nothing is cut out, the alpha goes to the blend.
 @fragment fn fs_blend(i: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, i.uv);
     if (c.a < 0.01) { discard; }
-    return vec4<f32>(c.rgb * m.light.rgb * 2.0, c.a);
+    return vec4<f32>(c.rgb * i.light * 2.0, c.a * fog_factor(i.pos.w));
 }
 "#;
 
 /// Stride of one model matrix in the instance buffer (uniform offsets must be 256-aligned).
-const STRIDE: u64 = 256;
+const STRIDE: u64 = 768;
+
+/// Bytes of one actor's uniform block: model matrix, ambient (with the light count) and eight lights.
+const MODEL_BYTES: u64 = 64 + 16 + 8 * 64;
 
 struct MeshDraw {
     /// The `MeshGeom` batch this draw came from.
@@ -55,12 +103,41 @@ struct MeshDraw {
     indices: wgpu::Buffer,
     count: u32,
     blend: MaterialBlend,
+    /// A skeletal mesh's vertices in its latest pose (empty until it is first posed): drawn from the frame's posed buffer.
+    posed: RefCell<Vec<u8>>,
+}
+
+/// One light on an actor, fitted the way the original's Direct3D renderer gives it to the hardware.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ShaderLight {
+    /// 0 point, 1 sunlight, 2 spotlight.
+    pub kind: u32,
+    pub position: glam::Vec3,
+    /// A sun's or spotlight's direction (the way the light shines).
+    pub direction: glam::Vec3,
+    /// Diffuse color (already faded and scaled).
+    pub color: glam::Vec3,
+    /// Direct3D attenuation factors: the light reaches a vertex at 1 / (a0 + a1 d + a2 d^2).
+    pub atten: [f32; 3],
+    pub range: f32,
+    /// Spotlight cones: cosine of half the outer and of half the inner angle.
+    pub cos_phi: f32,
+    pub cos_theta: f32,
+}
+
+/// What lights an actor: ambient light and up to eight lights.
+#[derive(Clone, Debug, Default)]
+pub struct ActorLight {
+    pub ambient: glam::Vec3,
+    pub lights: Vec<ShaderLight>,
 }
 
 /// A mesh uploaded once and drawn at any number of transforms.
 pub struct GpuMesh {
     draws: Vec<MeshDraw>,
-    local: Mat4,
+    pub local: Mat4,
+    /// The middle of the mesh's bounding box in its own space: what the original lights it from (its picture sphere's centre).
+    pub bounds_centre: glam::Vec3,
 }
 
 pub struct Dynamic {
@@ -71,18 +148,17 @@ pub struct Dynamic {
     model_layout: wgpu::BindGroupLayout,
     instances: RefCell<(wgpu::Buffer, wgpu::BindGroup, u64)>,
     images: RefCell<HashMap<ObjKey, wgpu::TextureView>>,
-    posed: RefCell<Posed>,
+    posed: RefCell<PosedRing>,
 }
 
-/// Posed vertices waiting for the next draw: all of a frame's go up in one write and are copied into each mesh's
-/// vertex buffer on the GPU. A write per mesh section costs little on Vulkan but a lot on OpenGL, where a frame with
-/// eighty characters took 25 ms in writes alone.
+/// The posed vertices of every skeletal mesh drawn in a frame go up in one write into one of three vertex buffers, used
+/// in turn, and the draws read their part of it. Writing into a buffer the GPU may still be drawing from (each mesh's
+/// own vertex buffer, as before) makes OpenGL drivers wait for the GPU: on a Mali phone that wait was 10 ms a frame.
 #[derive(Default)]
-struct Posed {
+struct PosedRing {
+    buffers: [Option<wgpu::Buffer>; 3],
+    next: usize,
     bytes: Vec<u8>,
-    /// (destination, offset in `bytes`, size)
-    copies: Vec<(wgpu::Buffer, u64, u64)>,
-    staging: Option<wgpu::Buffer>,
 }
 
 impl Dynamic {
@@ -100,7 +176,7 @@ impl Dynamic {
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: true,
-                    min_binding_size: wgpu::BufferSize::new(80),
+                    min_binding_size: wgpu::BufferSize::new(MODEL_BYTES),
                 },
                 count: None,
             }],
@@ -167,7 +243,7 @@ impl Dynamic {
             layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &buffer, offset: 0, size: wgpu::BufferSize::new(80) }),
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &buffer, offset: 0, size: wgpu::BufferSize::new(MODEL_BYTES) }),
             }],
         });
         (buffer, bind)
@@ -206,58 +282,80 @@ impl Dynamic {
                 contents: bytemuck::cast_slice(&b.indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
-            draws.push(MeshDraw { batch: bi, bind, vertices, indices, count: b.indices.len() as u32, blend: b.blend });
+            draws.push(MeshDraw { batch: bi, bind, vertices, indices, count: b.indices.len() as u32, blend: b.blend, posed: RefCell::default() });
         }
-        GpuMesh { draws, local: geom.local }
+        let (mut lo, mut hi) = (glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN));
+        for v in geom.batches.iter().flat_map(|b| b.vertices.iter()) {
+            let p = glam::Vec3::from(v.position);
+            lo = lo.min(p);
+            hi = hi.max(p);
+        }
+        let bounds_centre = if lo.x <= hi.x { (lo + hi) * 0.5 } else { glam::Vec3::ZERO };
+        GpuMesh { draws, local: geom.local, bounds_centre }
     }
 
     /// Moves an uploaded skeletal mesh's vertices to posed `points` (indexed like the mesh's points), from the next draw on.
     pub fn write_points(&self, _r: &Renderer, mesh: &GpuMesh, geom: &MeshGeom, points: &[glam::Vec3]) {
-        let mut posed = self.posed.borrow_mut();
+        let normals = crate::meshes::point_normals(geom, points);
         for d in &mesh.draws {
             let Some(b) = geom.batches.get(d.batch) else { continue };
             if b.points.len() != b.vertices.len() {
                 continue;
             }
-            let start = posed.bytes.len() as u64;
+            let mut out = d.posed.borrow_mut();
+            out.clear();
+            out.reserve(b.vertices.len() * std::mem::size_of::<Vertex>());
             for (v, &p) in b.vertices.iter().zip(&b.points) {
-                let v = Vertex { position: points.get(p as usize).map(|p| p.to_array()).unwrap_or(v.position), ..*v };
-                posed.bytes.extend_from_slice(bytemuck::bytes_of(&v));
-            }
-            let size = posed.bytes.len() as u64 - start;
-            if size > 0 {
-                posed.copies.push((d.vertices.clone(), start, size));
+                let normal = normals.get(p as usize).copied().unwrap_or(glam::Vec3::Z);
+                let v = Vertex { position: points.get(p as usize).map(|p| p.to_array()).unwrap_or(v.position), color: normal.to_array(), ..*v };
+                out.extend_from_slice(bytemuck::bytes_of(&v));
             }
         }
     }
 
-    /// Sends the posed vertices written since the last draw: one write into a staging buffer, then a copy into each
-    /// mesh, submitted ahead of the frame's commands.
-    fn flush_posed(&self, r: &Renderer) {
-        let mut posed = self.posed.borrow_mut();
-        if posed.copies.is_empty() {
-            posed.bytes.clear();
-            return;
+    /// Puts the posed vertices of this frame's meshes into the next buffer of the ring with one write. Returns the buffer and,
+    /// for each mesh and each of its draws, the part of the buffer holding that draw's vertices (None: the draw uses the
+    /// mesh's own vertex buffer).
+    fn upload_posed(&self, r: &Renderer, meshes: &[(&GpuMesh, Mat4, ActorLight)]) -> (Option<wgpu::Buffer>, Vec<Vec<Option<(u64, u64)>>>) {
+        let mut ring = self.posed.borrow_mut();
+        let PosedRing { buffers, next, bytes } = &mut *ring;
+        bytes.clear();
+        let mut parts = Vec::with_capacity(meshes.len());
+        for (mesh, _, _) in meshes {
+            let mut mine = Vec::with_capacity(mesh.draws.len());
+            for d in &mesh.draws {
+                let posed = d.posed.borrow();
+                if posed.is_empty() {
+                    mine.push(None);
+                } else {
+                    let start = bytes.len() as u64;
+                    bytes.extend_from_slice(&posed);
+                    mine.push(Some((start, posed.len() as u64)));
+                }
+            }
+            parts.push(mine);
         }
-        let needed = (posed.bytes.len() as u64).next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
-        if posed.staging.as_ref().is_none_or(|s| s.size() < needed) {
-            posed.staging = Some(r.device.create_buffer(&wgpu::BufferDescriptor {
+        if bytes.is_empty() {
+            return (None, parts);
+        }
+        let started = std::time::Instant::now();
+        let needed = (bytes.len() as u64).next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
+        bytes.resize(needed as usize, 0);
+        let slot = *next;
+        *next = (slot + 1) % buffers.len();
+        if buffers[slot].as_ref().is_none_or(|b| b.size() < needed) {
+            buffers[slot] = Some(r.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("posed vertices"),
                 size: needed.next_power_of_two().max(1 << 16),
-                usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }));
         }
-        posed.bytes.resize(needed as usize, 0);
-        let Posed { bytes, copies, staging } = &mut *posed;
-        let staging = staging.as_ref().expect("made above");
-        r.queue.write_buffer(staging, 0, bytes);
-        let mut encoder = r.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("posed vertices") });
-        for (dst, offset, size) in copies.drain(..) {
-            encoder.copy_buffer_to_buffer(staging, offset, &dst, 0, size);
-        }
-        r.queue.submit([encoder.finish()]);
-        bytes.clear();
+        let buffer = buffers[slot].clone().expect("made above");
+        r.queue.write_buffer(&buffer, 0, bytes);
+        POSED_BYTES.fetch_add(needed, std::sync::atomic::Ordering::Relaxed);
+        UPLOAD_NS.fetch_add(started.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        (Some(buffer), parts)
     }
 
     /// Draws the static scene and the meshes at their transforms (actor space to world) in one pass.
@@ -265,7 +363,7 @@ impl Dynamic {
         &self,
         r: &Renderer,
         scene: &GpuScene,
-        meshes: &[(&GpuMesh, Mat4, glam::Vec3)],
+        meshes: &[(&GpuMesh, Mat4, ActorLight)],
         camera: &Camera,
         color: &wgpu::TextureView,
         depth: &wgpu::TextureView,
@@ -280,14 +378,14 @@ impl Dynamic {
         &self,
         r: &Renderer,
         scene: &GpuScene,
-        meshes: &[(&GpuMesh, Mat4, glam::Vec3)],
+        meshes: &[(&GpuMesh, Mat4, ActorLight)],
         particles: Option<(&crate::particles::ParticleRenderer, &crate::particles::ParticleDraw)>,
         camera: &Camera,
         color: &wgpu::TextureView,
         depth: &wgpu::TextureView,
         aspect: f32,
     ) -> wgpu::CommandBuffer {
-        self.flush_posed(r);
+        let (posed_buffer, posed_parts) = self.upload_posed(r, meshes);
         {
             let mut inst = self.instances.borrow_mut();
             if (meshes.len() as u64) > inst.2 {
@@ -300,7 +398,18 @@ impl Dynamic {
                 let m = (*world * mesh.local).to_cols_array();
                 let off = i * STRIDE as usize;
                 data[off..off + 64].copy_from_slice(bytemuck::cast_slice(&m));
-                data[off + 64..off + 80].copy_from_slice(bytemuck::cast_slice(&light.extend(1.0).to_array()));
+                let n = light.lights.len().min(8);
+                data[off + 64..off + 80].copy_from_slice(bytemuck::cast_slice(&light.ambient.extend(n as f32).to_array()));
+                for (k, l) in light.lights.iter().take(8).enumerate() {
+                    let at = off + 80 + k * 64;
+                    let rows: [[f32; 4]; 4] = [
+                        [l.position.x, l.position.y, l.position.z, l.kind as f32],
+                        [l.direction.x, l.direction.y, l.direction.z, l.range],
+                        [l.color.x, l.color.y, l.color.z, l.cos_phi],
+                        [l.atten[0], l.atten[1], l.atten[2], l.cos_theta],
+                    ];
+                    data[at..at + 64].copy_from_slice(bytemuck::cast_slice(&rows));
+                }
             }
             if !data.is_empty() {
                 r.queue.write_buffer(&inst.0, 0, &data);
@@ -312,11 +421,18 @@ impl Dynamic {
                 pass.set_pipeline(pipeline);
                 for (i, (mesh, _, _)) in meshes.iter().enumerate() {
                     pass.set_bind_group(2, &inst.1, &[(i as u64 * STRIDE) as u32]);
-                    for d in mesh.draws.iter().filter(|d| (d.blend == MaterialBlend::Cutout && blend == MaterialBlend::Opaque) || d.blend == blend) {
+                    for (k, d) in mesh.draws.iter().enumerate() {
+                        if !((d.blend == MaterialBlend::Cutout && blend == MaterialBlend::Opaque) || d.blend == blend) {
+                            continue;
+                        }
                         pass.set_bind_group(1, &d.bind, &[]);
-                        pass.set_vertex_buffer(0, d.vertices.slice(..));
+                        match (&posed_buffer, posed_parts[i][k]) {
+                            (Some(buffer), Some((start, size))) => pass.set_vertex_buffer(0, buffer.slice(start..start + size)),
+                            _ => pass.set_vertex_buffer(0, d.vertices.slice(..)),
+                        }
                         pass.set_index_buffer(d.indices.slice(..), wgpu::IndexFormat::Uint32);
                         pass.draw_indexed(0..d.count, 0, 0..1);
+                        ACTOR_DRAWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
             }

@@ -3,7 +3,7 @@
 //! - `classes <HP3 folder> [class]`: loads every script class, builds its defaults and reports problems; with a
 //!   class name, prints that class's properties and default values.
 
-mod casttest;
+use hp3_world::casttest;
 mod itemcheck;
 mod langcheck;
 mod mounttest;
@@ -341,6 +341,23 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             }
         }
     }
+    // HP3_TAGS=<text>: lists the actors whose tag contains the text (class, place, collision flags).
+    if let Ok(text) = std::env::var("HP3_TAGS") {
+        for a in hp3_world::world(&mut vm).actors.clone() {
+            let tag = hp3_world::get(&mut vm, a, "Tag").as_name();
+            let tag = vm.db.names.get(tag).to_string();
+            if tag.to_lowercase().contains(&text.to_lowercase()) {
+                let class = vm.db.objects.get(a).class.map(|c| vm.db.names.get(vm.db.get(c).name).to_string()).unwrap_or_default();
+                let at = hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "Location"));
+                println!("tag {tag}: {} [{class}] at {at}", hp3_script::natives::object_path(&vm, a));
+                if class == "KWSlideJump" {
+                    let dest = hp3_world::get(&mut vm, a, "JumpDest").as_obj().map(|d| hp3_script::natives::object_path(&vm, d));
+                    let want = hp3_world::get(&mut vm, a, "TagOfJumpDest").as_name();
+                    println!("  jump dest {dest:?} wants tag {}", vm.db.names.get(want));
+                }
+            }
+        }
+    }
     // HP3_PROBE_Z=x,y,z_top,z_bottom: drops a line from the top to the bottom there, printing each surface it meets.
     if let Ok(spec) = std::env::var("HP3_PROBE_Z") {
         let v: Vec<f32> = spec.split(',').filter_map(|p| p.trim().parse().ok()).collect();
@@ -350,6 +367,32 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                 let Some(h) = hp3_world::world(&mut vm).collision.trace_static(glam::Vec3::new(v[0], v[1], top), glam::Vec3::new(v[0], v[1], v[3]), glam::Vec3::ZERO) else { break };
                 println!("surface z {:.1} actor {:?}", h.location.z, h.actor.map(|o| hp3_script::natives::object_path(&vm, o)));
                 top = h.location.z - 0.5;
+            }
+        }
+    }
+    // HP3_PROBE_PATH=x,y,z;x,y,z;...: sweeps a box (HP3_PROBE_EXT=x,y,z, default the hippogriff's 30,30,60) as the player
+    // from each point to the next, printing every blocker on the way (to find invisible walls along a flight).
+    if let Ok(spec) = std::env::var("HP3_PROBE_PATH") {
+        let ext: Vec<f32> = std::env::var("HP3_PROBE_EXT").unwrap_or("30,30,60".into()).split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        let ext = glam::Vec3::new(ext[0], ext[1], ext[2]);
+        let pts: Vec<glam::Vec3> = spec
+            .split(';')
+            .filter_map(|p| {
+                let v: Vec<f32> = p.split(',').filter_map(|c| c.trim().parse().ok()).collect();
+                (v.len() == 3).then(|| glam::Vec3::new(v[0], v[1], v[2]))
+            })
+            .collect();
+        for w in pts.windows(2) {
+            let (mut from, to) = (w[0], w[1]);
+            println!("path {} -> {}", w[0], w[1]);
+            for _ in 0..20 {
+                let Some(h) = hp3_world::world(&mut vm).collision.trace_as(true, from, to, ext, None) else { break };
+                println!("  blocked at {} normal {} actor {:?}", h.location, h.normal, h.actor.map(|o| hp3_script::natives::object_path(&vm, o)));
+                let dir = (to - from).normalize_or_zero();
+                from = h.location + dir * 40.0;
+                if (to - from).dot(dir) <= 0.0 {
+                    break;
+                }
             }
         }
     }
@@ -412,6 +455,40 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
         }
         if frame == trigger_at {
             trigger_tag(&mut vm);
+        }
+        // HP3_TRACE_ACTORS=sx,sy,sz,ex,ey,ez@<tick>: what the player's spell cursor's TraceActors (extent 1) meets on that line.
+        if let Some((line, tick)) = std::env::var("HP3_TRACE_ACTORS").ok().as_deref().and_then(|s| s.split_once('@')).map(|(a, b)| (a.to_string(), b.parse::<u32>().unwrap_or(0)))
+            && tick == frame
+        {
+            let v: Vec<f32> = line.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            let cursor = hp3_world::world(&mut vm).player.and_then(|pc| hp3_world::get(&mut vm, pc, "Cursor").as_obj());
+            if let (6, Some(c)) = (v.len(), cursor) {
+                let (s, e) = (glam::Vec3::new(v[0], v[1], v[2]), glam::Vec3::new(v[3], v[4], v[5]));
+                for (name, time, at) in hp3_world::natives::debug_trace_actors(&mut vm, c, s, e, glam::Vec3::ONE) {
+                    println!("traceactors {frame}: {name} at {time:.3} {at}");
+                }
+            }
+        }
+        // HP3_DYN_LIGHTS=<every>: prints the live dynamic lights (bDynamicLight actors with a LightType) every so many ticks.
+        if std::env::var("HP3_DYN_LIGHTS").ok().and_then(|v| v.parse::<u32>().ok()).is_some_and(|e| e > 0 && frame % e == 0) {
+            for a in hp3_world::world(&mut vm).actors.clone() {
+                if vm.db.objects.get(a).deleted || hp3_world::get(&mut vm, a, "LightType").as_byte() == 0 || !hp3_world::get(&mut vm, a, "bDynamicLight").as_bool() {
+                    continue;
+                }
+                let path = hp3_script::natives::object_path(&mut vm, a);
+                let at = hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "Location"));
+                let b = |vm: &mut hp3_script::Vm<'_>, n: &str| hp3_world::get(vm, a, n).as_byte();
+                println!(
+                    "dynlight {frame} {path} at {at} type {} effect {} hue {} sat {} bright {} radius {} hidden {:?}",
+                    b(&mut vm, "LightType"),
+                    b(&mut vm, "LightEffect"),
+                    b(&mut vm, "LightHue"),
+                    b(&mut vm, "LightSaturation"),
+                    hp3_world::get(&mut vm, a, "LightBrightness").as_float(),
+                    hp3_world::get(&mut vm, a, "LightRadius").as_float(),
+                    hp3_world::get(&mut vm, a, "bHidden")
+                );
+            }
         }
         // HP3_WATCH=<name>,<name>@<every>: prints those actors' place, turn and state every so many ticks.
         if let Ok(spec) = std::env::var("HP3_WATCH")
@@ -584,6 +661,30 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                     hp3_world::set(&mut vm, pawn, "DesiredRotation", r.clone());
                     hp3_world::set(&mut vm, pc, "Rotation", r);
                 }
+            }
+        }
+        // HP3_PLAYER_TO=<actor name>@<tick>: puts the player's pawn at that actor (a slide volume's or trigger's middle).
+        if let Ok(spec) = std::env::var("HP3_PLAYER_TO")
+            && let Some((name, tick)) = spec.rsplit_once('@')
+            && tick.parse::<u32>() == Ok(frame)
+        {
+            let pawn = hp3_world::world(&mut vm).player.and_then(|pc| hp3_world::get(&mut vm, pc, "Pawn").as_obj());
+            let actors = hp3_world::world(&mut vm).actors.clone();
+            let target = actors.into_iter().find(|&a| hp3_script::natives::object_path(&vm, a).ends_with(&format!(".{name}")));
+            if let (Some(pawn), Some(t)) = (pawn, target) {
+                let at = hp3_world::physics::vec(&hp3_world::get(&mut vm, t, "Location"));
+                println!("player to {name} at {at}");
+                hp3_world::physics::far_move(&mut vm, pawn, at + glam::Vec3::Z * 40.0, false, false);
+            }
+        }
+        // HP3_SWITCH=<0|1|2|next>@<tick>[,...]: switches the played character (Harry, Ron, Hermione, or the next one), as the
+        // app's 1/2/3/C keys do.
+        for spec in std::env::var("HP3_SWITCH").unwrap_or_default().split(',') {
+            if let Some((which, tick)) = spec.split_once('@')
+                && tick.parse::<u32>() == Ok(frame)
+            {
+                let w = which.parse::<usize>().ok();
+                println!("switch {which} at {frame}: {}", hp3_world::character_switch::switch(&mut vm, w));
             }
         }
         // HP3_TRAVEL=<url>@<tick>: asks the level to switch to <url> with the player's items, as a ServerTravel does.
@@ -828,6 +929,22 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
         "{map}: {actors} actors ({spawned} spawned), begin-play {load_time:?} ({steps_after_load} statements),          {frames} ticks {tick_time:?} ({} statements)",
         vm.steps - steps_after_load
     );
+    // HP3_LIST_LIGHTS=1: the lit actors of the world when the run ends, and which of them are dynamic lights.
+    if std::env::var_os("HP3_LIST_LIGHTS").is_some() {
+        let mut counts: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+        for a in hp3_world::world(&mut vm).actors.clone() {
+            if vm.db.objects.get(a).deleted || hp3_world::get(&mut vm, a, "LightType").as_byte() == 0 {
+                continue;
+            }
+            let class = vm.db.objects.get(a).class.map(|c| vm.db.names.get(vm.db.get(c).name).to_string()).unwrap_or_default();
+            let e = counts.entry(class).or_default();
+            e.0 += 1;
+            e.1 += hp3_world::get(&mut vm, a, "bDynamicLight").as_bool() as usize;
+        }
+        for (class, (n, dynamic)) in counts {
+            println!("lit actors: {class}: {n} ({dynamic} dynamic)");
+        }
+    }
     if let Some(pc) = hp3_world::world(&mut vm).player {
         let class = vm.db.objects.get(pc).class.map(|c| vm.db.names.get(vm.db.get(c).name).to_string());
         let pawn = hp3_world::get(&mut vm, pc, "Pawn").as_obj();

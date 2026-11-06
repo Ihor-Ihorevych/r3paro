@@ -117,6 +117,59 @@ impl<'s> Loader<'s> {
         img
     }
 
+    /// A `Shader` with an `Opacity` map is blended by that map (the Spongify rug: a spiral and a frame show, the rest is see-through):
+    /// its diffuse picture with the opacity map as alpha (the map's own alpha when it has one, else its brightness), kept in the
+    /// image cache under an index no export has. Returns where to find that image.
+    pub fn shader_with_opacity(&self, pkg: &Rc<Package>, r: ObjRef) -> Option<(Rc<Package>, usize)> {
+        let (mut p, mut i) = self.set.resolve(pkg, r)?;
+        for _ in 0..16 {
+            let chain = self.set.export_chain(&p, i);
+            if chain.iter().any(|c| c.eq_ignore_ascii_case("Texture")) {
+                return None;
+            }
+            let kind = chain.first().map(String::as_str).unwrap_or("");
+            let (pair, next) = self
+                .with_tags(&p, i, |tags, _| {
+                    if kind.eq_ignore_ascii_case("Shader") {
+                        let opacity = props::find(&p, tags, "Opacity", 0).and_then(|t| t.as_obj());
+                        let diffuse = props::find(&p, tags, "Diffuse", 0).and_then(|t| t.as_obj());
+                        if let (Some(o), Some(d)) = (opacity, diffuse) {
+                            return (Some((o, d)), None);
+                        }
+                    }
+                    let next = ["Diffuse", "Material"].iter().find_map(|n| props::find(&p, tags, n, 0).and_then(|t| t.as_obj()));
+                    (None, next)
+                })
+                .unwrap_or((None, None));
+            if let Some((o, d)) = pair {
+                let (dp, di) = self.base_texture(&p, d)?;
+                let (op, oi) = self.base_texture(&p, o)?;
+                let synthetic = (1usize << 40) | (oi << 20) | di;
+                if self.images.borrow().get(&key(&dp, synthetic)).is_none() {
+                    let diffuse = self.decode_image_alpha(&dp, di, true)?;
+                    let map = self.decode_image_alpha(&op, oi, true)?;
+                    let has_alpha = map.rgba.chunks_exact(4).any(|px| px[3] != 255);
+                    let mut rgba = diffuse.rgba.clone();
+                    for y in 0..diffuse.height as usize {
+                        for x in 0..diffuse.width as usize {
+                            let (mx, my) = (x * map.width as usize / diffuse.width as usize, y * map.height as usize / diffuse.height as usize);
+                            let m = &map.rgba[(my * map.width as usize + mx) * 4..][..4];
+                            let a = if has_alpha { m[3] } else { ((m[0] as u32 * 299 + m[1] as u32 * 587 + m[2] as u32 * 114) / 1000) as u8 };
+                            rgba[(y * diffuse.width as usize + x) * 4 + 3] = a;
+                        }
+                    }
+                    let image = Image { width: diffuse.width, height: diffuse.height, rgba, masked: false, translucent: true };
+                    self.images.borrow_mut().insert(key(&dp, synthetic), Some(Rc::new(image)));
+                }
+                return Some((dp, synthetic));
+            }
+            let (np, ni) = self.set.resolve(&p, next?)?;
+            p = np;
+            i = ni;
+        }
+        None
+    }
+
     /// How the wrappers on the way from a material reference down to its texture use the texture's alpha channel:
     /// a `FinalBlend` with `AlphaTest` (Harry's hair) or a `Shader` with masked output cuts the surface out; a `Shader`
     /// with an `Opacity` map blends it (the salamanders' flame cards); translucent output adds it.
@@ -257,6 +310,33 @@ impl<'s> Loader<'s> {
         Some(Image { width: w as u32, height: h as u32, rgba, masked, translucent: translucent && !masked })
     }
 
+    /// A terrain density map as `(width, height, one weight per texel)`: the alpha channel of an RGBA texture, the
+    /// palette's red of a palettised one, the value of a gray one. No texel is treated as transparent.
+    pub fn density_map(&self, pkg: &Rc<Package>, index: usize) -> Option<(usize, usize, Vec<u8>)> {
+        let (format, palette_ref) = self.with_tags(pkg, index, |tags, _| {
+            (props::find(pkg, tags, "Format", 0).and_then(|t| t.as_u8()).unwrap_or(0), props::find(pkg, tags, "Palette", 0).and_then(|t| t.as_obj()))
+        })?;
+        let format = Format::from_u8(format)?;
+        let Asset::Texture(tex) = &*self.asset(pkg, index)? else { return None };
+        let mip = tex.mips.first()?;
+        let data = pkg.data.get(mip.data_offset..mip.data_offset + mip.data_len)?;
+        let (w, h) = (mip.width as usize, mip.height as usize);
+        let weights = match format {
+            Format::L8 => data.get(..w * h)?.to_vec(),
+            Format::P8 => {
+                let (ppkg, pi) = self.set.resolve(pkg, palette_ref?)?;
+                let Asset::Palette(p) = &*self.asset(&ppkg, pi)? else { return None };
+                data.get(..w * h)?.iter().map(|&i| p.colors.get(i as usize).map_or(0, |c| c.r)).collect()
+            }
+            _ => {
+                let rgba = texture::decode_rgba(format, w, h, data, None)?;
+                let has_alpha = matches!(format, Format::Rgba8 | Format::Dxt3 | Format::Dxt5);
+                rgba.chunks_exact(4).map(|px| if has_alpha { px[3] } else { px[0] }).collect()
+            }
+        };
+        Some((w, h, weights))
+    }
+
     /// A terrain alpha map's weights, spread to all four channels: the texture's alpha channel when its format
     /// has one, its red channel otherwise.
     pub fn weight_image(&self, pkg: &Rc<Package>, index: usize) -> Option<Image> {
@@ -297,7 +377,37 @@ impl<'s> Loader<'s> {
             if !procedural && chain.iter().any(|c| c.eq_ignore_ascii_case("Texture")) {
                 return Some((p, i));
             }
+            // A `MaterialSwitch` shows `Materials[Current]` (its own `Material` is only filled in at run time), and a
+            // `MaterialSequence` starts with its first item's material.
+            let off = std::env::var_os("HP3_NO_SWITCH").is_some();
+            let switch = !off && chain.iter().any(|c| c.eq_ignore_ascii_case("MaterialSwitch"));
+            let sequence = !off && chain.iter().any(|c| c.eq_ignore_ascii_case("MaterialSequence"));
             let next = self.with_tags(&p, i, |tags, _| {
+                if switch
+                    && let Some(t) = props::find(&p, tags, "Materials", 0)
+                    && t.ty == TagType::Array
+                {
+                    let mut rd = Reader::new(t.data);
+                    let count = rd.ci().ok()?.max(0) as usize;
+                    let items: Vec<i32> = (0..count).filter_map(|_| rd.ci().ok()).collect();
+                    let current = props::find(&p, tags, "Current", 0).and_then(|c| c.as_i32()).unwrap_or(0).max(0) as usize;
+                    if let Some(v) = items.get(current).copied().filter(|&v| v != 0).or_else(|| items.iter().copied().find(|&v| v != 0)) {
+                        return Some(ObjRef(v));
+                    }
+                }
+                if sequence
+                    && let Some(t) = props::find(&p, tags, "SequenceItems", 0)
+                    && t.ty == TagType::Array
+                {
+                    // Items are structs whose first member is the material.
+                    let mut rd = Reader::new(t.data);
+                    if rd.ci().ok()? > 0
+                        && let Ok(v) = rd.ci()
+                        && v != 0
+                    {
+                        return Some(ObjRef(v));
+                    }
+                }
                 for name in ["SourceTexture", "Diffuse", "Material", "Material1", "Material2", "SelfIllumination", "Materials"] {
                     if let Some(t) = props::find(&p, tags, name, 0) {
                         match t.ty {

@@ -139,6 +139,13 @@ pub struct Vm<'s> {
     pub state_pc: HashMap<ObjId, (StructId, usize)>,
     /// Objects that changed state while their state code ran.
     pub(crate) state_changed: crate::fx::FxHashSet<ObjId>,
+    /// Objects whose EndState is running, and how many times each object has had its state set (so a GotoState
+    /// can tell that the EndState it sent moved the object on).
+    pub(crate) in_end_state: crate::fx::FxHashSet<ObjId>,
+    /// Events a script switched off for an object (`Disable('Tick')`): the engine does not raise them until the script
+    /// switches them on again or the object enters a state (which starts with every event on).
+    pub(crate) disabled_events: HashMap<ObjId, Vec<Name>>,
+    pub(crate) state_sets: HashMap<ObjId, u32>,
     /// Statement being executed, for iterators to find their loop body.
     current_pc: usize,
     /// Script offset of the statement being run (for messages).
@@ -197,6 +204,9 @@ impl<'s> Vm<'s> {
             latent: HashMap::default(),
             state_pc: HashMap::default(),
             state_changed: Default::default(),
+            in_end_state: Default::default(),
+            disabled_events: HashMap::default(),
+            state_sets: HashMap::default(),
             current_pc: 0,
             current_offset: 0,
             ext: None,

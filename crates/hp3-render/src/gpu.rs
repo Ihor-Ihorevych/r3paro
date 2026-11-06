@@ -8,7 +8,13 @@ use wgpu::util::DeviceExt;
 use crate::scene::{Camera, Scene, Vertex};
 
 const SHADER: &str = r#"
-struct Globals { view_proj: mat4x4<f32> };
+// fog.w: how many dynamic lights follow; each is two vectors: position and radius, color and kind (1 = quadratic non-incidence).
+struct Globals { view_proj: mat4x4<f32>, fog_color: vec4<f32>, fog: vec4<f32>, lights: array<vec4<f32>, 8> };
+// How much of the picture's own color is left at a fragment (1 outside the fog): linear fog by depth from `fog.x` to `fog.y`.
+fn fog_factor(w: f32) -> f32 {
+    if (globals.fog.z < 0.5) { return 1.0; }
+    return clamp((globals.fog.y - 1.0 / w) / max(globals.fog.y - globals.fog.x, 1.0), 0.0, 1.0);
+}
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
@@ -20,6 +26,7 @@ struct VsOut {
     @location(0) uv: vec2<f32>,
     @location(1) light_uv: vec2<f32>,
     @location(2) color: vec3<f32>,
+    @location(3) world: vec3<f32>,
 };
 
 @vertex fn vs(@location(0) position: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) light_uv: vec2<f32>,
@@ -29,31 +36,95 @@ struct VsOut {
     o.uv = uv;
     o.light_uv = light_uv;
     o.color = color;
+    o.world = position;
     return o;
+}
+
+// What the moving lights (a wand's glow, spells) add over the static lighting, times the texture. The face's normal comes
+// from the screen derivatives, turned to the viewer; a light lights only the side it is on. Walls take the original's
+// projected disc: the color dimmed by the light's distance from the plane, fading out to the edge of the disc the light's
+// sphere cuts from it. Static meshes (light_uv.x < 0) take a Direct3D point light: 1 / (8 d^2 / R^2) for the quadratic kind,
+// otherwise Unreal's curve, by the cosine, doubled by the modulate.
+fn moving_light(world: vec3<f32>, mesh: bool) -> vec3<f32> {
+    let count = i32(globals.fog.w);
+    if (count == 0) { return vec3<f32>(0.0); }
+    let n = normalize(cross(dpdx(world), dpdy(world)));
+    var sum = vec3<f32>(0.0);
+    for (var k = 0; k < count; k = k + 1) {
+        let a = globals.lights[k * 2];
+        let b = globals.lights[k * 2 + 1];
+        let to_light = a.xyz - world;
+        let r = a.w;
+        let d2 = dot(to_light, to_light);
+        if (d2 >= r * r) { continue; }
+        // The normal's sign from the derivatives depends on the screen's handedness: either way, the face lit is the light's side.
+        let h = abs(dot(to_light, n));
+        if (mesh) {
+            let d = sqrt(d2);
+            let cosine = h / max(d, 0.001);
+            var att = 0.0;
+            if (b.w > 0.5) {
+                att = min(r * r / max(8.0 * d2, 0.001), 1.0);
+            } else {
+                let x = d / r;
+                att = min((2.0 * x * x * x - 3.0 * x * x + 1.0) * 2.0, 1.0);
+            }
+            sum = sum + min(b.rgb * att * cosine, vec3<f32>(1.0)) * 2.0;
+        } else {
+            let disc = sqrt(max(r * r - h * h, 0.0));
+            let along = sqrt(max(d2 - h * h, 0.0));
+            let edge = max(1.0 - along / max(disc, 0.001), 0.0);
+            if (b.w > 0.5) {
+                sum = sum + min(b.rgb * sqrt(max(1.0 - h * h / (r * r), 0.0)), vec3<f32>(1.0)) * edge;
+            } else {
+                sum = sum + min(b.rgb * sqrt(max(1.0 - h / r, 0.0)), vec3<f32>(1.0)) * edge * 2.0;
+            }
+        }
+    }
+    return sum;
 }
 
 // Light is stored halved (vertex color and lightmap): doubled here, so surfaces can be lit beyond their texture.
 @fragment fn fs(i: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, i.uv);
     if (c.a < 0.5) { discard; }
-    let light = textureSample(lightmap, lsamp, i.light_uv).rgb * i.color * 4.0;
-    return vec4<f32>(c.rgb * light, 1.0);
+    let light = textureSample(lightmap, lsamp, i.light_uv).rgb * i.color * 4.0 + moving_light(i.world, i.light_uv.x < 0.0);
+    return vec4<f32>(mix(globals.fog_color.rgb, c.rgb * light, fog_factor(i.pos.w)), 1.0);
 }
 
 // Alpha-blended surfaces: lit like the others, covering what is below by their own alpha.
 @fragment fn fs_alpha(i: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, i.uv);
-    let light = textureSample(lightmap, lsamp, i.light_uv).rgb * i.color * 4.0;
-    return vec4<f32>(c.rgb * light, c.a);
+    let light = textureSample(lightmap, lsamp, i.light_uv).rgb * i.color * 4.0 + moving_light(i.world, i.light_uv.x < 0.0);
+    return vec4<f32>(c.rgb * light, c.a * fog_factor(i.pos.w));
 }
 
 // Terrain layers: lit by the vertex color, covering what is below by the alpha map in the lightmap slot.
 @fragment fn fs_blend(i: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, i.uv);
     let weight = textureSample(lightmap, lsamp, i.light_uv).r;
-    return vec4<f32>(c.rgb * i.color * 2.0, weight);
+    let light = i.color * 2.0 + moving_light(i.world, false);
+    return vec4<f32>(mix(globals.fog_color.rgb, c.rgb * light, fog_factor(i.pos.w)), weight);
 }
 "#;
+
+/// How many moving lights the level's surfaces take at once.
+pub const MAX_MOVING_LIGHTS: usize = 4;
+
+/// A light that moves or changes while the level runs (`bDynamicLight`): the level's surfaces take it each frame on top of
+/// their static lighting, the way the original adds a pass per such light.
+#[derive(Clone, Copy, Debug)]
+pub struct MovingLight {
+    pub position: glam::Vec3,
+    pub radius: f32,
+    /// The light's color now (brightness, LightType wave and level brightness applied).
+    pub color: glam::Vec3,
+    /// `LE_QuadraticNonIncidence`, which falls off by the square of the distance (the wand's glow and spells).
+    pub quadratic: bool,
+}
+
+/// Size of the globals uniform: view-projection, fog color, fog settings, and two vectors per moving light.
+const GLOBALS_FLOATS: usize = 24 + MAX_MOVING_LIGHTS * 8;
 
 /// Vertex buffer layout of `Vertex`.
 pub const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 4] =
@@ -73,6 +144,10 @@ pub struct Renderer {
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     clamp_sampler: wgpu::Sampler,
+    /// The distance fog of the next frame (set from the camera's zone).
+    fog: std::cell::Cell<Option<crate::scene::Fog>>,
+    /// The moving lights that light the level's surfaces in the next frame.
+    moving_lights: std::cell::Cell<[Option<MovingLight>; MAX_MOVING_LIGHTS]>,
     /// Lightmap of surfaces lit by their vertex colors: one texel at half, which the shader doubles to one.
     white_lightmap: wgpu::TextureView,
     pub color_format: wgpu::TextureFormat,
@@ -151,7 +226,7 @@ impl Renderer {
             label: Some("globals"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -326,6 +401,8 @@ impl Renderer {
             texture_layout,
             sampler,
             clamp_sampler,
+            fog: std::cell::Cell::new(None),
+            moving_lights: std::cell::Cell::new([None; MAX_MOVING_LIGHTS]),
             white_lightmap,
             color_format,
             adapter_info: {
@@ -409,7 +486,7 @@ impl Renderer {
         let d = &self.device;
         let globals = d.create_buffer(&wgpu::BufferDescriptor {
             label: Some("globals"),
-            size: 64,
+            size: (GLOBALS_FLOATS * 4) as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -453,7 +530,9 @@ impl Renderer {
                 contents: bytemuck::cast_slice(&batch.indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
-            let translucent = batch.texture.as_ref().and_then(|k| scene.images.get(k)).is_some_and(|i| i.translucent);
+            // A texture flagged as alpha-blended whose alpha is all or nothing (a cabinet with open sides, a fully opaque wall) is
+            // drawn as a cut-out instead: blended surfaces write no depth and are not sorted, so one cabinet showed through another.
+            let translucent = batch.texture.as_ref().and_then(|k| scene.images.get(k)).is_some_and(|i| i.translucent && (!mostly_binary_alpha(i) || std::env::var_os("HP3_NO_BINARY_ALPHA").is_some()));
             let pass = if batch.blend.is_some() { 1 } else if translucent { 2 } else { 0 };
             let pan = batch.pan.map(|p| (p, batch.vertices.clone()));
             draws.push(Draw { bind, vertices, indices, count: batch.indices.len() as u32, pass, sky: batch.sky, pan });
@@ -461,7 +540,7 @@ impl Renderer {
         // A second camera for the sky zone's view.
         let sky_globals = d.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sky globals"),
-            size: 64,
+            size: (GLOBALS_FLOATS * 4) as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -505,14 +584,36 @@ impl Renderer {
         opaque: impl FnOnce(&mut wgpu::RenderPass<'_>),
         blended: impl FnOnce(&mut wgpu::RenderPass<'_>),
     ) -> wgpu::CommandBuffer {
-        let view_proj = camera.view_proj(aspect);
-        self.queue.write_buffer(&scene.globals, 0, bytemuck::cast_slice(&view_proj.to_cols_array()));
+        let fog = self.fog.get();
+        let far = fog.map_or(65536.0, |f| f.end.clamp(64.0, 65536.0));
+        let view_proj = camera.view_proj_far(aspect, far);
+        let mut globals = [0.0f32; GLOBALS_FLOATS];
+        globals[..16].copy_from_slice(&view_proj.to_cols_array());
+        if let Some(f) = fog {
+            globals[16..19].copy_from_slice(&f.color.to_array());
+            globals[20..23].copy_from_slice(&[f.start, f.end, 1.0]);
+        }
+        let mut count = 0;
+        for l in self.moving_lights.get().iter().flatten() {
+            let at = 24 + count * 8;
+            globals[at..at + 4].copy_from_slice(&[l.position.x, l.position.y, l.position.z, l.radius]);
+            globals[at + 4..at + 8].copy_from_slice(&[l.color.x, l.color.y, l.color.z, if l.quadratic { 1.0 } else { 0.0 }]);
+            count += 1;
+        }
+        globals[23] = count as f32;
+        self.queue.write_buffer(&scene.globals, 0, bytemuck::cast_slice(&globals));
         let mut enc = self.device.create_command_encoder(&Default::default());
-        let clear = wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 });
+        let clear_color = match fog {
+            Some(f) if f.clear => f.color,
+            _ => glam::Vec3::ZERO,
+        };
+        let clear = wgpu::LoadOp::Clear(wgpu::Color { r: clear_color.x as f64, g: clear_color.y as f64, b: clear_color.z as f64, a: 1.0 });
         // The sky first: the level seen from the sky zone with the camera's rotation, behind everything.
         if let Some(sky) = scene.sky {
             let sky_camera = Camera { position: sky, ..*camera };
-            self.queue.write_buffer(&scene.sky_globals, 0, bytemuck::cast_slice(&sky_camera.view_proj(aspect).to_cols_array()));
+            let mut sky_globals = [0.0f32; GLOBALS_FLOATS];
+            sky_globals[..16].copy_from_slice(&sky_camera.view_proj(aspect).to_cols_array());
+            self.queue.write_buffer(&scene.sky_globals, 0, bytemuck::cast_slice(&sky_globals));
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("sky"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -647,6 +748,12 @@ impl Renderer {
     }
 }
 
+/// Whether nearly every pixel of an image is fully clear or fully solid (at most 3% partial alpha).
+fn mostly_binary_alpha(image: &hp3_assets::loader::Image) -> bool {
+    let partial = image.rgba.chunks_exact(4).filter(|p| p[3] > 8 && p[3] < 247).count();
+    partial * 100 <= image.rgba.len() / 4 * 3
+}
+
 fn upload_linear(device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32, rgba: &[u8]) -> wgpu::TextureView {
     let tex = device.create_texture_with_data(
         queue,
@@ -687,4 +794,20 @@ pub struct GpuScene {
     sky: Option<glam::Vec3>,
     sky_globals: wgpu::Buffer,
     sky_globals_bg: wgpu::BindGroup,
+}
+
+impl Renderer {
+    /// Sets the distance fog for the frames drawn from now on (`None` for none).
+    pub fn set_fog(&self, fog: Option<crate::scene::Fog>) {
+        self.fog.set(fog);
+    }
+
+    /// Sets the moving lights the level's surfaces take in the frames drawn from now on (the first `MAX_MOVING_LIGHTS`).
+    pub fn set_moving_lights(&self, lights: &[MovingLight]) {
+        let mut slots = [None; MAX_MOVING_LIGHTS];
+        for (slot, l) in slots.iter_mut().zip(lights) {
+            *slot = Some(*l);
+        }
+        self.moving_lights.set(slots);
+    }
 }
