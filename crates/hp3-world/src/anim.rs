@@ -88,6 +88,8 @@ pub struct MeshSkeleton {
 pub struct Animation {
     pub actors: HashMap<ObjId, ActorAnim>,
     sets: HashMap<ObjId, Option<Rc<AnimSet>>>,
+    /// The default set of each skeletal mesh (none when it has none): decoding the mesh to find it is not repeated.
+    mesh_sets: HashMap<ObjId, Option<Rc<AnimSet>>>,
     skeletons: HashMap<ObjId, Option<Rc<MeshSkeleton>>>,
     bone_maps: HashMap<(ObjId, usize), Rc<Vec<Option<usize>>>>,
     /// Actors attached to another actor's bone (lower-case bone name).
@@ -142,13 +144,24 @@ pub fn set_of(vm: &mut Vm<'_>, actor: ObjId) -> Option<Rc<AnimSet>> {
         return a.set.clone();
     }
     let mesh = get(vm, actor, "Mesh").as_obj()?;
-    let (pkg, index) = vm.db.objects.get(mesh).key.clone()?;
-    let p = vm.db.set.get(&pkg).ok()?;
-    let chain = vm.db.set.export_chain(&p, index);
-    let Some(Asset::SkeletalMesh(m)) = crate::native_asset(&p, index, &chain) else { return None };
-    let anim = vm.db.resolve_obj(&p, m.default_anim)?;
-    let s = load_set(vm, anim);
-    world(vm).anim.actors.entry(actor).or_default().set = s.clone();
+    let s = match world(vm).anim.mesh_sets.get(&mesh) {
+        Some(s) => s.clone(),
+        None => {
+            let s = (|| {
+                let (pkg, index) = vm.db.objects.get(mesh).key.clone()?;
+                let p = vm.db.set.get(&pkg).ok()?;
+                let chain = vm.db.set.export_chain(&p, index);
+                let Some(Asset::SkeletalMesh(m)) = crate::native_asset(&p, index, &chain) else { return None };
+                let anim = vm.db.resolve_obj(&p, m.default_anim)?;
+                load_set(vm, anim)
+            })();
+            world(vm).anim.mesh_sets.insert(mesh, s.clone());
+            s
+        }
+    };
+    if s.is_some() {
+        world(vm).anim.actors.entry(actor).or_default().set = s.clone();
+    }
     s
 }
 
@@ -701,9 +714,20 @@ fn natural_rate(anims: &AnimSet, vm: &mut Vm<'_>, a: ObjId, ci: usize) -> f32 {
 pub fn update_movement(vm: &mut Vm<'_>, dt: f32) {
     let Some(pawn_class) = vm.db.find("Pawn") else { return };
     let actors = world(vm).actors.clone();
+    // Which actors are pawns at all is worked out again only for actors written since the last frame.
+    let mut memo = std::mem::take(&mut world(vm).memo_pawns);
+    let pass = memo.begin(&mut vm.db.objects);
     for a in actors {
+        if memo.get(&pass, &vm.db.objects, a) == Some(1) {
+            continue;
+        }
         let Some(class) = vm.db.objects.get(a).class else { continue };
-        if vm.db.objects.get(a).deleted || !vm.is_child_of(class, pawn_class) || !get(vm, a, "bPhysicsAnimUpdate").as_bool() {
+        if vm.db.objects.get(a).deleted || !vm.is_child_of(class, pawn_class) {
+            memo.set(a, 1);
+            continue;
+        }
+        // (Not remembered: a script sets this flag on its own variable, which does not stamp the actor.)
+        if !get(vm, a, "bPhysicsAnimUpdate").as_bool() {
             continue;
         }
         if get(vm, a, "bTearOff").as_bool() {
@@ -711,6 +735,7 @@ pub fn update_movement(vm: &mut Vm<'_>, dt: f32) {
         }
         drive_movement(vm, a, dt.max(1.0 / 240.0));
     }
+    world(vm).memo_pawns = memo;
 }
 
 fn drive_movement(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
