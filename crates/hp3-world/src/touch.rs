@@ -65,6 +65,9 @@ pub struct Touch {
     /// The object-table pass number the last `frame_pass` started (actors written since are re-checked).
     seen: u32,
     shapes: HashMap<ObjId, Shape>,
+    /// The current shape of an actor and the object-table epoch it is good for (`None`: the actor is gone), so a neighbour nobody
+    /// wrote since is not read property by property again for each actor that moves near it.
+    fresh: HashMap<ObjId, (u32, Option<Shape>)>,
     cells: HashMap<(i32, i32), Vec<ObjId>>,
     cell_of: HashMap<ObjId, (i32, i32)>,
     big: Vec<ObjId>,
@@ -95,6 +98,20 @@ fn slots(vm: &mut Vm<'_>) -> Slots {
     };
     world(vm).touch.slots = Some(s);
     s
+}
+
+/// `shape_of` for an actor other than the one being settled, remembered until the actor is next written.
+fn shape_cached(vm: &mut Vm<'_>, b: ObjId, s: &Slots) -> Option<Shape> {
+    if let Some(&(epoch, shape)) = world(vm).touch.fresh.get(&b)
+        && !vm.db.objects.changed_since(b, epoch)
+    {
+        return shape;
+    }
+    let shape = if vm.db.objects.get(b).deleted { None } else { Some(shape_of(vm, b, s)) };
+    // A write from now on is stamped with the new epoch, which is what this entry is good until.
+    let epoch = vm.db.objects.begin_pass();
+    world(vm).touch.fresh.insert(b, (epoch, shape));
+    shape
 }
 
 fn shape_of(vm: &mut Vm<'_>, a: ObjId, s: &Slots) -> Shape {
@@ -289,10 +306,7 @@ pub fn settle(vm: &mut Vm<'_>, a: ObjId) {
         };
         let me_traces = blocks_traces(vm, a, &s);
         for b in candidates {
-            if vm.db.objects.get(b).deleted {
-                continue;
-            }
-            let other = shape_of(vm, b, &s);
+            let Some(other) = shape_cached(vm, b, &s) else { continue };
             if !other.collide || !overlap_between(&world(vm).collision, (a, &shape), (b, &other)) {
                 continue;
             }

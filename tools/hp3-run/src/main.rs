@@ -3,6 +3,8 @@
 //! - `classes <HP3 folder> [class]`: loads every script class, builds its defaults and reports problems; with a
 //!   class name, prints that class's properties and default values.
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use hp3_world::casttest;
 mod itemcheck;
 mod langcheck;

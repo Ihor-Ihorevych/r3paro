@@ -724,8 +724,15 @@ pub fn actor_instances(
     let draw_debug = DRAW_DEBUG.get_or_init(|| std::env::var("HP3_DRAW_DEBUG").ok().map(|n| format!(".{n}"))).as_deref();
     let hide_actor = HIDE_ACTOR.get_or_init(|| std::env::var("HP3_HIDE_ACTOR").ok().map(|n| format!(".{n}"))).as_deref();
     let named = |vm: &Vm<'_>, a: ObjId, suffix: Option<&str>| suffix.is_some_and(|s| { let p = hp3_script::natives::object_path(vm, a); p.ends_with(s) || p == s.trim_start_matches('.') });
+    // Whether an actor can draw at all is worked out again only for actors written since the last frame (see `hp3_world::memo`).
+    let mut memo = std::mem::take(&mut world(vm).memo_draw);
+    let pass = memo.begin(&mut vm.db.objects);
     for a in actors {
+        if draw_debug.is_none() && memo.get(&pass, &vm.db.objects, a) == Some(1) {
+            continue;
+        }
         if vm.db.objects.get(a).deleted {
+            memo.set(a, 1);
             continue;
         }
         // What cannot draw is ruled out first, by plain reads: most of a level's actors are such, and the pawn check below
@@ -741,6 +748,7 @@ pub fn actor_instances(
             );
         }
         if draw_type != DT_MESH && (draw_type != DT_STATIC_MESH || (hp3_world::read(vm, a, static_slot).as_bool() && hp3_world::read(vm, a, lumos_slot).as_int() == 0)) {
+            memo.set(a, 1);
             continue;
         }
         // `bSpecialHidden` keeps an actor out of the normal view (the animation helper of a ledge climb has it).
@@ -896,6 +904,7 @@ pub fn actor_instances(
         out.push((gpu, transform, light));
         INSTANCE_NS[3].fetch_add(t_rest.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     }
+    world(vm).memo_draw = memo;
     // Pieces thrown by mesh emitters (the ice of a shattering salamander) are drawn like any other static mesh.
     for piece in hp3_world::particles::collect_meshes(vm) {
         let Some(gpu) = cache.get(vm, loader, r, dynamic, piece.mesh, &[]) else { continue };

@@ -136,6 +136,8 @@ pub struct World {
     pub memo_tick: memo::Memo,
     pub memo_boxes: memo::Memo,
     pub memo_baked: memo::Memo,
+    /// Per-actor answer of the draw loop: whether the actor can be drawn at all (1: never).
+    pub memo_draw: memo::Memo,
 }
 
 /// The world stored in the VM. Panics if no level is loaded.
@@ -668,6 +670,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         memo_tick: Default::default(),
         memo_boxes: Default::default(),
         memo_baked: Default::default(),
+        memo_draw: Default::default(),
         tick_skipped: Default::default(),
         actor_slots: Default::default(),
         config,

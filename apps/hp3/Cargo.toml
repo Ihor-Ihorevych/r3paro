@@ -25,6 +25,7 @@ hp3-engine = { path = "../../crates/hp3-engine" }
 wgpu = "26"
 glam = "0.30"
 pollster = "0.4"
+mimalloc = { version = "0.1", default-features = false }
 hp3-audio = { path = "../../crates/hp3-audio" }
 
 # Desktop: SDL3 built from its source and linked in. Android: the SDL3 library of the APK, linked dynamically.

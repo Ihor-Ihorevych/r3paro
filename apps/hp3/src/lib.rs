@@ -3,6 +3,11 @@
 //!
 //! Keys and mouse go to the game through its key bindings, and the view is the game's own camera
 //! (`PlayerCalcView`). F1 switches to a free camera (WASD, mouse, Space/Ctrl, Shift) and back.
+/// The scripts build and drop small boxes and vectors all the time (every vector read is an allocation): mimalloc serves them
+/// several times faster than the platform allocator.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

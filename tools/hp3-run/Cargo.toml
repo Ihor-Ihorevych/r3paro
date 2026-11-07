@@ -14,3 +14,5 @@ hp3-world = { path = "../../crates/hp3-world" }
 hp3-audio = { path = "../../crates/hp3-audio" }
 hp3-assets.workspace = true
 glam = "0.30"
+
+mimalloc = { version = "0.1", default-features = false }
