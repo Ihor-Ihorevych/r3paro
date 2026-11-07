@@ -1,0 +1,16 @@
+[package]
+name = "sampler"
+version = "0.1.0"
+edition = "2021"
+description = "Windows sampling profiler without admin rights: suspends the program's threads every half millisecond and reads their stacks."
+publish = false
+
+# Not part of the engine's workspace (Windows only).
+[workspace]
+
+[dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Diagnostics_Debug", "Win32_System_Memory", "Win32_System_Kernel"] }
+pdb-addr2line = "0.11"
+
+[profile.release]
+debug = 0
