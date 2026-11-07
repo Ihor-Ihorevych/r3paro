@@ -38,13 +38,21 @@ pub fn collect(vm: &mut Vm<'_>, camera: Vec3) -> Vec<Blob> {
     let mut out = Vec::new();
     let debug = crate::envc::var("HP3_SHADOW_DEBUG").is_ok() && world(vm).frame % 120 == 0;
     let mut seen = 0;
+    // Which actors are projectors at all is worked out again only for actors written since the last frame.
+    let mut memo = std::mem::take(&mut world(vm).memo_projectors);
+    let pass = memo.begin(&mut vm.db.objects);
     for p in actors {
+        if memo.get(&pass, &vm.db.objects, p) == Some(1) {
+            continue;
+        }
         let o = vm.db.objects.get(p);
         if o.deleted {
+            memo.set(p, 1);
             continue;
         }
         let Some(class) = o.class else { continue };
         if !vm.is_child_of(class, projector) {
+            memo.set(p, 1);
             continue;
         }
         seen += 1;
@@ -97,6 +105,7 @@ pub fn collect(vm: &mut Vm<'_>, camera: Vec3) -> Vec<Blob> {
         }
         out.push(Blob { center: floor + hit.normal * LIFT, normal: hit.normal, radius: radius * RADIUS_SCALE * (1.0 + 0.35 * (1.0 - near)), alpha });
     }
+    world(vm).memo_projectors = memo;
     if debug {
         let (frame, total) = (world(vm).frame, world(vm).actors.len());
         eprintln!("shadow: frame {frame} projectors {seen} blobs {} (actors {total})", out.len());

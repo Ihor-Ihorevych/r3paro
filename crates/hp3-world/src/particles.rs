@@ -594,11 +594,18 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     collide_meshes(vm);
     let actors = world(vm).actors.clone();
     let frame = world(vm).frame;
-    let mut seen: Vec<(ObjId, usize)> = Vec::new();
+    let mut seen: hp3_script::fx::FxHashSet<(ObjId, usize)> = Default::default();
     let mut skeletons: crate::HashMap<ObjId, Vec<Vec3>> = crate::HashMap::default();
+    // Which actors are emitters is worked out again only for actors written since the last tick.
+    let mut memo = std::mem::take(&mut world(vm).memo_emitters);
+    let pass = memo.begin(&mut vm.db.objects);
     for a in actors {
+        if memo.get(&pass, &vm.db.objects, a) == Some(1) {
+            continue;
+        }
         let Some(class) = vm.db.objects.get(a).class else { continue };
         if vm.db.objects.get(a).deleted || !vm.is_child_of(class, emitter_class) {
+            memo.set(a, 1);
             continue;
         }
         own_emitters(vm, a);
@@ -610,7 +617,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         for (i, e) in emitters.iter().enumerate() {
             let Some(obj) = e.as_obj() else { continue };
             let key = (a, i);
-            seen.push(key);
+            seen.insert(key);
             let needs = world(vm).particles.states.get(&key).is_none_or(|s| frame.wrapping_sub(s.refreshed) >= REFRESH_FRAMES);
             if needs {
                 let mut config = Config::read(vm, obj);
@@ -678,6 +685,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
             }
         }
     }
+    world(vm).memo_emitters = memo;
     // States of emitters that no longer exist.
     world(vm).particles.states.retain(|k, _| seen.contains(k));
 }
