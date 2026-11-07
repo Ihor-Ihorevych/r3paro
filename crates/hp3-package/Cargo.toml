@@ -10,3 +10,4 @@ publish.workspace = true
 hp3-core.workspace = true
 thiserror.workspace = true
 log.workspace = true
+memmap2 = "0.9"

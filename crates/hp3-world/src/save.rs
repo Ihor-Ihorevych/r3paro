@@ -279,63 +279,6 @@ impl<'a> In<'a> {
     }
 }
 
-fn encode(slot: &Slot) -> Vec<u8> {
-    let mut o = Out(Vec::new());
-    o.0.extend_from_slice(MAGIC);
-    o.str(&slot.map);
-    o.f32(slot.time);
-    o.u32(slot.spawned);
-    o.str(&slot.player);
-    o.values(&slot.world_info);
-    o.u32(slot.actors.len() as u32);
-    for a in &slot.actors {
-        o.str(&a.name);
-        o.str(&a.class);
-        o.values(&a.values);
-        o.optional_str(&a.state);
-        match &a.resume {
-            Some((s, pc)) => {
-                o.u8(1);
-                o.str(s);
-                o.u32(*pc);
-            }
-            None => o.u8(0),
-        }
-        match a.sleep {
-            Some(t) => {
-                o.u8(1);
-                o.f32(t);
-            }
-            None => o.u8(0),
-        }
-        match a.timer {
-            Some((rate, left, looping)) => {
-                o.u8(1);
-                o.f32(rate);
-                o.f32(left);
-                o.u8(looping as u8);
-            }
-            None => o.u8(0),
-        }
-        match &a.animation {
-            Some((seq, frame, rate, looping)) => {
-                o.u8(1);
-                o.str(seq);
-                o.f32(*frame);
-                o.f32(*rate);
-                o.u8(*looping as u8);
-            }
-            None => o.u8(0),
-        }
-    }
-    o.u32(slot.objects.len() as u32);
-    for obj in &slot.objects {
-        o.str(&obj.class);
-        o.values(&obj.values);
-    }
-    o.0
-}
-
 fn decode(data: &[u8]) -> Option<Slot> {
     let magic = data.get(..8)?;
     let v1 = magic == MAGIC_V1;
@@ -418,24 +361,67 @@ fn reference_of(vm: &Vm<'_>, actors: &mut Refs, o: Option<ObjId>) -> Ref {
     Ref::Object(n)
 }
 
-fn save_value(vm: &Vm<'_>, actors: &mut Refs, v: &Value) -> Saved {
+/// Writes a value the way `Out::value` writes a `Saved` one, without making the `Saved` tree first (it is several times the
+/// size of the bytes, and a level has hundreds of thousands of values).
+fn emit_value(vm: &Vm<'_>, refs: &mut Refs, v: &Value, o: &mut Out) {
     match v {
-        Value::Empty => Saved::Empty,
-        Value::Byte(b) => Saved::Byte(*b),
-        Value::Int(i) => Saved::Int(*i),
-        Value::Bool(b) => Saved::Bool(*b),
-        Value::Float(f) => Saved::Float(*f),
-        Value::Name(n) => Saved::Name(vm.db.names.get(*n).to_string()),
-        Value::Str(s) => Saved::Str(s.clone()),
-        Value::Object(o) => Saved::Object(reference_of(vm, actors, *o)),
-        Value::Struct(f) => Saved::Struct(f.iter().map(|x| save_value(vm, actors, x)).collect()),
-        Value::Array(a) => Saved::Array(a.iter().map(|x| save_value(vm, actors, x)).collect()),
-        Value::Delegate(o, n) => Saved::Delegate(reference_of(vm, actors, *o), vm.db.names.get(*n).to_string()),
+        Value::Empty => o.u8(0),
+        Value::Byte(b) => {
+            o.u8(1);
+            o.u8(*b);
+        }
+        Value::Int(i) => {
+            o.u8(2);
+            o.i32(*i);
+        }
+        Value::Bool(b) => {
+            o.u8(3);
+            o.u8(*b as u8);
+        }
+        Value::Float(f) => {
+            o.u8(4);
+            o.f32(*f);
+        }
+        Value::Name(n) => {
+            o.u8(5);
+            o.str(vm.db.names.get(*n));
+        }
+        Value::Str(s) => {
+            o.u8(6);
+            o.str(s);
+        }
+        Value::Object(x) => {
+            o.u8(7);
+            let r = reference_of(vm, refs, *x);
+            o.reference(&r);
+        }
+        Value::Struct(f) => {
+            o.u8(8);
+            emit_values(vm, refs, f, o);
+        }
+        Value::Array(a) => {
+            o.u8(9);
+            emit_values(vm, refs, a, o);
+        }
+        Value::Delegate(x, n) => {
+            o.u8(10);
+            let r = reference_of(vm, refs, *x);
+            o.reference(&r);
+            o.str(vm.db.names.get(*n));
+        }
     }
 }
 
-/// Everything in the level as it is now. Every actor first hears `PreSaveGame`.
-fn capture(vm: &mut Vm<'_>) -> Slot {
+fn emit_values(vm: &Vm<'_>, refs: &mut Refs, vals: &[Value], o: &mut Out) {
+    o.u32(vals.len() as u32);
+    for v in vals {
+        emit_value(vm, refs, v, o);
+    }
+}
+
+/// Everything in the level as it is now, as the bytes of a slot file (`decode` reads them back). Every actor first hears
+/// `PreSaveGame`. Returns the bytes and how many actors and objects they hold.
+fn capture(vm: &mut Vm<'_>) -> (Vec<u8>, usize, usize) {
     let all = world(vm).actors.clone();
     let live: Vec<ObjId> = all.into_iter().filter(|&a| !vm.db.objects.get(a).deleted).collect();
     for &a in &live {
@@ -444,48 +430,92 @@ fn capture(vm: &mut Vm<'_>) -> Slot {
     let live: Vec<ObjId> = live.into_iter().filter(|&a| !vm.db.objects.get(a).deleted).collect();
     let names: HashMap<ObjId, String> = live.iter().map(|&a| (a, name_of(vm, a))).collect();
     let mut refs = Refs { actors: &names, objects: HashMap::new(), order: Vec::new(), kept: vm.db.find("KWScriptedAction") };
-    let mut actors = Vec::with_capacity(live.len());
+    let mut actors_out = Out(Vec::new());
+    let mut actor_count = 0usize;
     for &a in &live {
         let Some(class) = vm.db.objects.get(a).class else { continue };
-        let values = vm.db.objects.values(a).map(|v| v.iter().map(|x| save_value(vm, &mut refs, x)).collect()).unwrap_or_default();
+        actor_count += 1;
+        let o = &mut actors_out;
+        o.str(&names[&a]);
+        o.str(vm.db.names.get(vm.db.get(class).name));
+        match vm.db.objects.values(a) {
+            Some(v) => emit_values(vm, &mut refs, v, o),
+            None => o.u32(0),
+        }
         let state = vm.state_of(a).map(|s| vm.db.names.get(vm.db.get(s).name).to_string());
-        let resume = vm.state_pc.get(&a).map(|&(owner, pc)| (vm.db.names.get(vm.db.get(owner).name).to_string(), pc as u32));
-        let sleep = match vm.latent.get(&a) {
-            Some(hp3_script::vm::Latent::Sleep(t)) => Some(*t),
-            _ => None,
-        };
-        let timer = world(vm).timers.get(&a).map(|t| (t.rate, t.remaining, t.looping));
-        actors.push(SavedActor {
-            name: names[&a].clone(),
-            class: vm.db.names.get(vm.db.get(class).name).to_string(),
-            values,
-            state,
-            resume,
-            sleep,
-            timer,
-            animation: crate::anim::main_animation(vm, a),
-        });
+        o.optional_str(&state);
+        match vm.state_pc.get(&a).map(|&(owner, pc)| (vm.db.names.get(vm.db.get(owner).name).to_string(), pc as u32)) {
+            Some((s, pc)) => {
+                o.u8(1);
+                o.str(&s);
+                o.u32(pc);
+            }
+            None => o.u8(0),
+        }
+        match vm.latent.get(&a) {
+            Some(hp3_script::vm::Latent::Sleep(t)) => {
+                o.u8(1);
+                o.f32(*t);
+            }
+            _ => o.u8(0),
+        }
+        match world(vm).timers.get(&a).map(|t| (t.rate, t.remaining, t.looping)) {
+            Some((rate, left, looping)) => {
+                o.u8(1);
+                o.f32(rate);
+                o.f32(left);
+                o.u8(looping as u8);
+            }
+            None => o.u8(0),
+        }
+        match crate::anim::main_animation(vm, a) {
+            Some((seq, frame, rate, looping)) => {
+                o.u8(1);
+                o.str(&seq);
+                o.f32(frame);
+                o.f32(rate);
+                o.u8(looping as u8);
+            }
+            None => o.u8(0),
+        }
     }
-    let world_info = match world(vm).world_info {
-        Some(w) => vm.db.objects.values(w).map(|v| v.iter().map(|x| save_value(vm, &mut refs, x)).collect()).unwrap_or_default(),
-        None => Vec::new(),
-    };
+    let mut world_out = Out(Vec::new());
+    match world(vm).world_info.and_then(|w| vm.db.objects.values(w)) {
+        Some(v) => emit_values(vm, &mut refs, v, &mut world_out),
+        None => world_out.u32(0),
+    }
     // The objects made while running that the values met (which may meet more as they are written).
-    let mut objects = Vec::new();
-    while objects.len() < refs.order.len() {
-        let o = refs.order[objects.len()];
+    let mut objects_out = Out(Vec::new());
+    let mut object_count = 0usize;
+    while object_count < refs.order.len() {
+        let o = refs.order[object_count];
         let class = vm.db.objects.get(o).class.map(|c| vm.db.names.get(vm.db.get(c).name).to_string()).unwrap_or_default();
-        let values = vm.db.objects.values(o).map(|v| v.iter().map(|x| save_value(vm, &mut refs, x)).collect()).unwrap_or_default();
-        objects.push(SavedObject { class, values });
+        objects_out.str(&class);
+        match vm.db.objects.values(o) {
+            Some(v) => emit_values(vm, &mut refs, v, &mut objects_out),
+            None => objects_out.u32(0),
+        }
+        object_count += 1;
     }
     let player = world(vm).player.and_then(|p| names.get(&p).cloned()).unwrap_or_default();
     let w = world(vm);
-    Slot { map: w.map.name.to_string(), time: w.time, spawned: w.spawned as u32, player, world_info, actors, objects }
+    let mut out = Out(Vec::with_capacity(world_out.0.len() + actors_out.0.len() + objects_out.0.len() + 64));
+    out.0.extend_from_slice(MAGIC);
+    out.str(&w.map.name);
+    out.f32(w.time);
+    out.u32(w.spawned as u32);
+    out.str(&player);
+    out.0.extend_from_slice(&world_out.0);
+    out.u32(actor_count as u32);
+    out.0.extend_from_slice(&actors_out.0);
+    out.u32(object_count as u32);
+    out.0.extend_from_slice(&objects_out.0);
+    (out.0, actor_count, object_count)
 }
 
 /// Writes the level to a slot.
 pub fn write(vm: &mut Vm<'_>, slot: i32) -> bool {
-    let saved = capture(vm);
+    let (bytes, actor_count, object_count) = capture(vm);
     let dir = save_dir(vm);
     if std::fs::create_dir_all(&dir).is_err() {
         return false;
@@ -493,16 +523,12 @@ pub fn write(vm: &mut Vm<'_>, slot: i32) -> bool {
     // Written beside the slot and moved over it, so a failed write never leaves half a save.
     let path = slot_path(vm, slot);
     let part = path.with_extension("tmp");
-    let ok = std::fs::write(&part, encode(&saved)).and_then(|_| std::fs::rename(&part, &path)).is_ok();
+    let ok = std::fs::write(&part, &bytes).and_then(|_| std::fs::rename(&part, &path)).is_ok();
     if std::env::var_os("HP3_SAVE_DEBUG").is_some() {
-        let mut by_class: std::collections::BTreeMap<&str, usize> = Default::default();
-        for o in &saved.objects {
-            *by_class.entry(o.class.as_str()).or_default() += 1;
-        }
-        eprintln!("save: slot {slot}, {} actors, {} objects {by_class:?}", saved.actors.len(), saved.objects.len());
+        eprintln!("save: slot {slot}, {actor_count} actors, {object_count} objects, {} bytes", bytes.len());
     }
     if ok {
-        vm.log.push(format!("engine: saved game to slot {slot} ({} actors, {} objects)", saved.actors.len(), saved.objects.len()));
+        vm.log.push(format!("engine: saved game to slot {slot} ({} actors, {} objects)", actor_count, object_count));
     }
     ok
 }

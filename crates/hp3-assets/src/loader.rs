@@ -107,6 +107,15 @@ impl<'s> Loader<'s> {
     }
 
     /// RGBA pixels of a texture's first mip.
+    /// Lets go of the decoded pictures and assets nobody but the cache holds (the GPU has its own copy of a texture once it is uploaded).
+    /// A later request decodes the one it needs again.
+    pub fn trim(&self) {
+        let keep = |m: &mut HashMap<ObjKey, Option<Rc<Image>>>| m.retain(|_, v| v.as_ref().is_none_or(|i| Rc::strong_count(i) > 1));
+        keep(&mut self.images.borrow_mut());
+        keep(&mut self.raw_images.borrow_mut());
+        self.assets.borrow_mut().retain(|_, v| v.as_ref().is_none_or(|a| Rc::strong_count(a) > 1));
+    }
+
     pub fn image(&self, pkg: &Rc<Package>, index: usize) -> Option<Rc<Image>> {
         let k = key(pkg, index);
         if let Some(i) = self.images.borrow().get(&k) {

@@ -566,6 +566,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
     interactions::register(vm);
     gui::register(vm);
     save::register(vm);
+    memprobe("start");
     let configured = config::apply(vm, &config);
     if std::env::var_os("HP3_CONFIG_DEBUG").is_some() {
         eprintln!("config: {configured} class default values read from the ini files");
@@ -620,6 +621,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         actors.push(id);
     }
     // Scripts writing their own variables (above Actor's) do not change what the per-frame passes look at.
+    memprobe("actors instantiated");
     vm.db.objects.quiet_from = vm.db.find("Actor").map_or(0, |c| vm.db.get(c).slots);
     vm.ext = Some(Box::new(World {
         map: map.clone(),
@@ -684,7 +686,9 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         actor_slots: Default::default(),
         config,
     }));
+    memprobe("world made");
     let collision = build_collision(vm, map, level_model, &actors);
+    memprobe("collision built");
     world(vm).collision = collision;
     settings::apply_saved(vm);
     // HP3's world info (game states, persistent values) lives across levels: made once, given to each level.
@@ -736,6 +740,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
     }
     // The level has a default physics volume before anything begins play (a map may carry it as a deleted actor, so one is
     // made); actors with none, or the deleted one the map placed them in (not one of the level's actors), are moved to it: gravity is read from it when a pawn works out its jump.
+    memprobe("game made");
     if let Some(default) = default_physics_volume(vm) {
         let live: std::collections::HashSet<ObjId> = actors.iter().copied().collect();
         for &a in &actors {
@@ -779,6 +784,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
     // That is every actor alive now, not only the map's: the game's own managers (`WizardCardManager`, `ChallengeStarManager`,
     // made by `HGame.PreBeginPlay`) hold the cards and shields.
     let live: Vec<ObjId> = world(vm).actors.clone();
+    memprobe("before PostBeginPlay");
     for &a in &live {
         if !vm.db.objects.get(a).deleted {
             fire(vm, a, "RestorePersistentData", &mut []);
@@ -807,17 +813,20 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
             natives::set_base(vm, a, Some(b), false);
         }
     }
+    memprobe("begin-play done");
     if let Some(g) = world(vm).game {
         let options = world(vm).url_options.clone();
         let portal = NEXT_PORTAL.with(|p| std::mem::take(&mut *p.borrow_mut()));
         let mut args = [Value::Str(portal), Value::Str(options), Value::Str(String::new())];
         let pc = fire(vm, g, "Login", &mut args).as_obj();
+        memprobe("after Login");
         if let Some(pc) = pc {
             world(vm).player = Some(pc);
             // The engine gives the local player's controller its viewport (console, GUI) and input object.
             interactions::init(vm, pc);
             fire(vm, pc, "InitInputSystem", &mut []);
             fire(vm, g, "PostLogin", &mut [Value::Object(Some(pc))]);
+            memprobe("after PostLogin");
         }
         follow_player(vm);
         // A loaded map finishes by accepting the player's travel: both are told it is coming, what travelled is
@@ -841,6 +850,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
             }
             fire(vm, pc, "TravelPostAccept", &mut []);
             init_camera_settings(vm, pc);
+            memprobe("after travel accept");
             // The game starts on its local map with the front end (after the intro movies, not played yet);
             // HP3_MENU=<Package.Class> opens a page on any map.
             let local = world(vm).config.get("URL", "LocalMap").map(|m| m.trim_end_matches(".unr").to_ascii_lowercase());
@@ -2216,3 +2226,18 @@ pub fn update_controller_volume(vm: &mut Vm<'_>, c: ObjId) {
 pub fn physics_volume_holding(vm: &mut Vm<'_>, p: glam::Vec3) -> Option<ObjId> {
     volume_holding(vm, p).map(|(_, v)| v)
 }
+#[cfg(windows)]
+/// HP3_MEM=1: prints the process's private memory (Windows) at the marked points of loading.
+pub fn memprobe(tag: &str) {
+    if std::env::var_os("HP3_MEM").is_none() {
+        return;
+    }
+    #[repr(C)]
+    struct Pmc { cb: u32, pf: u32, a: usize, b: usize, c: usize, d: usize, e: usize, f: usize, g: usize, h: usize, private: usize }
+    unsafe extern "system" { fn K32GetProcessMemoryInfo(h: isize, c: *mut Pmc, cb: u32) -> i32; fn GetCurrentProcess() -> isize; }
+    let mut p = Pmc { cb: std::mem::size_of::<Pmc>() as u32, pf: 0, a: 0, b: 0, c: 0, d: 0, e: 0, f: 0, g: 0, h: 0, private: 0 };
+    unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut p, p.cb) };
+    eprintln!("MEM {tag}: private {} MB", p.private >> 20);
+}
+#[cfg(not(windows))]
+pub fn memprobe(_tag: &str) {}

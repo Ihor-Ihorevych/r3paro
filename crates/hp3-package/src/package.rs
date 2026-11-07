@@ -78,7 +78,7 @@ pub struct Package {
     /// File stem, which is the package name objects refer to.
     pub name: String,
     pub path: PathBuf,
-    pub data: Vec<u8>,
+    pub data: PackageData,
     pub summary: Summary,
     pub names: Vec<NameEntry>,
     pub imports: Vec<Import>,
@@ -93,12 +93,22 @@ impl std::fmt::Debug for Package {
 
 impl Package {
     pub fn open(path: &Path) -> Result<Package> {
-        let data = std::fs::read(path).map_err(|e| Error::Io(path.to_path_buf(), e))?;
+        let io = |e| Error::Io(path.to_path_buf(), e);
+        let file = std::fs::File::open(path).map_err(io)?;
+        // SAFETY: the game files are not changed while the game runs; a map that fails (a file system without mmap) is read instead.
+        let data = match unsafe { memmap2::Mmap::map(&file) } {
+            Ok(m) => PackageData::Mapped(m),
+            Err(_) => PackageData::Owned(std::fs::read(path).map_err(io)?),
+        };
         let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        Self::parse(name, path.to_path_buf(), data)
+        Self::parse_data(name, path.to_path_buf(), data)
     }
 
     pub fn parse(name: String, path: PathBuf, data: Vec<u8>) -> Result<Package> {
+        Self::parse_data(name, path, PackageData::Owned(data))
+    }
+
+    fn parse_data(name: String, path: PathBuf, data: PackageData) -> Result<Package> {
         let mut r = Reader::new(&data);
         let tag = r.u32()?;
         if tag != PACKAGE_TAG {
@@ -317,5 +327,29 @@ impl Package {
             }
             cur.is_none()
         })
+    }
+}
+
+/// The bytes of a package file: mapped from the file where it can be (the pages are the file's own, not memory of the
+/// process: untouched ones cost nothing and the system can drop the others), else read into memory.
+pub enum PackageData {
+    Mapped(memmap2::Mmap),
+    Owned(Vec<u8>),
+}
+
+impl std::ops::Deref for PackageData {
+    type Target = [u8];
+    #[inline]
+    fn deref(&self) -> &[u8] {
+        match self {
+            PackageData::Mapped(m) => m,
+            PackageData::Owned(v) => v,
+        }
+    }
+}
+
+impl From<Vec<u8>> for PackageData {
+    fn from(v: Vec<u8>) -> Self {
+        PackageData::Owned(v)
     }
 }

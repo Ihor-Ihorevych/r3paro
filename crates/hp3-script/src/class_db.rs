@@ -61,8 +61,9 @@ pub struct StructDef {
     pub name: Name,
     pub kind: StructKind,
     pub super_: Option<StructId>,
-    pub props: Vec<Prop>,
-    by_name: HashMap<Name, usize>,
+    /// Shared with the superclass when a class declares none of its own.
+    pub props: Rc<Vec<Prop>>,
+    by_name: Rc<HashMap<Name, usize>>,
     pub slots: usize,
     pub defaults: Vec<Value>,
     /// The package and export it was loaded from; token operands refer into this package.
@@ -214,6 +215,21 @@ impl<'s> ClassDb<'s> {
     }
 
     /// Loads every class in every script package.
+    /// The decoded script of a struct, read from its package.
+    pub fn script_of(&self, id: StructId) -> Rc<Vec<Token>> {
+        let d = self.get(id);
+        if !d.script.is_empty() || d.script_size == 0 {
+            return d.script.clone();
+        }
+        let chain = self.set.export_chain(&d.pkg, d.export);
+        let Ok(o) = object::read_export(&d.pkg, d.export, &chain) else { return d.script.clone() };
+        let structure = match o.body {
+            Body::Class { structure, .. } | Body::State { structure, .. } | Body::Function { structure, .. } | Body::Struct { structure, .. } => structure,
+            _ => return d.script.clone(),
+        };
+        Rc::new(structure.script)
+    }
+
     pub fn load_all_classes(&mut self) {
         for path in self.set.files() {
             if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("u")) {
@@ -264,13 +280,14 @@ impl<'s> ClassDb<'s> {
         let name = self.name_of(pkg, pkg.exports[index].name);
         let id = StructId(self.structs.len() as u32);
         // A function's super is the function it overrides; its parameters are its own.
-        let (mut props, mut slots, mut defaults) = match super_.filter(|_| kind != StructKind::Function) {
+        let (mut props, mut slots, mut defaults, inherited_names) = match super_.filter(|_| kind != StructKind::Function) {
             Some(s) => {
                 let sd = self.get(s);
-                (sd.props.clone(), sd.slots, sd.defaults.clone())
+                (sd.props.clone(), sd.slots, sd.defaults.clone(), Some(sd.by_name.clone()))
             }
-            None => (Vec::new(), 0, Vec::new()),
+            None => (Rc::new(Vec::new()), 0, Vec::new(), None),
         };
+        let inherited_count = props.len();
         // Reserve the id before loading children, which may refer back to this struct.
         self.by_key.insert(key.clone(), id);
         let object = self.objects.for_key(key.clone(), name);
@@ -280,15 +297,16 @@ impl<'s> ClassDb<'s> {
             name,
             kind,
             super_,
-            props: Vec::new(),
-            by_name: HashMap::default(),
+            props: Rc::new(Vec::new()),
+            by_name: Rc::new(HashMap::default()),
             slots: 0,
             defaults: Vec::new(),
             pkg: pkg.clone(),
             export: index,
             object,
             config_name,
-            script: Rc::new(structure.script.clone()),
+            // The tokens are read again from the package when the function is first run (most are never): they are most of what a loaded class costs.
+            script: Rc::new(Vec::new()),
             script_size: structure.script_size,
             native_index: function.0,
             function_flags: function.1,
@@ -341,11 +359,14 @@ impl<'s> ClassDb<'s> {
             for _ in 0..dim {
                 defaults.push(default.clone());
             }
-            props.push(Prop { name: pname, ty, dim, flags, slot: slots, owner: id });
+            Rc::make_mut(&mut props).push(Prop { name: pname, ty, dim, flags, slot: slots, owner: id });
             slots += dim;
             self.stats.props += 1;
         }
-        let by_name = props.iter().enumerate().map(|(i, p)| (p.name, i)).collect();
+        let by_name = match inherited_names {
+            Some(n) if props.len() == inherited_count => n,
+            _ => Rc::new(props.iter().enumerate().map(|(i, p)| (p.name, i)).collect()),
+        };
         {
             let def = &mut self.structs[id.0 as usize];
             def.props = props;

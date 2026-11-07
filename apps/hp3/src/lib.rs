@@ -449,6 +449,9 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
     let mut depth = renderer.depth_target(width.max(1), height.max(1));
 
     let (start, start_rot) = scene.player_starts.first().copied().unwrap_or((Vec3::ZERO, [0, 0, 0]));
+    // The level's geometry and pictures are on the GPU: the CPU copies (tens of megabytes) are not kept.
+    drop(scene);
+    loader.trim();
     let mut camera = Camera { position: start + Vec3::Z * 50.0, rotation: [start_rot[0], start_rot[1], 0], fov_degrees: 90.0 };
     sdl.mouse().set_relative_mouse_mode(&window, true);
     let mut events = sdl.event_pump()?;
@@ -791,6 +794,8 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             let inputs = hp3_engine::map_inputs(&mut vm, &loader, &pkg, std::env::var_os("HP3_UNLIT").is_none());
             let scene = scene::build_map(&loader, &pkg, &|i| statics.contains(&i), &inputs);
             gpu_scene = renderer.upload_scene(&scene);
+            drop(scene);
+            loader.trim();
             lighting = inputs.lighting;
             mesh_cache = hp3_engine::MeshCache::default();
             fog_state = hp3_engine::FogState::default();
@@ -872,6 +877,10 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             eprintln!("slow frame (cumulative ms): {stages:?}");
         }
 
+        // Pictures decoded since (spawned actors, menus) that nothing holds any more are let go every half minute or so.
+        if hp3_world::world(&mut vm).frame % 1800 == 0 {
+            loader.trim();
+        }
         frames += 1;
         perf.add(&stages, frame_start.elapsed().as_secs_f32() * 1000.0);
         if fps_timer.elapsed().as_secs_f32() >= 1.0 {

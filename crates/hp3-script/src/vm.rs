@@ -293,7 +293,7 @@ impl<'s> Vm<'s> {
         if let Some(c) = self.code.get(&id) {
             return c.clone();
         }
-        let script = self.db.get(id).script.clone();
+        let script = self.db.script_of(id);
         let code = Rc::new(Compiler::new(&mut self.db, id, &self.native_decls).compile(&script));
         self.code.insert(id, code.clone());
         code

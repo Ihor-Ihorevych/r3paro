@@ -228,8 +228,10 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
     vm.trace_states = std::env::var_os("HP3_TRACE_STATES").is_some();
     let pkg = set.get(map)?;
     let t = std::time::Instant::now();
+    hp3_world::memprobe("pre-load");
     hp3_world::load(&mut vm, &pkg, hp3_core::Config::load(root))?;
     let load_time = t.elapsed();
+    hp3_world::memprobe("load returned");
     if let Some(pc) = hp3_world::world(&mut vm).player
         && let Some(pawn) = hp3_world::get(&mut vm, pc, "Pawn").as_obj()
     {
@@ -1311,6 +1313,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             println!("  {n:10} {}", vm.function_path(*f));
         }
     }
+    hp3_world::memprobe("level end");
     let mut logs: BTreeMap<&str, usize> = BTreeMap::new();
     for l in &vm.log {
         *logs.entry(l.as_str()).or_default() += 1;
@@ -1504,7 +1507,7 @@ fn classes(root: &Path, show: Option<&str>) -> Result<ExitCode, Box<dyn std::err
         let id = db.find(name).ok_or("no such class")?;
         let def = db.get(id);
         println!("\n{} ({:?}), {} slots", db.names.get(def.name), def.kind, def.slots);
-        for p in &def.props {
+        for p in def.props.iter() {
             let owner = db.names.get(db.get(p.owner).name);
             println!("  {owner}.{} {:?}[{}] = {:?}", db.names.get(p.name), p.ty, p.dim, &def.defaults[p.slot]);
         }
