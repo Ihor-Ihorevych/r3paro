@@ -237,7 +237,7 @@ pub fn bones_with(
 }
 
 /// A sequence blended over the base pose: with weight `alpha`, on the bones under `root` (all when `None`).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Layer {
     pub sequence: Option<usize>,
     pub frame: f32,
@@ -247,7 +247,7 @@ pub struct Layer {
 }
 
 /// The base pose: a sequence at a frame, possibly still crossfading in from what played before it.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Base {
     pub sequence: Option<usize>,
     pub frame: f32,

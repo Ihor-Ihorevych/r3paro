@@ -90,6 +90,9 @@ pub struct Animation {
     sets: HashMap<ObjId, Option<Rc<AnimSet>>>,
     /// The default set of each skeletal mesh (none when it has none): decoding the mesh to find it is not repeated.
     mesh_sets: HashMap<ObjId, Option<Rc<AnimSet>>>,
+    /// The last pose worked out for each actor with what it was worked out from: a script asking for several bones in one
+    /// tick (the camera does) gets the pose once.
+    poses: HashMap<ObjId, (PoseKey, Rc<Vec<glam::Mat4>>)>,
     skeletons: HashMap<ObjId, Option<Rc<MeshSkeleton>>>,
     bone_maps: HashMap<(ObjId, usize), Rc<Vec<Option<usize>>>>,
     /// Actors attached to another actor's bone (lower-case bone name).
@@ -360,8 +363,18 @@ pub fn mesh_bone_origins(vm: &mut Vm<'_>, a: ObjId) -> Option<Vec<glam::Vec3>> {
     Some(bones.iter().skip(skip).map(|m| m.w_axis.truncate()).collect())
 }
 
+/// Everything a pose depends on.
+#[derive(PartialEq)]
+struct PoseKey {
+    mesh: ObjId,
+    set: usize,
+    base: hp3_anim::Base,
+    layers: Vec<hp3_anim::Layer>,
+    turns: Vec<(usize, glam::Mat4)>,
+}
+
 /// An actor's skeleton and the mesh-space matrix of each bone in its current pose.
-fn pose_bones(vm: &mut Vm<'_>, a: ObjId, extra: &[(usize, glam::Mat4)]) -> Option<(Rc<MeshSkeleton>, Vec<glam::Mat4>)> {
+fn pose_bones(vm: &mut Vm<'_>, a: ObjId, extra: &[(usize, glam::Mat4)]) -> Option<(Rc<MeshSkeleton>, Rc<Vec<glam::Mat4>>)> {
     let mesh = get(vm, a, "Mesh").as_obj()?;
     let skel = skeleton_of(vm, mesh)?;
     let set = set_of(vm, a);
@@ -383,6 +396,15 @@ fn pose_bones(vm: &mut Vm<'_>, a: ObjId, extra: &[(usize, glam::Mat4)]) -> Optio
     let bones = match &set {
         Some(set) => {
             let key = (mesh, Rc::as_ptr(set) as usize);
+            let mut turns = world(vm).anim.actors.get(&a).map(|x| turns_for(&skel.skeleton, &x.bone_turns)).unwrap_or_default();
+            turns.extend_from_slice(extra);
+            let base = base.unwrap_or_default();
+            let pose_key = PoseKey { mesh, set: key.1, base, layers, turns };
+            if let Some((k, pose)) = world(vm).anim.poses.get(&a)
+                && *k == pose_key
+            {
+                return Some((skel, pose.clone()));
+            }
             let map = match world(vm).anim.bone_maps.get(&key) {
                 Some(m) => m.clone(),
                 None => {
@@ -391,11 +413,11 @@ fn pose_bones(vm: &mut Vm<'_>, a: ObjId, extra: &[(usize, glam::Mat4)]) -> Optio
                     m
                 }
             };
-            let mut turns = world(vm).anim.actors.get(&a).map(|x| turns_for(&skel.skeleton, &x.bone_turns)).unwrap_or_default();
-            turns.extend_from_slice(extra);
-            hp3_anim::bones_blended(&skel.skeleton, Some((set, &map)), &base.unwrap_or_default(), &layers, &turns)
+            let bones = Rc::new(hp3_anim::bones_blended(&skel.skeleton, Some((set, &map)), &pose_key.base, &pose_key.layers, &pose_key.turns));
+            world(vm).anim.poses.insert(a, (pose_key, bones.clone()));
+            bones
         }
-        None => hp3_anim::bones(&skel.skeleton, None, None, 0.0),
+        None => Rc::new(hp3_anim::bones(&skel.skeleton, None, None, 0.0)),
     };
     Some((skel, bones))
 }

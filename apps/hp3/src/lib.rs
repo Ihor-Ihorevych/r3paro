@@ -400,6 +400,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
     let mut db = ClassDb::new(&set);
     db.load_all_classes();
     let mut vm = Vm::new(db);
+    vm.profile = std::env::var_os("HP3_PROFILE").is_some();
     vm.trace_states = std::env::var_os("HP3_TRACE_STATES").is_some();
     let t = Instant::now();
     hp3_world::load(&mut vm, &pkg, config)?;
@@ -903,6 +904,17 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                     .collect();
                 if !text.is_empty() {
                     eprintln!("perf: top classes: {}", text.join(", "));
+                }
+                // HP3_PROFILE=1: the natives that took the most this second, and the script functions that ran the most statements.
+                if vm.profile {
+                    let mut n: Vec<_> = std::mem::take(&mut vm.profile_natives).into_iter().map(|(f, (c, t))| (t, c, f)).collect();
+                    n.sort_by(|a, b| b.0.cmp(&a.0));
+                    let text: Vec<String> = n.iter().take(8).map(|(t, c, f)| format!("{} {:.1}ms/{c}", vm.function_path(*f), t.as_secs_f32() * 1000.0)).collect();
+                    eprintln!("perf: natives: {}", text.join(", "));
+                    let mut p: Vec<_> = std::mem::take(&mut vm.profile_counts).into_iter().map(|(f, n)| (n, f)).collect();
+                    p.sort_by(|a, b| b.0.cmp(&a.0));
+                    let text: Vec<String> = p.iter().take(8).map(|(n, f)| format!("{} {n}", vm.function_path(*f))).collect();
+                    eprintln!("perf: statements: {}", text.join(", "));
                 }
             }
             perf = PerfStats::default();
