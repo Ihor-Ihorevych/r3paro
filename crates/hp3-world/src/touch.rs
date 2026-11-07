@@ -68,6 +68,9 @@ pub struct Touch {
     /// The current shape of an actor and the object-table epoch it is good for (`None`: the actor is gone), so a neighbour nobody
     /// wrote since is not read property by property again for each actor that moves near it.
     fresh: HashMap<ObjId, (u32, Option<Shape>)>,
+    /// The world box of each actor's shape by object id, good until the actor is next written (epoch 0: unknown), for the quick
+    /// rejection of actors far from a trace.
+    dense: Vec<DenseBox>,
     cells: HashMap<(i32, i32), Vec<ObjId>>,
     cell_of: HashMap<ObjId, (i32, i32)>,
     big: Vec<ObjId>,
@@ -100,6 +103,41 @@ fn slots(vm: &mut Vm<'_>) -> Slots {
     s
 }
 
+#[derive(Clone, Copy, Default)]
+struct DenseBox {
+    epoch: u32,
+    lo: Vec3,
+    hi: Vec3,
+}
+
+fn remember_box(vm: &mut Vm<'_>, b: ObjId, shape: Option<&Shape>, epoch: u32) {
+    let t = &mut world(vm).touch;
+    let i = b.0 as usize;
+    if t.dense.len() <= i {
+        t.dense.resize(i + 1, DenseBox::default());
+    }
+    t.dense[i] = match shape {
+        Some(s) => {
+            let half = s.half.unwrap_or_else(|| extent_of(s));
+            DenseBox { epoch, lo: s.location - half, hi: s.location + half }
+        }
+        None => DenseBox::default(),
+    };
+}
+
+/// Whether `b` surely lies clear of the box swept by a trace (the segment's box widened by `pad`), judged from its remembered shape;
+/// false when it may be in the way or its shape is not known to be current.
+pub fn clear_of_trace(vm: &mut Vm<'_>, b: ObjId, lo: Vec3, hi: Vec3, pad: f32) -> bool {
+    let Some(d) = world(vm).touch.dense.get(b.0 as usize).copied() else { return false };
+    if d.epoch == 0 || vm.db.objects.changed_since(b, d.epoch) {
+        return false;
+    }
+    let pad = Vec3::splat(pad + 1.0);
+    let apart = (d.hi + pad).cmplt(lo).any() || (d.lo - pad).cmpgt(hi).any();
+    // A mover is met by its geometry, which its cylinder does not bound.
+    apart && world(vm).collision.mover(b).is_none()
+}
+
 /// `shape_of` for an actor other than the one being settled, remembered until the actor is next written.
 fn shape_cached(vm: &mut Vm<'_>, b: ObjId, s: &Slots) -> Option<Shape> {
     if let Some(&(epoch, shape)) = world(vm).touch.fresh.get(&b)
@@ -111,6 +149,7 @@ fn shape_cached(vm: &mut Vm<'_>, b: ObjId, s: &Slots) -> Option<Shape> {
     // A write from now on is stamped with the new epoch, which is what this entry is good until.
     let epoch = vm.db.objects.begin_pass();
     world(vm).touch.fresh.insert(b, (epoch, shape));
+    remember_box(vm, b, shape.as_ref(), epoch);
     shape
 }
 

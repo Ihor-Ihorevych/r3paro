@@ -146,8 +146,9 @@ fn line_hits(vm: &mut Vm<'_>, source: ObjId, start: glam::Vec3, end: glam::Vec3,
     let (proj_target, block_actors, static_mesh, world_geometry) = (crate::actor_slot(vm, "bProjTarget"), crate::actor_slot(vm, "bBlockActors"), crate::actor_slot(vm, "StaticMesh"), crate::actor_slot(vm, "bWorldGeometry"));
     let (radius, height, location) = (crate::actor_slot(vm, "CollisionRadius"), crate::actor_slot(vm, "CollisionHeight"), crate::actor_slot(vm, "Location"));
     let (collide_type, collision_width, rotation) = (crate::actor_slot(vm, "CollideType"), crate::actor_slot(vm, "CollisionWidth"), crate::actor_slot(vm, "Rotation"));
-    for b in crate::touch::along(vm, start, end, extent.max_element()) {
-        if b == source || Some(b) == own_pawn || vm.db.objects.get(b).deleted {
+    let (seg_lo, seg_hi, pad) = (start.min(end), start.max(end), extent.max_element());
+    for b in crate::touch::along(vm, start, end, pad) {
+        if b == source || Some(b) == own_pawn || crate::touch::clear_of_trace(vm, b, seg_lo, seg_hi, pad) || vm.db.objects.get(b).deleted {
             continue;
         }
         if !crate::read(vm, b, collide).as_bool() || !crate::read(vm, b, block_flag).as_bool() || crate::read(vm, b, owner).as_obj() == Some(source) {
