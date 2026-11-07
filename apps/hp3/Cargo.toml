@@ -25,14 +25,17 @@ hp3-engine = { path = "../../crates/hp3-engine" }
 wgpu = "26"
 glam = "0.30"
 pollster = "0.4"
-mimalloc = { version = "0.1", default-features = false }
 hp3-audio = { path = "../../crates/hp3-audio" }
 
 # Desktop: SDL3 built from its source and linked in. Android: the SDL3 library of the APK, linked dynamically.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 png = "0.17"
 sdl3 = { version = "0.20", features = ["build-from-source-static", "raw-window-handle"] }
+# The allocator is mimalloc; on Android the library is dlopen'ed, which cannot use initial-exec thread-locals (the load failed with
+# `TLS symbol "(null)" ... using IE access model`), so it takes the local-dynamic model there.
+mimalloc = { version = "0.1", default-features = false }
 
 [target.'cfg(target_os = "android")'.dependencies]
 sdl3 = { version = "0.20", features = ["raw-window-handle"] }
 libc = "0.2"
+mimalloc = { version = "0.1", default-features = false, features = ["local_dynamic_tls"] }
