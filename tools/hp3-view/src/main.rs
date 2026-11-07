@@ -100,6 +100,45 @@ fn pose(root: &Path, package: &str, mesh: &str, out: &Path, seq: Option<&str>, f
         Some(Asset::MeshAnimation(a)) => Some(hp3_anim::AnimSet::new((**a).clone(), &ap)),
         _ => None,
     });
+    // HP3_LIST_SEQS=1: every sequence of the mesh's animation set, in order, with its frame count.
+    if let (Some(_), Some(set)) = (std::env::var_os("HP3_LIST_SEQS"), &anim) {
+        for (i, s) in set.sequences.iter().enumerate() {
+            println!("seq {i} {} frames {} rate {}", s.name, s.frames, s.rate);
+        }
+    }
+    // HP3_FACE_POSES=1: what each two-frame pose sequence (a viseme, an expression, a brow) does to the face bones, frame 1 against frame 0.
+    if let (Some(_), Some(set)) = (std::env::var_os("HP3_FACE_POSES"), &anim) {
+        let map = set.bone_map(&skel);
+        for (si, s) in set.sequences.iter().enumerate().filter(|(_, s)| s.frames == 2) {
+            let a = hp3_anim::bones(&skel, Some((set, &map)), Some(si), 0.0);
+            let b = hp3_anim::bones(&skel, Some((set, &map)), Some(si), 1.0);
+            let mut line = format!("pose {:14}", s.name);
+            for bone in 16..skel.len().min(40) {
+                let (qa, qb) = (glam::Quat::from_mat4(&a[bone]), glam::Quat::from_mat4(&b[bone]));
+                let ang = qa.angle_between(qb).to_degrees();
+                let d = b[bone].w_axis.truncate() - a[bone].w_axis.truncate();
+                if ang > 1.0 || d.length() > 0.15 {
+                    line += &format!(" | {} r{:.0} d({:.1},{:.1},{:.1})", skel.names[bone].trim_start_matches("body__"), ang, d.x, d.y, d.z);
+                }
+            }
+            println!("{line}");
+        }
+    }
+    // HP3_FACE_REF=1: the same poses against the skeleton's rest pose (frame 0 and frame 1 each).
+    if let (Some(_), Some(set)) = (std::env::var_os("HP3_FACE_REF"), &anim) {
+        let map = set.bone_map(&skel);
+        let rest = hp3_anim::bones(&skel, Some((set, &map)), None, 0.0);
+        for (si, s) in set.sequences.iter().enumerate().filter(|(_, s)| s.frames == 2) {
+            let a = hp3_anim::bones(&skel, Some((set, &map)), Some(si), 0.0);
+            let b = hp3_anim::bones(&skel, Some((set, &map)), Some(si), 1.0);
+            let mut line = format!("ref {:14}", s.name);
+            for bone in [18usize, 21, 22, 24, 25] {
+                let q = |m: &glam::Mat4| glam::Quat::from_mat4(m);
+                line += &format!(" | {} f0 {:.0} f1 {:.0}", skel.names[bone].trim_start_matches("body__"), q(&rest[bone]).angle_between(q(&a[bone])).to_degrees(), q(&rest[bone]).angle_between(q(&b[bone])).to_degrees());
+            }
+            println!("{line}");
+        }
+    }
     // HP3_PROBE_SEQ=<sequence>: how far a few bones travel over the sequence (root motion and sway).
     if let (Ok(name), Some(set)) = (std::env::var("HP3_PROBE_SEQ"), &anim)
         && let Some(seq) = set.find(&name)
