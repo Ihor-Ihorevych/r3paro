@@ -188,6 +188,8 @@ pub struct GpuMesh {
     pub local: Mat4,
     /// The middle of the mesh's bounding box in its own space: what the original lights it from (its picture sphere's centre).
     pub bounds_centre: glam::Vec3,
+    /// Half the diagonal of the mesh's bounding box, in its own space.
+    pub bounds_radius: f32,
 }
 
 pub struct Dynamic {
@@ -392,7 +394,8 @@ impl Dynamic {
             hi = hi.max(p);
         }
         let bounds_centre = if lo.x <= hi.x { (lo + hi) * 0.5 } else { glam::Vec3::ZERO };
-        GpuMesh { draws, local: geom.local, bounds_centre }
+        let bounds_radius = if lo.x <= hi.x { (hi - lo).length() * 0.5 } else { 0.0 };
+        GpuMesh { draws, local: geom.local, bounds_centre, bounds_radius }
     }
 
     /// Moves an uploaded skeletal mesh's vertices to posed `points` (indexed like the mesh's points), from the next draw on.

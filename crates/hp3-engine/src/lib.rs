@@ -671,6 +671,18 @@ pub struct View {
 const CULL_RADIUS: f32 = 400.0;
 
 impl View {
+    /// True when a sphere of `radius` around `at` lies outside a cone a little wider than the view (the same cone as `rules_out`).
+    fn rules_out_sphere(&self, at: Vec3, radius: f32) -> bool {
+        let d = at - self.eye;
+        let dist = d.length();
+        if dist <= radius {
+            return false;
+        }
+        let angle = (d.dot(self.forward) / dist).clamp(-1.0, 1.0).acos().to_degrees();
+        let cone = self.fov_degrees * 0.5 + 25.0 + (radius / dist).clamp(0.0, 1.0).asin().to_degrees();
+        angle > cone
+    }
+
     /// True when something with `CULL_RADIUS` around `at` lies outside a cone a little wider than the view.
     fn rules_out(&self, at: Vec3) -> bool {
         let d = at - self.eye;
@@ -744,6 +756,7 @@ pub fn actor_instances(
     static HIDE_ACTOR: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     let draw_debug = DRAW_DEBUG.get_or_init(|| std::env::var("HP3_DRAW_DEBUG").ok().map(|n| format!(".{n}"))).as_deref();
     let hide_actor = HIDE_ACTOR.get_or_init(|| std::env::var("HP3_HIDE_ACTOR").ok().map(|n| format!(".{n}"))).as_deref();
+    let no_cull = std::env::var_os("HP3_NO_CULL").is_some();
     let named = |vm: &Vm<'_>, a: ObjId, suffix: Option<&str>| suffix.is_some_and(|s| { let p = hp3_script::natives::object_path(vm, a); p.ends_with(s) || p == s.trim_start_matches('.') });
     // Whether an actor can draw at all is worked out again only for actors written since the last frame (see `hp3_world::memo`).
     let mut memo = std::mem::take(&mut world(vm).memo_draw);
@@ -838,6 +851,17 @@ pub fn actor_instances(
         let tick = world(vm).frame;
         let (shown, turn) = cache.smooth(a, tick, loc, rot, blend);
         let transform = hp3_world::anim::hang_correction(vm, a) * Mat4::from_translation(shown + prepivot) * turn * Mat4::from_scale(s3 * scale);
+        // A static mesh that cannot be in view is not lit, shadowed or drawn (skeletal ones were left out above). Debugging with
+        // HP3_NO_CULL=1 keeps them.
+        if draw_type != DT_MESH
+            && let Some(v) = &view
+        {
+            let m = transform * gpu.local;
+            let reach = gpu.bounds_radius * m.x_axis.truncate().length().max(m.y_axis.truncate().length()).max(m.z_axis.truncate().length());
+            if v.rules_out_sphere(m.transform_point3(gpu.bounds_centre), reach) && !no_cull {
+                continue;
+            }
+        }
         // Lit as the original lights an actor: per vertex, by the lights that reach its bounding sphere.
         let mut light = match lighting {
             Some(l) => {
