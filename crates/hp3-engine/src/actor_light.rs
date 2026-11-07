@@ -49,6 +49,20 @@ struct Slots {
     coll_height: Option<usize>,
 }
 
+/// How long a lit actor's lights are reused while nothing about it or the lights has changed (seconds of level time).
+const MEMO_TIME: f32 = 0.05;
+/// How far (squared, world units) an actor may have moved and still have its lights reused: the lights it is given vary over
+/// hundreds of units, and the memo is retired after `MEMO_TIME` anyway.
+const MEMO_MOVE2: f32 = 16.0;
+
+struct LitMemo {
+    centre: Vec3,
+    key: (u32, usize),
+    version: u64,
+    time: f32,
+    result: ActorLight,
+}
+
 /// What the actor lighting remembers between frames.
 #[derive(Default)]
 pub struct LightCache {
@@ -66,6 +80,12 @@ pub struct LightCache {
     vis: HashMap<(ObjId, ObjId), (bool, bool, f32)>,
     /// Line-of-sight traces left to spend this frame.
     budget: u32,
+    /// Bumped whenever the lights themselves change (a light is added, switched, recoloured or moved), which retires `memo`.
+    version: u64,
+    lights_hash: u64,
+    /// What each actor was last lit with, for an actor that has not moved: reused for a few ticks (the fades and flickers
+    /// it skips are a twentieth of a second).
+    memo: HashMap<ObjId, LitMemo>,
 }
 
 /// The seconds of the running level.
@@ -119,6 +139,11 @@ impl LightCache {
         if self.built.is_none_or(|b| tick < b || tick - b >= 5) {
             self.built = Some(tick);
             self.lights = rebuild(vm, &s);
+            let hash = hash_lights(&self.lights);
+            if hash != self.lights_hash {
+                self.lights_hash = hash;
+                self.version += 1;
+            }
             self.grid.clear();
             self.always.clear();
             for (i, l) in self.lights.iter().enumerate() {
@@ -136,7 +161,11 @@ impl LightCache {
         } else {
             for l in &mut self.lights {
                 if !l.is_static && !vm.db.objects.get(l.id).deleted && l.source.direction.is_none() {
-                    l.source.position = hp3_world::read_vec(vm, l.id, s.location);
+                    let at = hp3_world::read_vec(vm, l.id, s.location);
+                    if at != l.source.position {
+                        l.source.position = at;
+                        self.version += 1;
+                    }
                 }
             }
         }
@@ -212,6 +241,21 @@ fn rebuild(vm: &mut Vm<'_>, s: &Slots) -> Vec<LiveLight> {
 }
 
 const LIGHT_UPDATE_TIME: f32 = 0.35;
+
+/// A fingerprint of everything about the lights that lights an actor.
+fn hash_lights(lights: &[LiveLight]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for l in lights {
+        l.id.0.hash(&mut h);
+        for v in [l.source.position, l.source.color, l.base_color, l.source.aim] {
+            v.to_array().map(f32::to_bits).hash(&mut h);
+        }
+        [l.source.radius, l.source.cone, l.period, l.phase, l.brightness].map(f32::to_bits).hash(&mut h);
+        (l.kind, l.source.effect, l.is_static, l.dynamic, l.source.direction.is_some()).hash(&mut h);
+    }
+    h.finish()
+}
 
 /// The factors the level's baked lighting is scaled by (ambient, lights), the same as for the static meshes and the BSP, so
 /// characters match the surfaces they stand on. `HP3_MESH_AMB_MUL` and `HP3_MESH_MUL` change them.
@@ -292,6 +336,22 @@ pub(crate) fn actor_light_for(
     time: f32,
 ) -> ActorLight {
     let s = lc.slots(vm);
+    let key = (sphere.to_bits(), lighting as *const Lighting as usize);
+    if let Some(m) = lc.memo.get(&actor)
+        && m.key == key
+        && (m.centre - centre).length_squared() < MEMO_MOVE2
+        && m.version == lc.version
+        && (time - m.time).abs() < MEMO_TIME
+    {
+        return m.result.clone();
+    }
+    let result = lit_now(vm, lc, lighting, actor, centre, sphere, time, s);
+    lc.memo.insert(actor, LitMemo { centre, key, version: lc.version, time, result: result.clone() });
+    result
+}
+
+/// `actor_light_for` without the memory.
+fn lit_now(vm: &mut Vm<'_>, lc: &mut LightCache, lighting: &Lighting, actor: ObjId, centre: Vec3, sphere: f32, time: f32, s: Slots) -> ActorLight {
     let unlit = read(vm, actor, s.unlit).as_bool();
     let glow = match read(vm, actor, s.glow).as_byte() {
         255 => 0.25 + 0.2 * (8.0 * time).sin(),
