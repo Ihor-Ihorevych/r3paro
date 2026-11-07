@@ -95,8 +95,8 @@ fn list_class(vm: &mut hp3_script::Vm<'_>) {
                         println!("      emitter {i}: texture {tex_desc:?} blend {:?}", hp3_world::get(vm, eo, "ColorMultiplierRange"));
                         if std::env::var_os("HP3_LIST_EMITTER_PROPS").is_some() {
                             let mut line = String::new();
-                            for n in ["RotationNormal", "UseRotationFrom", "RotationOffset", "EffectAxis", "CoordinateSystem", "SpinParticles", "UseDirectionAs", "MaxParticles", "InitialParticlesPerSecond", "ParticlesPerSecond", "AutomaticInitialSpawning", "StartLocationShape", "SphereRadiusRange", "StartLocationRange", "LifetimeRange", "StartLocationPolarRange", "ColorScale", "ColorMultiplierRange", "FadeOutStartTime", "FadeInEndTime", "StartSizeRange", "Opacity", "RespawnDeadParticles", "Disabled", "UseCollision", "SecondsBeforeInactive", "ParticleLifeTime"] {
-                                line.push_str(&format!(" {n}={:?}", hp3_world::get(vm, eo, n)));
+                            for n in std::env::var("HP3_LIST_EMITTER_ONLY").map(|v| v.split(',').map(String::from).collect::<Vec<_>>()).unwrap_or_else(|_| ["RotationNormal", "UseRotationFrom", "RotationOffset", "EffectAxis", "CoordinateSystem", "SpinParticles", "UseDirectionAs", "MaxParticles", "InitialParticlesPerSecond", "ParticlesPerSecond", "AutomaticInitialSpawning", "StartLocationShape", "SphereRadiusRange", "StartLocationRange", "LifetimeRange", "StartLocationPolarRange", "ColorScale", "ColorMultiplierRange", "FadeOutStartTime", "FadeInEndTime", "StartSizeRange", "Opacity", "RespawnDeadParticles", "Disabled", "UseCollision", "SecondsBeforeInactive", "ParticleLifeTime"].iter().map(|s| s.to_string()).collect()) {
+                                line.push_str(&format!(" {n}={:?}", hp3_world::get(vm, eo, &n)));
                             }
                             println!("        {line}");
                         }

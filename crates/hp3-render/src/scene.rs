@@ -811,7 +811,8 @@ fn build_lightmaps(model: &hp3_assets::model::Model, lighting: &Lighting) -> Vec
     // HP3 builds a light's lightmap palette as level x color, without the doubling of UT2004's (its MergeLightMap
     // shifts by the light's factor, not one less): each light adds half of what the falloff below gives. The ambient
     // fill (half the zone's light) is the same as UT2004's.
-    const HP3_LIGHTMAP_SCALE: f32 = 0.5;
+    let hp3_bsp_amb_mul: f32 = std::env::var("HP3_BSP_AMB_MUL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.25);
+    let hp3_lightmap_scale: f32 = 0.5 * std::env::var("HP3_LM_MUL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.6);
     let mut pages: Vec<Vec<f32>> = vec![Vec::new(); model.light_map_textures.len()];
     for (pi, page) in model.light_map_textures.iter().enumerate() {
         let mut texels = vec![0.0f32; n * n * 3];
@@ -839,11 +840,11 @@ fn build_lightmaps(model: &hp3_assets::model::Model, lighting: &Lighting) -> Vec
                         continue;
                     }
                     let p = base + ax * (x as f32 + 0.5) + ay * (y as f32 + 0.5);
-                    let mut c = surf_ambient.get(&lm.surf).copied().unwrap_or(lighting.ambient) * 0.5;
+                    let mut c = surf_ambient.get(&lm.surf).copied().unwrap_or(lighting.ambient) * 0.5 * hp3_bsp_amb_mul;
                     for (l, bm) in &lights {
                         let shadow = soft_shadow(bm, x as i32, y as i32);
                         if shadow > 0.0 {
-                            c = (c + l.at_wall(p, normal, two_sided) * shadow * HP3_LIGHTMAP_SCALE).min(GVec3::ONE);
+                            c = (c + l.at_wall(p, normal, two_sided) * shadow * hp3_lightmap_scale).min(GVec3::ONE);
                         }
                     }
                     let t = (py * n + px) * 3;
@@ -906,14 +907,25 @@ fn add_bsp(b: &mut Batcher<'_, '_>, map: &Rc<Package>, lighting: Option<&Lightin
             continue;
         }
         let texture = b.texture_for(&mp, section.material);
+        if std::env::var_os("HP3_BSP_MATS").is_some() {
+            let kind = section.material.export().map(|i| b.loader.set.export_chain(&mp, i).first().cloned().unwrap_or_default()).unwrap_or_default();
+            eprintln!("bspmat {} kind {} flags {:#x}/{:#x}", mp.ref_path(section.material), kind, surf_flags, section.poly_flags);
+        }
         let first = node.first_vertex as usize;
         let n = node.num_vertices as usize;
         let Some(verts) = section.vertices.get(first..first + n) else { continue };
         let page = (section.light_map_texture as usize) < b.scene.lightmaps.len();
-        let lit = page && (surf_flags | section.poly_flags) & UNLIT == 0;
+        // The window panes are backlit by the sky outside: HP3 shows them at their own brightness, not the room's.
+        let backlit = {
+            let path = mp.ref_path(section.material).to_ascii_lowercase();
+            path.contains(".windows.") && (path.contains("window") || path.contains("shutter_light")) && std::env::var_os("HP3_NO_WINDOW_GLOW").is_none()
+        };
+        let lit = page && !backlit && (surf_flags | section.poly_flags) & UNLIT == 0;
         let lightmap = lit.then_some(section.light_map_texture as usize);
         // Lit surfaces take their light from the lightmap, the others from the white one; the vertex color is neutral.
-        let color = [0.5, 0.5, 0.5];
+        // A backlit pane shows 1.55 times its texture (measured: 95/95/110 in the original against 60/60/70 at the texture's own brightness).
+        let glow = if backlit { std::env::var("HP3_WINDOW_GLOW").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.55) } else { 1.0 };
+        let color = [0.5 * glow; 3];
         let batch = b.batch(texture, lightmap);
         let base = batch.vertices.len() as u32;
         for v in verts {
@@ -1015,6 +1027,9 @@ fn add_actors(b: &mut Batcher<'_, '_>, map: &Rc<Package>, include: &dyn Fn(usize
             Asset::StaticMeshInstance(smi) if smi.colors.len() == sm.vertices.len() => Some(smi.colors.clone()),
             _ => None,
         });
+        if std::env::var_os("HP3_LIGHT_ALL").is_some() { eprintln!("meshlight {}", if baked.is_some() { "baked" } else if instance.is_some() { "instance-mismatch" } else { "none" }); }
+        let mesh_mul: f32 = std::env::var("HP3_MESH_MUL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.6);
+        let mesh_amb_mul: f32 = std::env::var("HP3_MESH_AMB_MUL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.25);
         let transform = Mat4::from_translation(pos) * rotation_matrix(rotation) * Mat4::from_scale(scale3d * scale) * Mat4::from_translation(-prepivot);
         let uvs = sm.uv_streams.first().map(|s| s.uvs.as_slice()).unwrap_or(&[]);
         for (si_, section) in sm.sections.iter().enumerate() {
@@ -1022,6 +1037,8 @@ fn add_actors(b: &mut Batcher<'_, '_>, map: &Rc<Package>, include: &dyn Fn(usize
                 Some(skin) => b.texture_for(map, skin),
                 None => materials.get(si_).copied().and_then(|m| b.texture_for(&sp, m)),
             };
+            // A section that lights itself (the orb on the Carpe Retractum font) is drawn at full brightness.
+            let self_lit = skins.get(si_).copied().is_none_or(|s| s.is_none()) && materials.get(si_).copied().is_some_and(|m| b.loader.is_self_lit(&sp, m));
             let normal_matrix = transform.inverse().transpose();
             let batch = b.batch(texture, None);
             let base = batch.vertices.len() as u32;
@@ -1037,9 +1054,10 @@ fn add_actors(b: &mut Batcher<'_, '_>, map: &Rc<Package>, include: &dyn Fn(usize
                     let p = transform.transform_point3(GVec3::new(v.x, v.y, v.z));
                     let uv = uvs.get(vi as usize).copied().unwrap_or([0.0, 0.0]);
                     let color = match (lighting, &baked) {
+                        _ if self_lit => [0.5, 0.5, 0.5],
                         (Some(_), Some(colors)) => {
                             let c = colors[vi as usize];
-                            (mesh_ambient + GVec3::new(c.r as f32, c.g as f32, c.b as f32) / 255.0).min(GVec3::ONE).to_array()
+                            (mesh_ambient * mesh_amb_mul + GVec3::new(c.r as f32, c.g as f32, c.b as f32) / 255.0 * mesh_mul).min(GVec3::ONE).to_array()
                         }
                         (Some(l), None) => {
                             let nv = sv.map(|v| v.normal).unwrap_or_default();

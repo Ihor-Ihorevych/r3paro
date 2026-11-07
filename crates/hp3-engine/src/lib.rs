@@ -103,6 +103,7 @@ pub fn lighting(vm: &mut Vm<'_>, map: &Package) -> Lighting {
         if pkg.as_ref() != map_name || get(vm, a, "LightType").as_byte() == 0 {
             continue;
         }
+        if std::env::var_os("HP3_LIGHT_ALL").is_some() { let ty = get(vm, a, "LightType").as_byte(); eprintln!("light {} type {} effect {} bright {} radius {} hue {} sat {} bStatic {} bNoDelete {} bDyn {}", hp3_script::natives::object_path(vm, a), ty, get(vm, a, "LightEffect").as_byte(), get(vm, a, "LightBrightness").as_float(), get(vm, a, "LightRadius").as_float(), get(vm, a, "LightHue").as_byte(), get(vm, a, "LightSaturation").as_byte(), get(vm, a, "bStatic").as_bool(), get(vm, a, "bNoDelete").as_bool(), get(vm, a, "bDynamicLight").as_bool()); }
         let brightness = get(vm, a, "LightBrightness").as_float() / 255.0;
         if brightness <= 0.0 {
             continue;
@@ -693,6 +694,13 @@ pub fn actor_instances(
             Ok(_) if !moving.is_empty() => eprintln!("moving lights at tick {}: {moving:?}", world(vm).frame),
             _ => {}
         }
+        // HP3_TEST_LIGHT=x,y,z,radius,r,g,b adds a quadratic light there (debugging the moving lights' shadows).
+        if let Ok(spec) = std::env::var("HP3_TEST_LIGHT") {
+            let v: Vec<f32> = spec.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+            if v.len() == 7 {
+                moving.insert(0, hp3_render::gpu::MovingLight { position: Vec3::new(v[0], v[1], v[2]), radius: v[3], color: Vec3::new(v[4], v[5], v[6]), quadratic: true });
+            }
+        }
         r.set_moving_lights(&moving);
         t
     } else {
@@ -817,6 +825,23 @@ pub fn actor_instances(
         // HP3 gives a static mesh half of its zone ambient (and glow), drawn alone or batched; characters keep all of it.
         if lighting.is_some() && draw_type != DT_MESH && !hp3_world::rd(vm, a, "bUnlit").as_bool() {
             light.ambient *= 0.5;
+        }
+        // Characters come out about 2.2 times brighter in the original than the level's factors (x0.25 ambient, x0.6 lights, fitted on
+        // the surfaces) give: measured on Ron's robe in the Carpe Retractum font room, 39/61/43 against 16/28/22 here.
+        // `HP3_CHAR_MUL` changes it (1 = the level's factors).
+        if lighting.is_some() && !hp3_world::rd(vm, a, "bUnlit").as_bool() {
+            static CHAR_MUL: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+            static ACTOR_MUL: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+            let k = if draw_type == DT_MESH {
+                *CHAR_MUL.get_or_init(|| std::env::var("HP3_CHAR_MUL").ok().and_then(|v| v.parse().ok()).unwrap_or(2.45))
+            } else {
+                // Static meshes drawn as actors (movers, the Depulso tiles) come out the same 2.45 times brighter: 190 against 143 on the tile at 1.85.
+                *ACTOR_MUL.get_or_init(|| std::env::var("HP3_ACTOR_MUL").ok().and_then(|v| v.parse().ok()).unwrap_or(2.45))
+            };
+            light.ambient *= k;
+            for l in &mut light.lights {
+                l.color *= k;
+            }
         }
         if named(vm, a, draw_debug) && let Some(extra) = std::env::var("HP3_DEBUG_AMBIENT").ok().and_then(|v| v.parse::<f32>().ok()) {
             light.ambient += Vec3::splat(extra);

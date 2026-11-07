@@ -1661,6 +1661,36 @@ fn build_volume_hulls(vm: &mut Vm<'_>) -> Vec<VolumeHull> {
     out
 }
 
+/// How far past its brush a slide still holds the player who is on it (units). The ice a hero slides on is wider and longer than
+/// the volume laid over it, and at its edges, corners and joins the volume ended under his feet: the slide ended on the spot
+/// (back to walking, ground friction, a dead stop, then the restart). The slide ends where the surface does, not where the brush does.
+const SLIDE_HOLD_MARGIN: f32 = 192.0;
+
+/// Whether the pawn's controller is in the state called `name`.
+fn controller_state_is(vm: &mut Vm<'_>, pawn: ObjId, name: &str) -> bool {
+    let Some(c) = get(vm, pawn, "Controller").as_obj() else { return false };
+    vm.state_of(c).is_some_and(|s| vm.db.names.get(vm.db.get(s).name).eq_ignore_ascii_case(name))
+}
+
+/// Whether `volume` is a sliding volume.
+fn is_sliding_volume(vm: &mut Vm<'_>, volume: ObjId) -> bool {
+    let Some(class) = vm.db.find("SlidingVolume") else { return false };
+    vm.db.objects.get(volume).class.is_some_and(|c| vm.is_child_of(c, class))
+}
+
+/// Whether `p` is within `margin` of the brush of `volume`.
+fn volume_holds_within(vm: &mut Vm<'_>, volume: ObjId, p: glam::Vec3, margin: f32) -> bool {
+    if world(vm).volume_hulls.is_none() {
+        let hulls = build_volume_hulls(vm);
+        world(vm).volume_hulls = Some(hulls);
+    }
+    let Some(hulls) = &world(vm).volume_hulls else { return false };
+    hulls.iter().filter(|h| h.actor == volume).any(|h| {
+        let m = glam::Vec3::splat(margin);
+        !(p.cmplt(h.lo - m).any() || p.cmpgt(h.hi + m).any()) && h.planes.iter().all(|(n, d)| n.dot(p) - d <= margin + 0.5)
+    })
+}
+
 /// Which physics volume a pawn is in after it has moved: the highest priority one whose brush holds its location, else
 /// the level's default. A change is told to the volumes, the pawn and its controller (`NotifyPhysicsVolumeChange`),
 /// which is how a sliding volume puts the player into its sliding state.
@@ -1684,10 +1714,32 @@ fn update_physics_volume_now(vm: &mut Vm<'_>, a: ObjId) {
     let here = vec_of(&get(vm, a, "Location"));
     let best = volume_holding(vm, here);
     let current = get(vm, a, "PhysicsVolume").as_obj();
-    let new = match best {
+    let mut new = match best {
         Some((_, v)) => Some(v),
         None => default_physics_volume(vm).or(current),
     };
+    // The player on a slide keeps it a good way past its brush (see SLIDE_HOLD_MARGIN), so its edges never end the slide.
+    if physics::is_player_pawn(vm, a)
+        && let (Some(cur), Some(n)) = (current, new)
+        && n != cur
+        && !is_sliding_volume(vm, n)
+        && is_sliding_volume(vm, cur)
+        && controller_state_is(vm, a, "PlayerSliding")
+        && volume_holds_within(vm, cur, here, SLIDE_HOLD_MARGIN)
+    {
+        new = current;
+    }
+    // A player in a sliding volume whose controller is walking (a restart put it back on the ice, say) slides: the controller
+    // only hears of a volume when it changes.
+    if new == current
+        && let Some(cur) = current
+        && physics::is_player_pawn(vm, a)
+        && is_sliding_volume(vm, cur)
+        && controller_state_is(vm, a, "PlayerWalking")
+        && let Some(c) = get(vm, a, "Controller").as_obj()
+    {
+        fire(vm, c, "NotifyPhysicsVolumeChange", &mut [Value::Object(Some(cur))]);
+    }
     if new == current || new.is_none() {
         return;
     }

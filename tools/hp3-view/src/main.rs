@@ -247,6 +247,7 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
     }
     // HP3_TRIGGER=<tag> triggers the actors with that tag at tick HP3_TRIGGER_AT (default 60).
     let trigger_at: u32 = std::env::var("HP3_TRIGGER_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+    if std::env::var_os("HP3_PAWN_NAME").is_some() && let Some(p) = hp3_world::world(&mut vm).player.and_then(|pc| hp3_world::get(&mut vm, pc, "Pawn").as_obj()) { eprintln!("pawn {}", hp3_script::natives::object_path(&vm, p)); }
     for frame in 0..ticks {
         if frame == trigger_at
             && let Ok(tag) = std::env::var("HP3_TRIGGER")
@@ -434,7 +435,7 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
     if std::env::var_os("HP3_VIEW_CLASS").is_none() {
         if let Some((position, rotation, fov)) = hp3_world::player_view(&mut vm) {
             eprintln!("game camera at {position:?} rotation {rotation:?} fov {fov}");
-            camera = Camera { position, rotation, fov_degrees: fov };
+            camera = Camera { position, rotation, fov_degrees: fov + std::env::var("HP3_FOV_OFFSET").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0) };
         }
     }
     // HP3_VIEW_CAM=x,y,z,pitch,yaw places the camera explicitly.

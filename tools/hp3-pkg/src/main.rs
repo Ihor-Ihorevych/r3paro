@@ -122,7 +122,7 @@ fn dump(root: &Path, package: &str, path: &str) -> R {
             t.array_index,
             t.ty,
             t.data.len(),
-            if t.ty == hp3_package::props::TagType::Bool { format!(" = {}", t.bool_value) } else { String::new() }
+            if t.ty == hp3_package::props::TagType::Bool { format!(" = {}", t.bool_value) } else if let Some(r) = t.as_obj().filter(|_| t.ty == hp3_package::props::TagType::Object) { format!(" = {}", pkg.ref_path(r)) } else if t.ty == hp3_package::props::TagType::Struct && t.data.len() <= 16 { format!(" = {:02x?}", t.data) } else if t.ty == hp3_package::props::TagType::Float && t.data.len() == 4 { format!(" = {}", f32::from_le_bytes([t.data[0], t.data[1], t.data[2], t.data[3]])) } else if t.ty == hp3_package::props::TagType::Byte { format!(" = {:?}", t.as_u8()) } else { String::new() }
         );
     }
     match &o.body {

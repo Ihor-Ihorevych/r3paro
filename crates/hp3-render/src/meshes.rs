@@ -74,13 +74,16 @@ pub fn build_posed(
                 let mut vertices = Vec::new();
                 let mut indices = Vec::new();
                 let mut remap = std::collections::HashMap::new();
+                // A section that lights itself is given a normal a thousand long, which the actor shader reads as "full brightness".
+                let self_lit = skin(si).is_none() && materials.get(si).copied().is_some_and(|m| loader.is_self_lit(pkg, m));
                 for &vi in idx {
                     let next = vertices.len() as u32;
                     let out = *remap.entry(vi).or_insert_with(|| {
                         let p = sm.vertices.get(vi as usize).map(|v| v.position).unwrap_or_default();
                         let uv = uvs.get(vi as usize).copied().unwrap_or([0.0, 0.0]);
                         let n = sm.vertices.get(vi as usize).map(|v| v.normal).unwrap_or_default();
-                        vertices.push(Vertex { color: [n.x, n.y, n.z], ..Vertex::unlit([p.x, p.y, p.z], uv) });
+                        let color = if self_lit { [0.0, 0.0, 1000.0] } else { [n.x, n.y, n.z] };
+                        vertices.push(Vertex { color, ..Vertex::unlit([p.x, p.y, p.z], uv) });
                         next
                     });
                     indices.push(out);

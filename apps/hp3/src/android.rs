@@ -300,3 +300,8 @@ pub fn set_fps_limit(_fps: u32) {}
 pub fn fps_limit() -> u32 {
     FPS_LIMIT.load(Ordering::Relaxed) as u32
 }
+
+/// The desktop's field of view keys do nothing on the phone (its slider sets the offset).
+pub fn nudge_fov(_delta: f32) -> f32 {
+    fov_offset()
+}

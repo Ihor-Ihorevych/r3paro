@@ -59,9 +59,23 @@ mod platform {
     pub fn fps_limit() -> u32 {
         FPS_LIMIT.load(std::sync::atomic::Ordering::Relaxed)
     }
-    /// Degrees added to the game's field of view: 20 by default (as on the phone), `HP3_FOV_OFFSET=<degrees>` changes it.
+    /// Degrees added to the game's field of view: -10 by default on the desktop (the phone uses 20), `HP3_FOV_OFFSET=<degrees>` changes it.
+    pub static FOV_OFFSET: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
     pub fn fov_offset() -> f32 {
-        std::env::var("HP3_FOV_OFFSET").ok().and_then(|v| v.parse().ok()).unwrap_or(20.0)
+        use std::sync::atomic::Ordering::Relaxed;
+        let bits = FOV_OFFSET.load(Relaxed);
+        if bits != u32::MAX {
+            return f32::from_bits(bits);
+        }
+        let v = std::env::var("HP3_FOV_OFFSET").ok().and_then(|v| v.parse().ok()).unwrap_or(-10.0);
+        FOV_OFFSET.store(f32::to_bits(v), Relaxed);
+        v
+    }
+    /// Changes the field of view offset by `delta` degrees (the `[` and `]` keys) and returns the new value.
+    pub fn nudge_fov(delta: f32) -> f32 {
+        let v = (fov_offset() + delta).clamp(-60.0, 60.0);
+        FOV_OFFSET.store(f32::to_bits(v), std::sync::atomic::Ordering::Relaxed);
+        v
     }
     pub fn in_cutscene() -> bool {
         false
@@ -230,7 +244,35 @@ fn player_controls_creature(vm: &mut Vm<'_>) -> bool {
     ["LapiforPawn", "AviforPawn", "SuperChickenPawn"].iter().filter_map(|n| vm.db.find(n)).any(|c| vm.is_child_of(class, c))
 }
 
+thread_local! {
+    /// The extra field of view the slide has opened so far (degrees) and when it was last moved.
+    static DYN_FOV: std::cell::Cell<(f32, Option<Instant>)> = const { std::cell::Cell::new((0.0, None)) };
+}
+
+/// Dynamic field of view: the faster the hero slides, the wider the view (up to `HP3_DYN_FOV_MAX` degrees, 16 by default, 0 turns
+/// it off), eased in and out so it neither jumps nor lags.
+fn dynamic_fov(vm: &mut Vm<'_>) -> f32 {
+    let max: f32 = std::env::var("HP3_DYN_FOV_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(16.0);
+    let pawn = hp3_world::world(vm).player.and_then(|pc| hp3_world::get(vm, pc, "Pawn").as_obj());
+    let target = match pawn {
+        Some(p) if max > 0.0 && hp3_world::get(vm, p, "bIsSliding").as_bool() => {
+            let speed = hp3_world::physics::vec(&hp3_world::get(vm, p, "Velocity")).length();
+            ((speed - 150.0) / 450.0).clamp(0.0, 1.0) * max
+        }
+        _ => 0.0,
+    };
+    let now = Instant::now();
+    let (cur, last) = DYN_FOV.with(|c| c.get());
+    let dt = last.map_or(0.0, |l| (now - l).as_secs_f32().min(0.1));
+    // Opens over about a second, closes a little quicker.
+    let rate = if target > cur { 1.2 } else { 2.0 };
+    let next = cur + (target - cur) * (1.0 - (-rate * dt * 3.0).exp());
+    DYN_FOV.with(|c| c.set((next, Some(now))));
+    next
+}
+
 fn game_camera(vm: &mut Vm<'_>) -> Option<Camera> {
+    let extra_fov = dynamic_fov(vm);
     if let Some((mut position, rotation, fov)) = hp3_world::player_view(vm) {
         if let Some(pawn) = hp3_world::world(vm).player.and_then(|pc| hp3_world::get(vm, pc, "Pawn").as_obj()) {
             position.z += hp3_world::physics::view_offset(vm, pawn);
@@ -251,7 +293,7 @@ fn game_camera(vm: &mut Vm<'_>) -> Option<Camera> {
                     _ => hp3_world::get(vm, pawn, "CollisionHeight").as_float() * 0.8,
                 };
                 let head = hp3_world::physics::vec(&hp3_world::get(vm, pawn, "Location")) + Vec3::Z * (eye * FIRST_PERSON_EYE_SCALE);
-                return Some(Camera { position: head + forward * FIRST_PERSON_AHEAD, rotation, fov_degrees: fov + platform::fov_offset() });
+                return Some(Camera { position: head + forward * FIRST_PERSON_AHEAD, rotation, fov_degrees: fov + platform::fov_offset() + extra_fov });
             }
             // The camera stays on the player's side of a wall: it comes in along the line from the head to where it
             // would be, as far as the level's geometry lets it.
@@ -262,7 +304,7 @@ fn game_camera(vm: &mut Vm<'_>) -> Option<Camera> {
                 }
             }
         }
-        return Some(Camera { position, rotation, fov_degrees: fov + platform::fov_offset() });
+        return Some(Camera { position, rotation, fov_degrees: fov + platform::fov_offset() + extra_fov });
     }
     // The game's camera is not running: follow the pawn from behind instead.
     let pc = hp3_world::world(vm).player?;
@@ -449,6 +491,13 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                 Event::KeyDown { scancode: Some(Scancode::F11), repeat: false, .. } => levels.toggle(&current_map),
                 // F7: gamma, brightness and contrast back to the defaults (also while a menu is open).
                 Event::KeyDown { scancode: Some(Scancode::F7), repeat: false, .. } => commands::push("resetpicture"),
+                // [ and ] (or numpad - and +): the field of view narrows or widens by 5 degrees.
+                Event::KeyDown { scancode: Some(sc @ (Scancode::LeftBracket | Scancode::RightBracket | Scancode::KpMinus | Scancode::KpPlus)), .. } if !in_menu && !cfg!(target_os = "android") => {
+                    let delta = if matches!(sc, Scancode::LeftBracket | Scancode::KpMinus) { -5.0 } else { 5.0 };
+                    let v = platform::nudge_fov(delta);
+                    eprintln!("fov offset: {v:+}");
+                    let _ = window.set_title(&format!("hp3 - FOV offset {v:+}"));
+                }
                 // F10: the frame rate limit steps through the usual refresh rates, then none.
                 Event::KeyDown { scancode: Some(Scancode::F10), repeat: false, .. } => {
                     const STEPS: [u32; 8] = [30, 60, 90, 120, 144, 165, 240, 0];

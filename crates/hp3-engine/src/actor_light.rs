@@ -213,6 +213,16 @@ fn rebuild(vm: &mut Vm<'_>, s: &Slots) -> Vec<LiveLight> {
 
 const LIGHT_UPDATE_TIME: f32 = 0.35;
 
+/// The factors the level's baked lighting is scaled by (ambient, lights), the same as for the static meshes and the BSP, so
+/// characters match the surfaces they stand on. `HP3_MESH_AMB_MUL` and `HP3_MESH_MUL` change them.
+fn light_multipliers() -> (f32, f32) {
+    static M: OnceLock<(f32, f32)> = OnceLock::new();
+    *M.get_or_init(|| {
+        let get = |n: &str, d: f32| std::env::var(n).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        (get("HP3_MESH_AMB_MUL", 0.25), get("HP3_MESH_MUL", 0.6))
+    })
+}
+
 /// The ambient light an actor stands in: the strongest, per channel, of the zones its bounding sphere reaches into (the
 /// original takes it over the zones its box touches), or the map's average where no zone is found.
 fn zone_ambient_of(vm: &mut Vm<'_>, cache: &mut HashMap<ObjId, ([u32; 3], Vec3)>, lighting: &Lighting, actor: ObjId, centre: Vec3, sphere: f32) -> Vec3 {
@@ -287,7 +297,8 @@ pub(crate) fn actor_light_for(
         255 => 0.25 + 0.2 * (8.0 * time).sin(),
         g => g as f32 / 255.0,
     };
-    let ambient = if unlit { Vec3::ONE } else { zone_ambient_of(vm, &mut lc.zone_ambient, lighting, actor, centre, sphere) + Vec3::splat(glow) };
+    let (amb_mul, light_mul) = light_multipliers();
+    let ambient = if unlit { Vec3::ONE } else { zone_ambient_of(vm, &mut lc.zone_ambient, lighting, actor, centre, sphere) * amb_mul + Vec3::splat(glow) };
     // HP3_ACTOR_LIGHTS=0: ambient light only (to measure what the lights cost).
     static NO_LIGHTS: OnceLock<bool> = OnceLock::new();
     if unlit || *NO_LIGHTS.get_or_init(|| std::env::var("HP3_ACTOR_LIGHTS").is_ok_and(|v| v == "0")) {
@@ -385,7 +396,7 @@ pub(crate) fn actor_light_for(
         // Dramatically lit actors get the strongest lights boosted and the weakest dimmed.
         let fudge = if dramatic { [2.0f32, 1.5, 1.0, 0.5][out.len().min(3)] } else { 1.0 };
         let src = &l.source;
-        let color = l.base_color * intensity * alpha * fudge;
+        let color = l.base_color * intensity * alpha * fudge * if l.dynamic { 1.0 } else { light_mul };
         let shader = if let Some(dir) = src.direction {
             ShaderLight { kind: 1, direction: dir, color: color * 1.75, ..Default::default() }
         } else {

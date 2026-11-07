@@ -6,3 +6,4 @@ pub mod meshes;
 pub mod overlay;
 pub mod particles;
 pub mod scene;
+pub mod shadow;

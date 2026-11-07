@@ -155,6 +155,23 @@ struct Config {
     max_collisions: Range,
 }
 
+/// How much brighter the spells' effects are drawn than the emitters' own colours say (`HP3_SPELL_GLOW`, 1.5 by default).
+fn spell_glow() -> f32 {
+    static G: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *G.get_or_init(|| std::env::var("HP3_SPELL_GLOW").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5))
+}
+
+/// Whether an emitter actor belongs to a spell: a wand, flight, cursor or wall-hit emitter of one, or one a spell owns.
+fn is_spell_effect(vm: &mut Vm<'_>, a: ObjId) -> bool {
+    const CLASSES: [&str; 8] = ["BaseSpellEmitter", "SpellFlyEmitter", "WandEmitter", "SpellCursorEmitter", "SpellHitWallEmitter", "EPWandLightning", "baseSpell", "SpellLightVolume"];
+    let Some(class) = vm.db.objects.get(a).class else { return false };
+    let hit = |vm: &mut Vm<'_>, class| CLASSES.iter().filter_map(|n| vm.db.find(n)).any(|c| vm.is_child_of(class, c));
+    if hit(vm, class) {
+        return true;
+    }
+    get(vm, a, "Owner").as_obj().and_then(|o| vm.db.objects.get(o).class).is_some_and(|c| hit(vm, c))
+}
+
 fn float(vm: &mut Vm<'_>, o: ObjId, name: &str) -> f32 {
     get(vm, o, name).as_float()
 }
@@ -178,6 +195,10 @@ impl Config {
     fn read(vm: &mut Vm<'_>, o: ObjId) -> Config {
         let class = vm.db.objects.get(o).class.map(|c| vm.db.names.get(vm.db.get(c).name).to_ascii_lowercase()).unwrap_or_default();
         let draw_style = get(vm, o, "DrawStyle").as_byte();
+        if std::env::var_os("HP3_PARTICLE_STYLE").is_some() {
+            let tex = get(vm, o, "Texture").as_obj().map(|t| hp3_script::natives::object_path(vm, t)).unwrap_or_default();
+            eprintln!("particle style: {} draw_style {} texture {}", hp3_script::natives::object_path(vm, o), draw_style, tex);
+        }
         let blend = match draw_style {
             // Translucent and Brighten add light; Modulated and Darken darken what is behind.
             3 | 6 => Blend::Additive,
@@ -593,6 +614,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
             let needs = world(vm).particles.states.get(&key).is_none_or(|s| frame.wrapping_sub(s.refreshed) >= REFRESH_FRAMES);
             if needs {
                 let mut config = Config::read(vm, obj);
+                if std::env::var_os("HP3_PARTICLE_STYLE").is_some() { eprintln!("particle at {} loc {:?} tex {:?} style {}", hp3_script::natives::object_path(vm, obj), get(vm, a, "Location").fields().iter().map(Value::as_float).collect::<Vec<_>>(), config.material, "-"); }
                 // The circle of fake dementors stands 700-900 units out as the level has it, which is beyond the standing stones
                 // and the trees, out of sight of the fight. Closer, they ring the arena.
                 if vm.db.objects.get(a).class.is_some_and(|c| vm.db.names.get(vm.db.get(c).name).eq_ignore_ascii_case("DementorsRing")) {
@@ -854,6 +876,7 @@ pub fn collect(vm: &mut Vm<'_>, right: Vec3, up: Vec3) -> Vec<Quad> {
         if get(vm, a, "bHidden").as_bool() {
             continue;
         }
+        let glow = if is_spell_effect(vm, a) { spell_glow() } else { 1.0 };
         let origin = crate::physics::vec(&get(vm, a, "Location"));
         let rot = rotation_of(vm, a);
         let Some(s) = world(vm).particles.states.get(&key) else { continue };
@@ -890,7 +913,7 @@ pub fn collect(vm: &mut Vm<'_>, right: Vec3, up: Vec3) -> Vec<Quad> {
             {
                 alpha *= ((1.0 - t) / (1.0 - start)).max(0.0);
             }
-            let rgb = [color[0] * p.mult.x, color[1] * p.mult.y, color[2] * p.mult.z];
+            let rgb = [color[0] * p.mult.x * glow, color[1] * p.mult.y * glow, color[2] * p.mult.z * glow];
             let colour = [rgb[0], rgb[1], rgb[2], alpha.clamp(0.0, 1.0)];
             // Texture sub-frame.
             let (ud, vd) = (c.u_div.max(1), c.v_div.max(1));

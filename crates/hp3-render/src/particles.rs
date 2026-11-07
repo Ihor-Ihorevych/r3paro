@@ -170,7 +170,10 @@ impl ParticleRenderer {
         }
         let view = match key.as_ref().and_then(images) {
             Some(i) => r.upload_view(i.width, i.height, &i.rgba),
-            None => r.upload_view(1, 1, &[255, 255, 255, 255]),
+            None => {
+                if std::env::var_os("HP3_PARTICLE_STYLE").is_some() { eprintln!("particle texture missing: {key:?}"); }
+                r.upload_view(1, 1, &[255, 255, 255, 255])
+            }
         };
         let bind = Rc::new(r.texture_bind(&view));
         self.binds.borrow_mut().insert(key.clone(), bind.clone());

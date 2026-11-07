@@ -170,6 +170,14 @@ impl<'s> Loader<'s> {
         None
     }
 
+    /// Whether a material lights itself: a `Combiner` (the Carpe Retractum orb: two blue fogs blended by a pulsing mask) glows
+    /// by its own light, whatever the room's light is.
+    pub fn is_self_lit(&self, pkg: &Rc<Package>, r: ObjRef) -> bool {
+        let Some((p, i)) = self.set.resolve(pkg, r) else { return false };
+        let chain = self.set.export_chain(&p, i);
+        chain.first().is_some_and(|k| k.eq_ignore_ascii_case("Combiner"))
+    }
+
     /// How the wrappers on the way from a material reference down to its texture use the texture's alpha channel:
     /// a `FinalBlend` with `AlphaTest` (Harry's hair) or a `Shader` with masked output cuts the surface out; a `Shader`
     /// with an `Opacity` map blends it (the salamanders' flame cards); translucent output adds it.
@@ -252,15 +260,19 @@ impl<'s> Loader<'s> {
             let translucent = props::find(pkg, tags, "bAlphaTexture", 0).is_some_and(|t| t.bool_value);
             (format, palette, (masked, translucent))
         })?;
-        let format = Format::from_u8(format)?;
+        let format0 = format;
+        let format = Format::from_u8(format);
+        if std::env::var_os("HP3_PARTICLE_STYLE").is_some() && format.is_none() { eprintln!("tex {}#{index}: unknown format byte {format0}", pkg.name); }
+        let format = format?;
         // A procedural texture (fire, water...) keeps the picture it was saved with, which stands in for it.
-        let asset = self.asset(pkg, index)?;
+        let asset = self.asset(pkg, index);
+        if std::env::var_os("HP3_PARTICLE_STYLE").is_some() && asset.is_none() { eprintln!("tex {}#{index}: asset unreadable", pkg.name); }
+        let asset = asset?;
         let tex = match &*asset {
             Asset::Texture(t) => t,
             Asset::Procedural(p) => &p.texture,
             _ => return None,
         };
-        let mip = tex.mips.first()?;
         let palette = match palette_ref.and_then(|p| self.set.resolve(pkg, p)) {
             Some((ppkg, pi)) => match self.asset(&ppkg, pi).as_deref() {
                 Some(Asset::Palette(p)) => Some(p.clone()),
@@ -268,12 +280,22 @@ impl<'s> Loader<'s> {
             },
             None => None,
         };
-        let data = pkg.data.get(mip.data_offset..mip.data_offset + mip.data_len)?;
-        let (w, h) = (mip.width as usize, mip.height as usize);
-        let mut rgba = texture::decode_rgba(format, w, h, data, palette.as_ref())?;
+        // A procedural texture can be saved with no picture at all (fire sparks): it is then blank, and gets the glow below.
+        let is_procedural = matches!(&*asset, Asset::Procedural(_));
+        let mip = tex.mips.first();
+        let (w, h, data): (usize, usize, &[u8]) = match mip.and_then(|m| Some((m, pkg.data.get(m.data_offset..m.data_offset + m.data_len)?))) {
+            Some((m, d)) => (m.width as usize, m.height as usize, d),
+            None if is_procedural => (64, 64, &[]),
+            None => return None,
+        };
+        let mut rgba = match texture::decode_rgba(format, w, h, data, palette.as_ref()) {
+            Some(r) => r,
+            None if is_procedural => vec![0u8; w * h * 4],
+            None => return None,
+        };
         // A procedural texture saved with an empty picture (a fire spark: the engine draws its sparks at run time)
         // is shown as a soft round glow in the colours of its palette, dark at the edge to bright at the middle.
-        let blank_procedural = matches!(&*asset, Asset::Procedural(_)) && format == Format::P8 && data.iter().take(w * h).all(|&b| b == 0);
+        let blank_procedural = is_procedural && (data.is_empty() || (format == Format::P8 && data.iter().take(w * h).all(|&b| b == 0)));
         if blank_procedural
             && let Some(pal) = palette.as_ref().filter(|p| p.colors.len() >= 2)
         {
@@ -286,6 +308,11 @@ impl<'s> Loader<'s> {
                     rgba[o..o + 4].copy_from_slice(&[c.r, c.g, c.b, (glow * 255.0) as u8]);
                 }
             }
+        }
+        if std::env::var_os("HP3_PARTICLE_STYLE").is_some() && keep_alpha {
+            let (lo, hi) = rgba.chunks_exact(4).fold((255u8, 0u8), |(l, h), p| (l.min(p[3]), h.max(p[3])));
+            let corner = &rgba[..4];
+            eprintln!("tex {}#{index}: {format:?} {w}x{h} masked {} alphatex {} alpha {lo}..{hi} corner {corner:?}", pkg.name, masked.0, masked.1);
         }
         let (masked, translucent) = masked;
         let masked = masked && !blank_procedural;

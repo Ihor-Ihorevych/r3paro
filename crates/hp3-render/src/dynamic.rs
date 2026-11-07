@@ -49,6 +49,11 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @l
     o.pos = globals.view_proj * wp;
     o.uv = uv;
     o.fade = 1.0 - m.extra.x;
+    // A normal a thousand long marks a surface that lights itself (a glowing orb): full brightness (the output is doubled).
+    if (length(normal) > 100.0) {
+        o.light = vec3<f32>(0.5);
+        return o;
+    }
     let n = normalize((m.model * vec4<f32>(normal, 0.0)).xyz);
     var lit = m.ambient.rgb;
     let count = i32(m.ambient.w);

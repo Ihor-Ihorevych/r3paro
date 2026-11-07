@@ -20,6 +20,10 @@ fn fog_factor(w: f32) -> f32 {
 @group(1) @binding(1) var samp: sampler;
 @group(1) @binding(2) var lightmap: texture_2d<f32>;
 @group(1) @binding(3) var lsamp: sampler;
+// Depth cube maps of the static level seen from the two nearest moving lights (the nearest is slot 1), for their shadows.
+@group(2) @binding(0) var shadow0: texture_depth_cube;
+@group(2) @binding(1) var shadow1: texture_depth_cube;
+@group(2) @binding(2) var shadow_samp: sampler_comparison;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -40,6 +44,17 @@ struct VsOut {
     return o;
 }
 
+// How much of a light reaches `v`, the vector from the light to a surface point: the depth stored in the light's cube map
+// along the dominant axis against the point's, a little in front of it, softened by the sampler's 2x2 comparison.
+fn shadow_visibility(slot: i32, v: vec3<f32>, far: f32) -> f32 {
+    let m = max(max(abs(v.x), abs(v.y)), abs(v.z));
+    let near = 2.0;
+    let mm = max(m - 1.5 - 0.015 * m, near + 0.01);
+    let depth = far * (mm - near) / (mm * (far - near));
+    if (slot == 1) { return textureSampleCompareLevel(shadow0, shadow_samp, v, depth); }
+    return textureSampleCompareLevel(shadow1, shadow_samp, v, depth);
+}
+
 // What the moving lights (a wand's glow, spells) add over the static lighting, times the texture. The face's normal comes
 // from the screen derivatives, turned to the viewer; a light lights only the side it is on. Walls take the original's
 // projected disc: the color dimmed by the light's distance from the plane, fading out to the edge of the disc the light's
@@ -57,27 +72,38 @@ fn moving_light(world: vec3<f32>, mesh: bool) -> vec3<f32> {
         let r = a.w;
         let d2 = dot(to_light, to_light);
         if (d2 >= r * r) { continue; }
+        // b.w: 1 for the quadratic kind, plus 2 times the light's shadow slot (0 for none).
+        let code = i32(b.w + 0.5);
+        let quad = (code & 1) == 1;
+        let slot = code >> 1;
+        var vis = 1.0;
+        if (slot > 0) {
+            // The point is moved a little off its surface towards the light, so the surface does not shadow itself.
+            let side = select(-1.0, 1.0, dot(to_light, n) > 0.0);
+            vis = shadow_visibility(slot, world + n * side * 1.0 - a.xyz, r);
+            if (vis <= 0.0) { continue; }
+        }
         // The normal's sign from the derivatives depends on the screen's handedness: either way, the face lit is the light's side.
         let h = abs(dot(to_light, n));
         if (mesh) {
             let d = sqrt(d2);
             let cosine = h / max(d, 0.001);
             var att = 0.0;
-            if (b.w > 0.5) {
+            if (quad) {
                 att = min(r * r / max(8.0 * d2, 0.001), 1.0);
             } else {
                 let x = d / r;
                 att = min((2.0 * x * x * x - 3.0 * x * x + 1.0) * 2.0, 1.0);
             }
-            sum = sum + min(b.rgb * att * cosine, vec3<f32>(1.0)) * 2.0;
+            sum = sum + min(b.rgb * att * cosine, vec3<f32>(1.0)) * 2.0 * vis;
         } else {
             let disc = sqrt(max(r * r - h * h, 0.0));
             let along = sqrt(max(d2 - h * h, 0.0));
             let edge = max(1.0 - along / max(disc, 0.001), 0.0);
-            if (b.w > 0.5) {
-                sum = sum + min(b.rgb * sqrt(max(1.0 - h * h / (r * r), 0.0)), vec3<f32>(1.0)) * edge;
+            if (quad) {
+                sum = sum + min(b.rgb * sqrt(max(1.0 - h * h / (r * r), 0.0)), vec3<f32>(1.0)) * edge * vis;
             } else {
-                sum = sum + min(b.rgb * sqrt(max(1.0 - h / r, 0.0)), vec3<f32>(1.0)) * edge * 2.0;
+                sum = sum + min(b.rgb * sqrt(max(1.0 - h / r, 0.0)), vec3<f32>(1.0)) * edge * 2.0 * vis;
             }
         }
     }
@@ -150,6 +176,10 @@ pub struct Renderer {
     moving_lights: std::cell::Cell<[Option<MovingLight>; MAX_MOVING_LIGHTS]>,
     /// Lightmap of surfaces lit by their vertex colors: one texel at half, which the shader doubles to one.
     white_lightmap: wgpu::TextureView,
+    /// The cube maps that shadow the nearest moving lights.
+    shadows: crate::shadow::ShadowMaps,
+    /// Numbers the uploaded scenes, so a shadow map made for one is not kept for the next.
+    scene_count: std::cell::Cell<u64>,
     pub color_format: wgpu::TextureFormat,
     pub adapter_info: String,
 }
@@ -272,9 +302,10 @@ impl Renderer {
                 },
             ],
         });
+        let shadows = crate::shadow::ShadowMaps::new(&device);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("scene"),
-            bind_group_layouts: &[&globals_layout, &texture_layout],
+            bind_group_layouts: &[&globals_layout, &texture_layout, &shadows.layout],
             push_constant_ranges: &[],
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -404,6 +435,8 @@ impl Renderer {
             fog: std::cell::Cell::new(None),
             moving_lights: std::cell::Cell::new([None; MAX_MOVING_LIGHTS]),
             white_lightmap,
+            shadows,
+            scene_count: std::cell::Cell::new(0),
             color_format,
             adapter_info: {
                 let missing = wgpu::DownlevelFlags::compliant() - adapter.get_downlevel_capabilities().flags;
@@ -510,9 +543,17 @@ impl Renderer {
         let lightmaps: Vec<wgpu::TextureView> =
             scene.lightmaps.iter().map(|img| upload_linear(&self.device, &self.queue, img.width, img.height, &img.rgba)).collect();
         let mut draws = Vec::new();
+        // The opaque triangles of the level, as the moving lights' shadows see them.
+        let mut shadow_positions: Vec<[f32; 3]> = Vec::new();
+        let mut shadow_indices: Vec<u32> = Vec::new();
         for batch in &scene.batches {
             if batch.indices.is_empty() {
                 continue;
+            }
+            if batch.blend.is_none() && !batch.sky && !batch.texture.as_ref().and_then(|k| scene.images.get(k)).is_some_and(|i| i.translucent && !mostly_binary_alpha(i)) {
+                let base = shadow_positions.len() as u32;
+                shadow_positions.extend(batch.vertices.iter().map(|v| v.position));
+                shadow_indices.extend(batch.indices.iter().map(|&i| i + base));
             }
             let view = batch.texture.as_ref().and_then(|k| views.get(k)).unwrap_or(&white);
             let second = match &batch.blend {
@@ -549,7 +590,10 @@ impl Renderer {
             layout: &self.globals_layout,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: sky_globals.as_entire_binding() }],
         });
-        GpuScene { globals, globals_bg, draws, sky: scene.sky, sky_globals, sky_globals_bg }
+        let id = self.scene_count.get() + 1;
+        self.scene_count.set(id);
+        let shadow_geom = crate::shadow::ShadowGeom::new(&self.device, &shadow_positions, &shadow_indices);
+        GpuScene { globals, globals_bg, draws, sky: scene.sky, sky_globals, sky_globals_bg, shadow_geom, id }
     }
 
     /// Slides the pictures of scrolling materials (the scenery outside a train's windows) to where `seconds` of the level's
@@ -594,15 +638,26 @@ impl Renderer {
             globals[20..23].copy_from_slice(&[f.start, f.end, 1.0]);
         }
         let mut count = 0;
+        // The nearest lights (they come sorted so) that reach the camera's view get shadows, in slots 1 and 2.
+        let mut shadowed: Vec<MovingLight> = Vec::new();
         for l in self.moving_lights.get().iter().flatten() {
             let at = 24 + count * 8;
+            let slot = if self.shadows.enabled && scene.shadow_geom.is_some() && shadowed.len() < crate::shadow::MAX_SHADOW_LIGHTS && l.position.distance(camera.position) < l.radius + 1500.0 {
+                shadowed.push(*l);
+                shadowed.len()
+            } else {
+                0
+            };
             globals[at..at + 4].copy_from_slice(&[l.position.x, l.position.y, l.position.z, l.radius]);
-            globals[at + 4..at + 8].copy_from_slice(&[l.color.x, l.color.y, l.color.z, if l.quadratic { 1.0 } else { 0.0 }]);
+            globals[at + 4..at + 8].copy_from_slice(&[l.color.x, l.color.y, l.color.z, (if l.quadratic { 1 } else { 0 } + 2 * slot) as f32]);
             count += 1;
         }
         globals[23] = count as f32;
         self.queue.write_buffer(&scene.globals, 0, bytemuck::cast_slice(&globals));
         let mut enc = self.device.create_command_encoder(&Default::default());
+        if let Some(geom) = scene.shadow_geom.as_ref().filter(|_| !shadowed.is_empty()) {
+            self.shadows.render(&self.queue, &mut enc, geom, scene.id, &shadowed);
+        }
         let clear_color = match fog {
             Some(f) if f.clear => f.color,
             _ => glam::Vec3::ZERO,
@@ -671,6 +726,8 @@ impl Renderer {
                 1 => &self.blend_pipeline,
                 _ => &self.alpha_pipeline,
             });
+            // Group 2 is set here, not once: actors drawn between the passes bind their own.
+            pass.set_bind_group(2, &self.shadows.bind, &[]);
             for d in scene.draws.iter().filter(|d| d.pass == which && d.sky == sky) {
                 pass.set_bind_group(1, &d.bind, &[]);
                 pass.set_vertex_buffer(0, d.vertices.slice(..));
@@ -794,6 +851,9 @@ pub struct GpuScene {
     sky: Option<glam::Vec3>,
     sky_globals: wgpu::Buffer,
     sky_globals_bg: wgpu::BindGroup,
+    /// What the moving lights' shadows are made from (none for a scene without opaque geometry).
+    shadow_geom: Option<crate::shadow::ShadowGeom>,
+    id: u64,
 }
 
 impl Renderer {

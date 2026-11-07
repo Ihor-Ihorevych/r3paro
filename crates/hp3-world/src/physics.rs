@@ -368,7 +368,20 @@ fn floor_report(vm: &mut Vm<'_>, a: ObjId) -> String {
     out
 }
 
+/// The least `normal.z` a floor has to have for a pawn to stand on it. HP3's heroes set `fMinFloorZ` to 0.01 while they
+/// slide (`StartSliding`), so the whole track holds them however steep it is, and put it back after (`EndSliding`).
+pub(crate) fn min_floor_z(vm: &mut Vm<'_>, a: ObjId) -> f32 {
+    if get(vm, a, "bIsSliding").as_bool() {
+        let z = get(vm, a, "fMinFloorZ").as_float();
+        if z > 0.0 && z < WALKABLE_Z {
+            return z;
+        }
+    }
+    WALKABLE_Z
+}
+
 fn floor_below(vm: &mut Vm<'_>, a: ObjId, depth: f32) -> Option<Hit> {
+    let wz = min_floor_z(vm, a);
     let loc = vec(&get(vm, a, "Location"));
     let ext = extent(vm, a);
     let player = blocked_as_player(vm, a);
@@ -378,7 +391,7 @@ fn floor_below(vm: &mut Vm<'_>, a: ObjId, depth: f32) -> Option<Hit> {
     for shrink in [0.0, 2.0, 5.0] {
         let narrow = Vec3::new((ext.x - shrink).max(1.0), (ext.y - shrink).max(1.0), ext.z);
         let found = world(vm).collision.trace_as(player, loc, loc - Vec3::Z * depth, narrow, Some(a))?;
-        let embedded_in_wall = found.time <= 0.0 && found.normal.z < WALKABLE_Z;
+        let embedded_in_wall = found.time <= 0.0 && found.normal.z < wz;
         hit = Some(found);
         if !embedded_in_wall {
             break;
@@ -387,7 +400,7 @@ fn floor_below(vm: &mut Vm<'_>, a: ObjId, depth: f32) -> Option<Hit> {
     // A pawn on a tread, with its box just over a riser (the corner of a stair), can still be embedded in that riser's face
     // however narrow the box: it then looks for the floor from a hair higher, which clears the face, and the result is turned
     // back into time along the original sweep.
-    if hit.is_some_and(|h| h.time <= 0.0 && h.normal.z < WALKABLE_Z) {
+    if hit.is_some_and(|h| h.time <= 0.0 && h.normal.z < wz) {
         // (The sweep pushes the planes out by 1.1 times the box, so at a corner the box's bottom can sit about 4 units in.)
         for lift in [1.0, 2.0, 4.0, 5.0] {
             let found = world(vm).collision.trace_as(player, loc + Vec3::Z * lift, loc - Vec3::Z * depth, ext, Some(a));
@@ -395,13 +408,13 @@ fn floor_below(vm: &mut Vm<'_>, a: ObjId, depth: f32) -> Option<Hit> {
                 eprintln!("floor retry: frame {} at {loc} lift {lift} -> {:?}", world(vm).frame, found.map(|f| (f.time, f.normal, f.location)));
             }
             let Some(found) = found else { continue };
-            if found.time <= 0.0 && found.normal.z < WALKABLE_Z {
+            if found.time <= 0.0 && found.normal.z < wz {
                 continue;
             }
             let drop = found.time * (depth + lift) - lift;
             // A box coming straight down cannot meet a riser's side: landing with an upright normal is the corner of a tread, and
             // the tread is what it came down on.
-            let normal = if found.normal.z < WALKABLE_Z && found.normal.z.abs() < 0.1 { Vec3::Z } else { found.normal };
+            let normal = if found.normal.z < wz && found.normal.z.abs() < 0.1 { Vec3::Z } else { found.normal };
             hit = Some(Hit { time: (drop / depth).max(0.0), normal, ..found });
             break;
         }
@@ -417,7 +430,7 @@ fn floor_below(vm: &mut Vm<'_>, a: ObjId, depth: f32) -> Option<Hit> {
     if crate::envc::var("HP3_FLOOR_DEBUG").is_ok_and(|n| hp3_script::natives::object_path(vm, a).ends_with(&n)) {
         eprintln!("floor result: frame {} hit time {} normal {} -> surface normal {normal}", world(vm).frame, hit.time, hit.normal);
     }
-    (normal.z >= WALKABLE_Z).then_some(Hit { normal, ..hit })
+    (normal.z >= wz).then_some(Hit { normal, ..hit })
 }
 
 /// Puts a walking pawn that sits a little inside the floor (a saved game can hold it so) back on top of it: with no floor
@@ -443,14 +456,15 @@ pub fn lift_out_of_floor(vm: &mut Vm<'_>, a: ObjId) {
 /// tread as often as its flat top, and then reports a slanted normal; the surface it rests on is what lies under
 /// its middle, so a thin box dropped from `from` over the same depth tells it.
 fn surface_normal(vm: &mut Vm<'_>, a: ObjId, hit: &Hit, from: Vec3, depth: f32) -> Vec3 {
-    if hit.normal.z >= WALKABLE_Z {
+    let wz = min_floor_z(vm, a);
+    if hit.normal.z >= wz {
         return hit.normal;
     }
     let ext = extent(vm, a);
     let thin = Vec3::new(2.0, 2.0, ext.z);
     let player = blocked_as_player(vm, a);
     if let Some(under) = world(vm).collision.trace_as(player, from, from - Vec3::Z * depth, thin, Some(a))
-        && under.normal.z >= WALKABLE_Z
+        && under.normal.z >= wz
     {
         return under.normal;
     }
@@ -458,7 +472,7 @@ fn surface_normal(vm: &mut Vm<'_>, a: ObjId, hit: &Hit, from: Vec3, depth: f32) 
     // little higher it is clear of it and finds the tread.
     for lift in [1.0, 2.0, 4.0, 5.0] {
         if let Some(under) = world(vm).collision.trace_as(player, from + Vec3::Z * lift, from - Vec3::Z * depth, thin, Some(a))
-            && under.normal.z >= WALKABLE_Z
+            && under.normal.z >= wz
         {
             return under.normal;
         }
@@ -654,6 +668,9 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
         set(vm, a, "Velocity", value(v));
         // The pawn's script may change the new speed (a sliding pawn turned backwards is pushed on down the slide).
         fire(vm, a, "ModifyVelocity", &mut [Value::Float(dt), value(vel)]);
+        if human && crate::envc::var_os("HP3_SLIDE_DEBUG").is_some() {
+            eprintln!("walkvel: in {vel} accel {accel} ground {v} after-script {}", vec(&get(vm, a, "Velocity")));
+        }
         if vm.db.objects.get(a).deleted || get(vm, a, "Physics").as_byte() != PHYS_WALKING {
             return;
         }
@@ -664,6 +681,8 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     let start = vec(&get(vm, a, "Location"));
     let old_base = get(vm, a, "Base").as_obj();
     let can_jump = get(vm, a, "bCanJump").as_bool();
+    let wz = min_floor_z(vm, a);
+    let sliding = get(vm, a, "bIsSliding").as_bool();
     let walks_off = get(vm, a, "bCanWalkOffLedges").as_bool() || !(get(vm, a, "bIsWalking").as_bool() || get(vm, a, "bIsCrouched").as_bool());
     let mut left = dt;
     let mut asked_may_fall = false;
@@ -680,7 +699,7 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
                 eprintln!("walk: {} step {delta} from {before} hit {:?}", hp3_script::natives::object_path(vm, a), hit.map(|h| (h.time, h.normal, h.actor.map(|o| o.0))));
             }
             if let Some(hit) = hit
-                && hit.normal.z < WALKABLE_Z
+                && hit.normal.z < wz
                 && climb_or_slide(vm, a, delta, hit)
             {
                 // The script took the pawn up a ledge: the rest of the step is its business.
@@ -689,7 +708,7 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
             // Met a slope it may walk on (a ramp, or the sloped foot of a block): the rest of the step goes
             // along the slope, up or down it, instead of stopping dead against it.
             if let Some(hit) = hit
-                && hit.normal.z >= WALKABLE_Z
+                && hit.normal.z >= wz
                 && hit.time < 1.0
             {
                 let remaining = delta * (1.0 - hit.time);
@@ -742,7 +761,7 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
                     asked_may_fall = true;
                     fire(vm, controller, "MayFall", &mut []);
                 }
-                if !can_jump || !walks_off {
+                if (!can_jump && !sliding) || !walks_off {
                     // This pawn must not fall: undo the step and stop it.
                     set(vm, a, "Location", value(before));
                     set(vm, a, "Velocity", value(Vec3::ZERO));
@@ -853,7 +872,7 @@ fn notify_hit_wall(vm: &mut Vm<'_>, a: ObjId, hit: &Hit) {
 fn step_up(vm: &mut Vm<'_>, a: ObjId, delta: Vec3, hit: Hit, depth: u32) {
     let lift = MAX_STEP_HEIGHT + 2.0;
     let mut step_down = true;
-    let mut steppable = hit.normal.z.abs() < MAX_STEP_SIDE_Z || hit.normal.z >= WALKABLE_Z;
+    let mut steppable = hit.normal.z.abs() < MAX_STEP_SIDE_Z || hit.normal.z >= min_floor_z(vm, a);
     // The edge of a step, met by a box instead of a cylinder, reads as a slanted face. When there is room to go up
     // by a step and on over the top, it is a step all the same.
     if !steppable && hit.normal.z >= MAX_STEP_SIDE_Z && delta.length_squared() > 1e-8 && get(vm, a, "Physics").as_byte() == PHYS_WALKING {
@@ -1104,7 +1123,20 @@ pub fn mount_destination(vm: &mut Vm<'_>, a: ObjId, up: Vec3, hit: &Hit) -> Opti
     let found = find_ledge(&world(vm).collision, &ledge);
     if found.is_none() && player {
         let name = hit.actor.map(|w| hp3_script::natives::object_path(vm, w)).unwrap_or_else(|| "the level".to_string());
-        mount_note(vm, format!("mount: no ledge found on {name} (reach {reach:.0}, min rise {min_rise:.0})"));
+        {
+            let into = Vec3::new(-hit.normal.x, -hit.normal.y, 0.0).normalize_or_zero();
+            let start = loc + up * reach + into * (2.0 * radius + reach * hit.normal.z);
+            let end = loc + into * (2.0 * radius);
+            let col = &world(vm).collision;
+            let d = col.trace_static(start, end, ext);
+            let dp = col.trace_pawns(start, end, ext, Some(a));
+            let dest = d.map(|h| Vec3::new(h.location.x, h.location.y, h.location.z + 2.0));
+            let steps = dest.map(|dst| { let lift = Vec3::new(loc.x + up.x * reach, loc.y + up.y * reach, dst.z); (lift, col.trace_static(loc, lift, ext).map(|h| (h.location, h.time, h.normal, h.actor)), col.trace_static(lift, dst, ext).map(|h| (h.location, h.time, h.normal))) });
+            vm.log.push(format!("mount debug: steps {steps:?}"));
+            let msg = format!("mount debug: drop {start} -> {end} ext {ext}: static {:?} pawns {:?}", d.map(|h| (h.location, h.time, h.normal)), dp.map(|h| h.location));
+            vm.log.push(msg);
+        }
+        let flags = hit.actor.map(|w| (get(vm, w, "bBlockActors").as_bool(), get(vm, w, "bBlockPlayers").as_bool())); mount_note(vm, format!("mount: no ledge found on {name} (reach {reach:.0}, min rise {min_rise:.0}, loc {loc}, normal {}, blockActors/blockPlayers {flags:?})", hit.normal));
     }
     found
 }
@@ -1156,7 +1188,11 @@ fn find_ledge(col: &crate::collision::Collision, l: &Ledge) -> Option<Vec3> {
             }
             let destination = Vec3::new(down.location.x, down.location.y, down.location.z + 2.0);
             let lift = Vec3::new(top.x, top.y, destination.z);
-            if trace(l.loc, lift).is_some() || trace(lift, destination).is_some() {
+            // The way up and across is swept with a box a little narrower (6 units): a wall that leans a degree or two over the pawn
+            // (Carpe Retractum's Mover34 block) would otherwise catch the box the moment it rises.
+            let slim = Vec3::new((l.ext.x - 6.0).max(1.0), (l.ext.y - 6.0).max(1.0), l.ext.z);
+            let sweep = |from: Vec3, to: Vec3| if pass == 0 { col.trace_static(from, to, slim) } else { col.trace_pawns(from, to, slim, Some(l.ignore)) };
+            if sweep(l.loc, lift).is_some() || sweep(lift, destination).is_some() {
                 continue;
             }
             if first.is_none() {
@@ -1309,7 +1345,7 @@ fn fall(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
             fire(vm, a, "HitWall", &mut [value(landing), Value::Object(hit.actor)]);
             continue;
         }
-        if landing.z >= WALKABLE_Z {
+        if landing.z >= min_floor_z(vm, a) {
             let hit = Hit { normal: landing, ..hit };
             // Lands with the speed it really came down at (when it moved far enough to tell).
             if !get(vm, a, "bJustTeleported").as_bool() && hit.time > 0.1 && hit.time * tick > 0.003 {
@@ -1385,6 +1421,12 @@ fn fly_pawn(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     // The fly and ghost cheats: a ghost leaves the zones it passes through behind (their fluid friction can be nothing), so the debug
     // flight brakes by itself, to a stop in about a fifth of a second once no key is held.
     let friction = if human && world(vm).debug_air_speed.is_some() { friction.max(5.0) } else { friction };
+    // Speed settles where the push balances that friction (push / friction), and the script's push is capped by AccelRate
+    // (walking-sized), so left alone the debug flight tops out near walking speed whatever AirSpeed says: push hard
+    // enough to reach AirSpeed (the cap below still holds it).
+    if human && world(vm).debug_air_speed.is_some() && accel.length_squared() > 0.0 {
+        accel = dir * get(vm, a, "AirSpeed").as_float() * friction;
+    }
     let drift = match volume {
         Some(v) => vec(&get(vm, v, "ZoneVelocity")),
         None => Vec3::ZERO,
@@ -2159,6 +2201,32 @@ mod mount_tests {
         // The destination is on top of the wall (the pawn's centre half its height above 70, plus the 2 margin).
         assert!((to.z - (70.0 + 38.0 + 2.0)).abs() < 1.5, "top at {}", to.z);
         assert!((to.x - 100.0).abs() < 1.5, "two radii past the pawn, at the wall's face: {}", to.x);
+    }
+
+    /// Carpe Retractum Mover34: a 96-high block (top 816) met mid-jump at the top of the arc.
+    #[test]
+    fn debug_mover34_block() {
+        let mut c = Collision::new(None);
+        let quad = |c: &mut Collision, a: Vec3, b: Vec3, d: Vec3, e: Vec3| {
+            c.add_triangle([a, b, d], None);
+            c.add_triangle([a, d, e], None);
+        };
+        quad(&mut c, Vec3::new(-3000.0, 4000.0, 720.0), Vec3::new(-2500.0, 4000.0, 720.0), Vec3::new(-2500.0, 4940.0, 720.0), Vec3::new(-3000.0, 4940.0, 720.0));
+        // Leaning face: the top (z 816) is 2.3 closer to the pawn than the bottom.
+        quad(&mut c, Vec3::new(-2816.0, 4940.0, 720.0), Vec3::new(-2688.0, 4940.0, 720.0), Vec3::new(-2688.0, 4942.3, 816.0), Vec3::new(-2816.0, 4942.3, 816.0));
+        quad(&mut c, Vec3::new(-2816.0, 4812.0, 816.0), Vec3::new(-2688.0, 4812.0, 816.0), Vec3::new(-2688.0, 4942.3, 816.0), Vec3::new(-2816.0, 4942.3, 816.0));
+        let ext = Vec3::new(15.0, 15.0, 38.0);
+        for z in [758.0f32, 780.0, 800.0, 822.0] {
+            let l = Ledge { loc: Vec3::new(-2756.0, 4955.5, z), up: Vec3::Z, normal: Vec3::new(0.0, 1.0, 0.0), radius: 15.0, reach: 96.5, min_rise: 0.0, ext, ignore: ObjId(0) };
+            let top = l.loc + l.up * l.reach;
+            let start = top + Vec3::new(0.0, -30.0, 0.0);
+            let end = l.loc + Vec3::new(0.0, -30.0, 0.0);
+            let down = c.trace_static(start, end, ext);
+            eprintln!("z {z}: down {:?} -> {:?}", down.map(|d| (d.location, d.time)), find_ledge(&c, &l));
+            let slim = Vec3::new(9.0, 9.0, 38.0);
+            let lift = Vec3::new(l.loc.x, l.loc.y, 856.03125);
+            eprintln!("  up {:?} across {:?} up-full {:?}", c.trace_static(l.loc, lift, slim).map(|h| (h.location, h.time, h.normal)), c.trace_static(lift, Vec3::new(lift.x, 4925.5, 856.03125), slim).map(|h| (h.location, h.time, h.normal)), c.trace_static(l.loc, lift, ext).map(|h| h.time));
+        }
     }
 
     #[test]

@@ -205,6 +205,7 @@ fn present_loop(
     });
     let mut frames_seen = 0u64;
     let mut adjust: Option<Adjust> = None;
+    let fxaa = fxaa_enabled();
     for message in messages {
         match message {
             Msg::Quit => break,
@@ -247,11 +248,11 @@ fn present_loop(
                 };
                 if let Some(frame) = frame {
                     let mut encoder = device.create_command_encoder(&Default::default());
-                    if can_copy && look == NEUTRAL {
+                    if can_copy && look == NEUTRAL && !fxaa {
                         encoder.copy_texture_to_texture(image.as_image_copy(), frame.texture.as_image_copy(), wgpu::Extent3d { width: width.min(frame.texture.width()), height: height.min(frame.texture.height()), depth_or_array_layers: 1 });
                     } else {
                         let a = adjust.get_or_insert_with(|| Adjust::new(&device, format));
-                        a.draw(&device, &queue, &mut encoder, &image, &frame.texture, look);
+                        a.draw(&device, &queue, &mut encoder, &image, &frame.texture, look, fxaa);
                     }
                     queue.submit([encoder.finish()]);
                     frame.present();
@@ -259,6 +260,16 @@ fn present_loop(
                 let _ = free.send(slot);
             }
         }
+    }
+}
+
+/// Whether the shown frame goes through FXAA (edge smoothing). `HP3_FXAA=0|1` decides; by default on for the desktop and
+/// off on the phone, where the extra full-screen pass costs more than a plain copy.
+fn fxaa_enabled() -> bool {
+    match std::env::var("HP3_FXAA").ok().as_deref() {
+        Some("0" | "off" | "false") => false,
+        Some(_) => true,
+        None => !cfg!(target_os = "android"),
     }
 }
 
@@ -271,19 +282,46 @@ struct Adjust {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     params: wgpu::Buffer,
+    sampler: wgpu::Sampler,
 }
 
 const ADJUST_SHADER: &str = "
 struct Params { look: vec4<f32> };
 @group(0) @binding(0) var frame: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> params: Params;
+@group(0) @binding(2) var smp: sampler;
 @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
     let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
     return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
 }
+fn luma(c: vec3<f32>) -> f32 { return dot(c, vec3<f32>(0.299, 0.587, 0.114)); }
+// FXAA (the compact edge-direction blur): finds a contrast edge around the pixel and averages along it.
+fn fxaa(pos: vec2<f32>, size: vec2<f32>) -> vec3<f32> {
+    let px = 1.0 / size;
+    let uv = pos * px;
+    let rgbM = textureSampleLevel(frame, smp, uv, 0.0).rgb;
+    let rgbNW = textureSampleLevel(frame, smp, uv + vec2<f32>(-1.0, -1.0) * px, 0.0).rgb;
+    let rgbNE = textureSampleLevel(frame, smp, uv + vec2<f32>(1.0, -1.0) * px, 0.0).rgb;
+    let rgbSW = textureSampleLevel(frame, smp, uv + vec2<f32>(-1.0, 1.0) * px, 0.0).rgb;
+    let rgbSE = textureSampleLevel(frame, smp, uv + vec2<f32>(1.0, 1.0) * px, 0.0).rgb;
+    let lM = luma(rgbM); let lNW = luma(rgbNW); let lNE = luma(rgbNE); let lSW = luma(rgbSW); let lSE = luma(rgbSE);
+    let lMin = min(lM, min(min(lNW, lNE), min(lSW, lSE)));
+    let lMax = max(lM, max(max(lNW, lNE), max(lSW, lSE)));
+    if (lMax - lMin < max(0.0312, lMax * 0.125)) { return rgbM; }
+    var dir = vec2<f32>(-((lNW + lNE) - (lSW + lSE)), (lNW + lSW) - (lNE + lSE));
+    let reduce = max((lNW + lNE + lSW + lSE) * 0.25 * 0.125, 1.0 / 128.0);
+    let rcp = 1.0 / (min(abs(dir.x), abs(dir.y)) + reduce);
+    dir = clamp(dir * rcp, vec2<f32>(-8.0), vec2<f32>(8.0)) * px;
+    let a = 0.5 * (textureSampleLevel(frame, smp, uv + dir * (1.0 / 3.0 - 0.5), 0.0).rgb + textureSampleLevel(frame, smp, uv + dir * (2.0 / 3.0 - 0.5), 0.0).rgb);
+    let b = a * 0.5 + 0.25 * (textureSampleLevel(frame, smp, uv + dir * -0.5, 0.0).rgb + textureSampleLevel(frame, smp, uv + dir * 0.5, 0.0).rgb);
+    let lB = luma(b);
+    if (lB < lMin || lB > lMax) { return a; }
+    return b;
+}
 @fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let size = vec2<i32>(textureDimensions(frame));
-    let c = textureLoad(frame, min(vec2<i32>(pos.xy), size - vec2<i32>(1)), 0).rgb;
+    var c = textureLoad(frame, min(vec2<i32>(pos.xy), size - vec2<i32>(1)), 0).rgb;
+    if (params.look.w > 0.5) { c = fxaa(pos.xy, vec2<f32>(size)); }
     var v = (c - vec3<f32>(0.5)) * params.look.z + vec3<f32>(0.5 + params.look.y);
     v = pow(clamp(v, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(params.look.x));
     return vec4<f32>(v, 1.0);
@@ -299,7 +337,7 @@ impl Adjust {
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
@@ -308,6 +346,7 @@ impl Adjust {
                     ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("adjust"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
@@ -328,17 +367,18 @@ impl Adjust {
             cache: None,
         });
         let params = device.create_buffer(&wgpu::BufferDescriptor { label: Some("adjust"), size: 16, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        Adjust { pipeline, layout, params }
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() });
+        Adjust { pipeline, layout, params, sampler }
     }
 
-    fn draw(&self, device: &wgpu::Device, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, image: &wgpu::Texture, target: &wgpu::Texture, look: [f32; 3]) {
-        let bytes: Vec<u8> = [look[0], look[1], look[2], 0.0f32].iter().flat_map(|v| v.to_le_bytes()).collect();
+    fn draw(&self, device: &wgpu::Device, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, image: &wgpu::Texture, target: &wgpu::Texture, look: [f32; 3], fxaa: bool) {
+        let bytes: Vec<u8> = [look[0], look[1], look[2], if fxaa { 1.0f32 } else { 0.0 }].iter().flat_map(|v| v.to_le_bytes()).collect();
         queue.write_buffer(&self.params, 0, &bytes);
         let view = image.create_view(&Default::default());
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("adjust"),
             layout: &self.layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }, wgpu::BindGroupEntry { binding: 1, resource: self.params.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }, wgpu::BindGroupEntry { binding: 1, resource: self.params.as_entire_binding() }, wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) }],
         });
         let target_view = target.create_view(&Default::default());
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

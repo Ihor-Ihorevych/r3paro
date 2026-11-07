@@ -15,6 +15,8 @@ pub enum Mode {
 
 /// Speed a flying or ghost pawn may reach, units per second.
 const FLY_SPEED: f32 = 900.0;
+/// A ghost (no collision) moves this much faster than a flying pawn.
+const GHOST_SPEED_MULT: f32 = 2.5;
 
 fn goto(vm: &mut Vm<'_>, controller: hp3_script::ObjId, state: &str) {
     let n = vm.db.names.intern(state);
@@ -43,7 +45,8 @@ pub fn set_mode(vm: &mut Vm<'_>, mode: Mode) -> bool {
                 let speed = get(vm, pawn, "AirSpeed").as_float();
                 world(vm).debug_air_speed = Some(speed);
             }
-            set(vm, pawn, "AirSpeed", Value::Float(FLY_SPEED));
+            let speed = if mode == Mode::Ghost { FLY_SPEED * GHOST_SPEED_MULT } else { FLY_SPEED };
+            set(vm, pawn, "AirSpeed", Value::Float(speed));
             set(vm, pawn, "Velocity", crate::physics::value(glam::Vec3::ZERO));
             set(vm, pawn, "Physics", Value::Byte(PHYS_FLYING));
             goto(vm, pc, "PlayerFlying");
