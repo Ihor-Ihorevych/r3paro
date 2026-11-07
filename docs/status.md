@@ -264,3 +264,18 @@ actor lights are looked up through a ground grid. `perf:` lines on Android now i
   the hero controller gets him back; `DementorEncounter0` then starts `StateHWE_DementorEncounter`, whose `SwitchToFightStanceAnims` runs on
   its pawn (Harry) and replaces his collapsed idle with `BattleIdle`; only afterwards `SwitchControlToMe` moves control to Ron. The original
   presumably runs these in another order; where it differs is unknown.
+
+## Dialog lip-sync as the original, and soft shadows (2026-11-07)
+
+- **Lip-sync** (`crates/hp3-world/src/lipsync.rs`), read from HP3's own `Engine.dll` (`FLipGenLipSync`): a dialog line's envelope has 26 floats per
+  frame; only the first 15 are read. They drive nine mouth-shape pose sequences, each on its own animation channel (25 to 33) limited to
+  `Pawn.MouthBone` (`Body__Mouth`: jaw, lips, tongue): `ai` (curve 2), `e` (0, gain 0.6), `o` (3), `u` (4), `cdgknrsthyz` (1 6 7 9 12 14), `l` (10),
+  `wq` (5 13), `mbp` (11), `fv` (8). Every channel plays its sequence frozen at half of it (with two frames, the full shape; frame 0 is the rest
+  pose) and its alpha follows `0.8 * mean(curve * gain over the shape's curves above 0.001)` with a 0.2 s blend, updated every 0.033 s. The row
+  read is `frame - header[2]` (the first 9 rows are lead-in), clamped to the last row. Curves 15 to 25 (brows, blinks, head and eye angles of
+  the analysis tool) are not read by the retail engine. The older single-jaw-bone turn remains for speakers without the nine sequences, the
+  amplitude bytes of creature sounds still drive `mouth_anim`. Tools: `HP3_LIPSYNC_DEBUG=1`, `HP3_LIPSYNC_DUMP=1` (envelope rows),
+  `hp3-view pose` with `HP3_LIST_SEQS`, `HP3_FACE_POSES`, `HP3_FACE_REF`.
+- **Soft shadows** (new, not in the original): `actor_instances` traces down from every pawn (`pawn_shadow`) and gives the renderer a quad
+  lying on the ground (`Dynamic::set_shadows`, `BlobShadow`): a soft bell, stretched away from the strongest light on the pawn, weaker when
+  the pawn is high above the ground or poorly lit. `HP3_NO_SHADOWS=1` turns them off, `HP3_SHADOW_DEBUG=1` prints the count.
