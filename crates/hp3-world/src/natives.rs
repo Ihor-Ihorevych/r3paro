@@ -797,6 +797,43 @@ pub fn register(vm: &mut Vm<'_>) {
         let start = if given(a, 1) { crate::physics::vec(&a[1]) } else { crate::physics::vec(&get(vm, o, "Location")) };
         Ok(Value::Bool(world(vm).collision.trace_static(start, end, glam::Vec3::ZERO).is_none_or(|h| h.actor == Some(o))))
     });
+    // HPCharacter.SwitchToFightStanceAnims, the script's steps written out, with one difference: a character lying collapsed
+    // (the dementor encounter's `DementorEncounterCollapse` state) is left as he is, and only the characters trailing him
+    // are switched. The encounter starts while Harry, handed back to the hero controller at the end of his cutscene part,
+    // is still on the ground; the engine's movement animation would stand him up in the new idle once he is given to the
+    // companion controller, and he stayed down in the original. Called again later, he is switched then.
+    vm.register_override("HPCharacter.SwitchToFightStanceAnims", |vm, this, _a| {
+        let Some(o) = this else { return Ok(Value::Empty) };
+        if get(vm, o, "bUsingFightStanceAnims").as_bool() {
+            return Ok(Value::Empty);
+        }
+        let collapsed = vm.state_of(o).is_some_and(|s| vm.db.names.get(vm.db.get(s).name).eq_ignore_ascii_case("DementorEncounterCollapse"));
+        if !collapsed {
+            set(vm, o, "bUsingFightStanceAnims", Value::Bool(true));
+            for (from, to) in [("FightStanceCastHoldAnim", "castHoldAnim"), ("FightStanceCastReleaseAnim", "castReleaseAnim")] {
+                let v = get(vm, o, from);
+                if v.as_name() != Name::NONE {
+                    set(vm, o, to, v);
+                }
+            }
+            for (from, to) in [("FightStanceTurnLeftAnim", "AlternateTurnLeftAnim"), ("FightStanceTurnRightAnim", "AlternateTurnRightAnim")] {
+                let v = get(vm, o, from);
+                set(vm, o, to, v);
+            }
+            let stance = get(vm, o, "FightStanceAnim");
+            if stance.as_name() != Name::NONE {
+                set(vm, o, "IdleAnimName", stance);
+            }
+            fire(vm, o, "ChangeAnimation", &mut []);
+            fire(vm, o, "AnimateStanding", &mut []);
+        }
+        for i in 0..2 {
+            if let Some(c) = crate::anim::get_indexed(vm, o, "TrailingChar", i).as_obj() {
+                fire(vm, c, "SwitchToFightStanceAnims", &mut []);
+            }
+        }
+        Ok(Value::Empty)
+    });
     // KWAIController.FindClosestNavPoint, written out natively (the companions call it every tick and the script loop,
     // a trace per nav point, was the biggest cost of a busy hub). The same steps as the script: the nav point nearest
     // the pawn within 1500 (twice the distance for those behind the way to the hero) is the nearest one, but one that

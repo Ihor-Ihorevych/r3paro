@@ -260,7 +260,7 @@ actor lights are looked up through a ground grid. `perf:` lines on Android now i
   and, while `PlayerHeroActor.bLumosOn`, fade by distance within `fLumosRadius` (the HP2 curve: down to about 22% opacity). Support:
   `ActorLight.fade` goes to the dynamic shader (`extra.x`), a faded actor's sections all go through the blended pass. Not checked by eye;
   walls now take the live (vertex) lighting instead of the baked one.
-- **Harry beside Ron before the control switch** (end of Adv1Express): not fixed. At the end of the cutscene Harry's own script finishes and
+- **Harry beside Ron before the control switch** (end of Adv1Express): fixed by `HPCharacter.SwitchToFightStanceAnims` (a native override in `natives.rs`) leaving a pawn in `DementorEncounterCollapse` as he is; the cause as found: At the end of the cutscene Harry's own script finishes and
   the hero controller gets him back; `DementorEncounter0` then starts `StateHWE_DementorEncounter`, whose `SwitchToFightStanceAnims` runs on
   its pawn (Harry) and replaces his collapsed idle with `BattleIdle`; only afterwards `SwitchControlToMe` moves control to Ron. The original
   presumably runs these in another order; where it differs is unknown.

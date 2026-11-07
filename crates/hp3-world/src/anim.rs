@@ -893,7 +893,7 @@ fn get_physics(vm: &mut Vm<'_>, a: ObjId) -> u8 {
 }
 
 /// Element `index` of a static array property.
-fn get_indexed(vm: &mut Vm<'_>, a: ObjId, name: &str, index: usize) -> Value {
+pub(crate) fn get_indexed(vm: &mut Vm<'_>, a: ObjId, name: &str, index: usize) -> Value {
     let Some(slot) = crate::slot(vm, a, name) else { return Value::Empty };
     vm.db.objects.values(a).and_then(|v| v.get(slot + index).cloned()).unwrap_or_default()
 }
