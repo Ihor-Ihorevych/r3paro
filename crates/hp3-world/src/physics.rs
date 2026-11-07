@@ -1382,6 +1382,9 @@ fn fly_pawn(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
     }
     let volume = get(vm, a, "PhysicsVolume").as_obj();
     let friction = 0.5 * volume.map_or(0.0, |v| get(vm, v, "FluidFriction").as_float());
+    // The fly and ghost cheats: a ghost leaves the zones it passes through behind (their fluid friction can be nothing), so the debug
+    // flight brakes by itself, to a stop in about a fifth of a second once no key is held.
+    let friction = if human && world(vm).debug_air_speed.is_some() { friction.max(5.0) } else { friction };
     let drift = match volume {
         Some(v) => vec(&get(vm, v, "ZoneVelocity")),
         None => Vec3::ZERO,
