@@ -703,7 +703,7 @@ fn resync(vm: &mut Vm<'_>) {
     let movers: Vec<ObjId> = world(vm).collision.movers.iter().map(|m| m.actor).collect();
     for m in movers {
         let t = crate::mover_transform(vm, m);
-        if let Some(shape) = world(vm).collision.movers.iter_mut().find(|s| s.actor == m) {
+        if let Some(shape) = world(vm).collision.mover_mut(m) {
             shape.place(t);
         }
     }

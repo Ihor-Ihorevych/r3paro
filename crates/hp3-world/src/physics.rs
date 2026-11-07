@@ -62,17 +62,19 @@ fn refresh_actor_boxes(vm: &mut Vm<'_>) {
     let s = Slots::get(vm);
     let (collide_type, collision_width, rotation) = (crate::actor_slot(vm, "CollideType"), crate::actor_slot(vm, "CollisionWidth"), crate::actor_slot(vm, "Rotation"));
     let mut boxes = Vec::new();
+    // Which actors have a box at all is worked out again only for actors written since the last tick.
+    let mut memo = std::mem::take(&mut crate::world(vm).memo_boxes);
+    let pass = memo.begin(&mut vm.db.objects);
     for &a in &actors {
+        if memo.get(&pass, &vm.db.objects, a) == Some(1) {
+            continue;
+        }
         let blocks_actors = crate::read(vm, a, s.block).as_bool();
         let blocks_players = crate::read(vm, a, s.block_players).as_bool();
-        if !crate::read(vm, a, s.collide).as_bool() || !(blocks_actors || blocks_players) {
-            continue;
-        }
-        if crate::read(vm, a, s.static_mesh).as_obj().is_some() {
-            continue;
-        }
         let (r, h) = (crate::read(vm, a, s.radius).as_float(), crate::read(vm, a, s.height).as_float());
-        if r <= 0.0 || h <= 0.0 {
+        let has_box = crate::read(vm, a, s.collide).as_bool() && (blocks_actors || blocks_players) && crate::read(vm, a, s.static_mesh).as_obj().is_none() && r > 0.0 && h > 0.0;
+        memo.set(a, if has_box { 2 } else { 1 });
+        if !has_box {
             continue;
         }
         // `CollideType` box (1): a box turned with the actor, half sizes radius (x), width (y, the radius when 0) and height (z): the
@@ -91,6 +93,7 @@ fn refresh_actor_boxes(vm: &mut Vm<'_>) {
         let r = if r > DIG_BLOCK_RADIUS && is_digable(vm, a) { DIG_BLOCK_RADIUS } else { r };
         boxes.push(ActorBox { actor: a, center: crate::read_vec(vm, a, s.location), extent: Vec3::new(r, r, h), blocks_actors, blocks_players, is_pawn: is_pawn(vm, a), owner: crate::read(vm, a, s.owner).as_obj(), axes: None });
     }
+    crate::world(vm).memo_boxes = memo;
     world(vm).actors = actors;
     world(vm).collision.actors = boxes;
 }
@@ -1608,7 +1611,7 @@ fn rotator_value(r: [i32; 3]) -> Value {
 /// Puts a mover's collision shape where the actor now is.
 fn place_mover_shape(vm: &mut Vm<'_>, a: ObjId) {
     let t = crate::mover_transform(vm, a);
-    if let Some(m) = world(vm).collision.movers.iter_mut().find(|m| m.actor == a) {
+    if let Some(m) = world(vm).collision.mover_mut(a) {
         m.place(t);
     }
 }

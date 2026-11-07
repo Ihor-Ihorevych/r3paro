@@ -19,6 +19,7 @@ pub mod movie;
 pub mod interactions;
 pub mod interpolation;
 pub mod lipsync;
+pub mod memo;
 pub mod natives;
 pub mod particles;
 mod perception;
@@ -131,6 +132,10 @@ pub struct World {
     pub tick_classes: std::collections::HashMap<(&'static str, hp3_script::class_db::StructId), (u32, std::time::Duration)>,
     /// Whether the blocking volumes have been told to the collision.
     pub volumes_marked: bool,
+    /// Per-actor answers of the tick loop (scenery skipped), the actor boxes and the baked collision sync.
+    pub memo_tick: memo::Memo,
+    pub memo_boxes: memo::Memo,
+    pub memo_baked: memo::Memo,
 }
 
 /// The world stored in the VM. Panics if no level is loaded.
@@ -606,6 +611,8 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         }
         actors.push(id);
     }
+    // Scripts writing their own variables (above Actor's) do not change what the per-frame passes look at.
+    vm.db.objects.quiet_from = vm.db.find("Actor").map_or(0, |c| vm.db.get(c).slots);
     vm.ext = Some(Box::new(World {
         map: map.clone(),
         actors: actors.clone(),
@@ -658,6 +665,9 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         ever_base_valid: false,
         tick_classes: Default::default(),
         volumes_marked: false,
+        memo_tick: Default::default(),
+        memo_boxes: Default::default(),
+        memo_baked: Default::default(),
         tick_skipped: Default::default(),
         actor_slots: Default::default(),
         config,
@@ -973,13 +983,21 @@ fn sync_baked_collision(vm: &mut Vm<'_>) {
         world(vm).collision.mark_volumes(&volumes);
     }
     let slots = (actor_slot(vm, "bCollideActors"), actor_slot(vm, "bBlockActors"), actor_slot(vm, "bBlockPlayers"));
+    // Only actors written since the last pass can have new flags.
+    let mut memo = std::mem::take(&mut world(vm).memo_baked);
+    let pass = memo.begin(&mut vm.db.objects);
     for a in owners {
+        if memo.get(&pass, &vm.db.objects, a).is_some() {
+            continue;
+        }
+        memo.set(a, 1);
         let (collide, actors, players) = (read(vm, a, slots.0).as_bool(), read(vm, a, slots.1).as_bool(), read(vm, a, slots.2).as_bool());
         let active = !vm.db.objects.get(a).deleted && collide && (actors || players);
         let c = &mut world(vm).collision;
         c.set_blocks(a, actors, players);
         c.set_active(a, active);
     }
+    world(vm).memo_baked = memo;
 }
 
 /// Makes an actor's baked collision follow its current flags: at once when a script changes them, and in the periodic pass
@@ -1108,13 +1126,21 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     // Where the player is (none while no pawn is controlled, as in a cutscene: then everyone ticks every frame).
     let player_at = player.and_then(|pc| get(vm, pc, "Pawn").as_obj()).map(|p| physics::vec(&get(vm, p, "Location")));
     let player_at = player_at.filter(|_| std::env::var_os("HP3_NO_FAR_THROTTLE").is_none() && !player_is_scripted(vm));
+    // Whether an actor is passed over is worked out again only for actors written since the last frame.
+    let mut memo = std::mem::take(&mut world(vm).memo_tick);
+    let pass = memo.begin(&mut vm.db.objects);
     for &a in &actors {
-        if vm.db.objects.get(a).deleted {
-            continue;
-        }
-        // A static actor that is only scenery (a mesh, a brush, a light, a marker) is never ticked, as in the original: no event,
-        // state code, timer or physics. The ones that do something (a door, a desk) are not in the list.
-        if skip_static && Some(a) != player && read(vm, a, is_static).as_bool() && is_scenery(vm, a) {
+        let skip = match memo.get(&pass, &vm.db.objects, a) {
+            Some(v) => v == 1,
+            None => {
+                // A static actor that is only scenery (a mesh, a brush, a light, a marker) is never ticked, as in the original: no
+                // event, state code, timer or physics. The ones that do something (a door, a desk) are not in the list.
+                let skip = vm.db.objects.get(a).deleted || (skip_static && Some(a) != player && read(vm, a, is_static).as_bool() && is_scenery(vm, a));
+                memo.set(a, if skip { 1 } else { 2 });
+                skip
+            }
+        };
+        if skip || vm.db.objects.get(a).deleted {
             continue;
         }
         // Ambient NPCs far from the player are ticked every few frames, with the time that passed meanwhile.
@@ -1134,7 +1160,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         lap(vm, "actors: input", &mut clock, profile);
         anim::tick_actor(vm, a, dt);
         lap(vm, "actors: anim", &mut clock, profile);
-        if let Some(v) = ticked.and_then(|s| vm.db.objects.values_mut(a).and_then(|v| v.get_mut(s))) {
+        if let Some(v) = ticked.and_then(|s| vm.db.objects.values_mut_quiet(a).and_then(|v| v.get_mut(s))) {
             *v = Value::Bool(parity);
         }
         let tick_start = profile.then(std::time::Instant::now);
@@ -1160,7 +1186,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         tick_timer(vm, a, dt);
         lap(vm, "actors: timer", &mut clock, profile);
         if let Some(s) = life_span
-            && let Some(v) = vm.db.objects.values_mut(a).and_then(|v| v.get_mut(s))
+            && let Some(v) = vm.db.objects.values_mut_quiet(a).and_then(|v| v.get_mut(s))
             && let Value::Float(life) = v
             && *life > 0.0
         {
@@ -1182,6 +1208,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         class_time(vm, a, "physics", physics_start);
         lap(vm, "actors: physics", &mut clock, profile);
     }
+    world(vm).memo_tick = memo;
     mark(vm, "actors");
     touch::frame_pass(vm);
     mark(vm, "touching");
@@ -1888,7 +1915,7 @@ fn build_collision(vm: &mut Vm<'_>, map: &Rc<Package>, model: Option<ObjRef>, ac
                 eprintln!("mover {} collision shape: {}", hp3_script::natives::object_path(vm, a), if shape.is_some() { "built" } else { "NONE" });
             }
             if let Some(shape) = shape {
-                col.movers.push(shape);
+                col.add_mover(shape);
             }
             continue;
         }

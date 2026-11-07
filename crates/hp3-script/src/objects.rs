@@ -34,6 +34,14 @@ pub struct ObjEntry {
 pub struct ObjectTable {
     pub entries: Vec<ObjEntry>,
     by_key: HashMap<ObjKey, ObjId>,
+    /// Per object, the `epoch` of its last possible change (a property written, the entry replaced): lets a per-frame pass
+    /// skip objects nobody touched since it last looked (see `changed_since`). Parallel to `entries`.
+    stamps: Vec<u32>,
+    /// Counts the passes that use `changed_since`; starts at 1 so a new object (stamped with it) is seen by the first pass.
+    /// Writes by scripts to a property at this slot or above (a subclass's own variable) leave the stamp alone: what the
+    /// passes look at are `Actor`'s properties (place, size, collision), below it. Set by the world (0: every write stamps).
+    pub quiet_from: usize,
+    pub epoch: u32,
 }
 
 impl ObjectTable {
@@ -44,6 +52,7 @@ impl ObjectTable {
         }
         let id = ObjId(self.entries.len() as u32);
         self.entries.push(ObjEntry { key: Some(key.clone()), name, class: None, kind: ObjKind::Stub, deleted: false });
+        self.stamps.push(self.epoch);
         self.by_key.insert(key, id);
         id
     }
@@ -57,6 +66,7 @@ impl ObjectTable {
             kind: ObjKind::Instance { values, state: None },
             deleted: false,
         });
+        self.stamps.push(self.epoch);
         id
     }
 
@@ -64,6 +74,7 @@ impl ObjectTable {
     pub fn add_struct(&mut self, name: Name, id: StructId) -> ObjId {
         let obj = ObjId(self.entries.len() as u32);
         self.entries.push(ObjEntry { key: None, name, class: None, kind: ObjKind::Struct(id), deleted: false });
+        self.stamps.push(self.epoch);
         obj
     }
 
@@ -72,7 +83,22 @@ impl ObjectTable {
     }
 
     pub fn get_mut(&mut self, id: ObjId) -> &mut ObjEntry {
+        self.stamps[id.0 as usize] = self.epoch;
         &mut self.entries[id.0 as usize]
+    }
+
+    /// Starts a pass that skips unchanged objects: returns the epoch to hand to `changed_since` in the pass after this
+    /// one. Anything written from now on (during this pass too) counts as changed for that next pass.
+    pub fn begin_pass(&mut self) -> u32 {
+        self.epoch += 1;
+        self.epoch
+    }
+
+    /// Whether the object may have been written (a property set, its entry replaced or created) since the pass that
+    /// returned `seen` from `begin_pass` (0: ever).
+    #[inline]
+    pub fn changed_since(&self, id: ObjId, seen: u32) -> bool {
+        self.stamps[id.0 as usize] >= seen
     }
 
     pub fn values(&self, id: ObjId) -> Option<&Vec<Value>> {
@@ -82,7 +108,25 @@ impl ObjectTable {
         }
     }
 
+    /// The values for a write that does not count as a change (see `quiet_from`).
+    pub fn values_mut_quiet(&mut self, id: ObjId) -> Option<&mut Vec<Value>> {
+        match &mut self.entries.get_mut(id.0 as usize)?.kind {
+            ObjKind::Instance { values, .. } => Some(values),
+            _ => None,
+        }
+    }
+
+    /// Counts the object as changed.
+    pub fn stamp(&mut self, id: ObjId) {
+        if let Some(s) = self.stamps.get_mut(id.0 as usize) {
+            *s = self.epoch;
+        }
+    }
+
     pub fn values_mut(&mut self, id: ObjId) -> Option<&mut Vec<Value>> {
+        if let Some(s) = self.stamps.get_mut(id.0 as usize) {
+            *s = self.epoch;
+        }
         match &mut self.entries.get_mut(id.0 as usize)?.kind {
             ObjKind::Instance { values, .. } => Some(values),
             _ => None,

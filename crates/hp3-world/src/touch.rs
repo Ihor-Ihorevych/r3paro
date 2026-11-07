@@ -62,6 +62,8 @@ pub struct Touch {
     primed: bool,
     /// Moving actors have been checked once against everything (the level's first frame).
     first_pass_done: bool,
+    /// The object-table pass number the last `frame_pass` started (actors written since are re-checked).
+    seen: u32,
     shapes: HashMap<ObjId, Shape>,
     cells: HashMap<(i32, i32), Vec<ObjId>>,
     cell_of: HashMap<ObjId, (i32, i32)>,
@@ -402,6 +404,8 @@ pub fn forget(vm: &mut Vm<'_>, a: ObjId) {
     if vm.ext.is_none() {
         return;
     }
+    // Its shape is gone from the index: the next pass must look at it again.
+    vm.db.objects.get_mut(a);
     let partners = world(vm).touch.partners.remove(&a).unwrap_or_default();
     for b in partners {
         if let Some(list) = world(vm).touch.partners.get_mut(&b) {
@@ -436,8 +440,15 @@ pub fn frame_pass(vm: &mut Vm<'_>) {
     let first = !world(vm).touch.first_pass_done;
     world(vm).touch.first_pass_done = true;
     let actors = world(vm).actors.clone();
+    let seen = std::mem::replace(&mut world(vm).touch.seen, 0);
+    let next = vm.db.objects.begin_pass();
+    world(vm).touch.seen = next;
     for a in actors {
         if vm.db.objects.get(a).deleted {
+            continue;
+        }
+        // A shape is made of the actor's own properties: one nobody wrote since the last pass has not changed.
+        if !first && !vm.db.objects.changed_since(a, seen) {
             continue;
         }
         let shape = shape_of(vm, a, &s);

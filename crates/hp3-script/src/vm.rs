@@ -445,7 +445,7 @@ impl<'s> Vm<'s> {
     fn root_vec<'a>(&'a mut self, root: &Root, frame: &'a mut Frame) -> Option<&'a mut Vec<Value>> {
         match root {
             Root::Local => Some(&mut frame.locals),
-            Root::Instance(o) => self.db.objects.values_mut(*o),
+            Root::Instance(o) => self.db.objects.values_mut_quiet(*o),
             Root::Default(c) => Some(&mut self.db.structs[c.0 as usize].defaults),
             Root::Temp(_) => None,
         }
@@ -462,7 +462,16 @@ impl<'s> Vm<'s> {
         let (mut cur, steps): (&Value, &[Step]) = match &p.root {
             Root::Temp(v) => (v, &p.path[..]),
             root => {
-                let Some(vals) = self.root_vec(root, frame) else { return visit(&empty) };
+                // Reading must not stamp the object as changed (`root_vec` is the writable view).
+                let vals: &Vec<Value> = match root {
+                    Root::Local => &frame.locals,
+                    Root::Instance(o) => match self.db.objects.values(*o) {
+                        Some(v) => v,
+                        None => return visit(&empty),
+                    },
+                    Root::Default(c) => &self.db.structs[c.0 as usize].defaults,
+                    Root::Temp(_) => return visit(&empty),
+                };
                 match p.path.first() {
                     Some(Step::Slot(s)) => match vals.get(*s) {
                         Some(v) => (v, &p.path[1..]),
@@ -489,6 +498,11 @@ impl<'s> Vm<'s> {
     }
 
     fn write(&mut self, p: &Place, frame: &mut Frame, value: Value) {
+        if let (Root::Instance(o), Some(Step::Slot(first))) = (&p.root, p.path.first())
+            && *first < self.db.objects.quiet_from
+        {
+            self.db.objects.stamp(*o);
+        }
         let Some(vals) = self.root_vec(&p.root, frame) else { return };
         let Some(Step::Slot(first)) = p.path.first() else { return };
         let Some(mut cur) = vals.get_mut(*first) else { return };

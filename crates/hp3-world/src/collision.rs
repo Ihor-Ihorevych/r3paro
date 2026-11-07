@@ -66,6 +66,8 @@ pub struct Collision {
     passes_world: bool,
     /// Movers: their triangles in their own space, placed by a transform that follows them.
     pub movers: Vec<MoverShape>,
+    /// Where each mover is in `movers` (movers are only ever added through `add_mover`).
+    mover_at: HashMap<ObjId, usize>,
     /// Static meshes that have a simple collision model, already placed in the world, and the cells they cover.
     mesh_models: Vec<MeshModel>,
     modeled: HashMap<ObjId, (bool, bool)>,
@@ -519,7 +521,19 @@ impl Collision {
 
     /// The mover of `actor`, when that actor is one.
     pub fn mover(&self, actor: ObjId) -> Option<&MoverShape> {
-        self.movers.iter().find(|m| m.actor == actor)
+        self.movers.get(*self.mover_at.get(&actor)?)
+    }
+
+    /// `mover` for a change of its placement.
+    pub fn mover_mut(&mut self, actor: ObjId) -> Option<&mut MoverShape> {
+        let i = *self.mover_at.get(&actor)?;
+        self.movers.get_mut(i)
+    }
+
+    /// Adds a mover (the first one of an actor is the one found).
+    pub fn add_mover(&mut self, shape: MoverShape) {
+        self.mover_at.entry(shape.actor).or_insert(self.movers.len());
+        self.movers.push(shape);
     }
 
     /// Marks these baked actors as volumes, whose boxes are worked out from their triangles.
