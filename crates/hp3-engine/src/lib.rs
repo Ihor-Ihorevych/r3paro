@@ -430,6 +430,8 @@ struct Skinned {
 #[derive(Default)]
 pub struct MeshCache {
     meshes: HashMap<(ObjKey, Vec<Option<ObjKey>>), Option<Rc<GpuMesh>>>,
+    /// The same by object ids, found without building the keys above (every drawn static mesh asks every frame).
+    by_obj: HashMap<ObjId, Vec<(Vec<Option<ObjId>>, Option<Rc<GpuMesh>>)>>,
     skinned: HashMap<ObjId, Skinned>,
     skeletons: HashMap<ObjKey, Rc<hp3_anim::Skeleton>>,
     /// What the actor lighting remembers between frames.
@@ -598,6 +600,25 @@ impl MeshCache {
         mesh: ObjId,
         skins: &[Option<ObjId>],
     ) -> Option<Rc<GpuMesh>> {
+        if let Some(list) = self.by_obj.get(&mesh)
+            && let Some((_, g)) = list.iter().find(|(s, _)| s.as_slice() == skins)
+        {
+            return g.clone();
+        }
+        let gpu = self.get_by_export(vm, loader, r, dynamic, mesh, skins);
+        self.by_obj.entry(mesh).or_default().push((skins.to_vec(), gpu.clone()));
+        gpu
+    }
+
+    fn get_by_export(
+        &mut self,
+        vm: &Vm<'_>,
+        loader: &Loader<'_>,
+        r: &Renderer,
+        dynamic: &Dynamic,
+        mesh: ObjId,
+        skins: &[Option<ObjId>],
+    ) -> Option<Rc<GpuMesh>> {
         let (mp, mi) = export_of(vm, mesh)?;
         let skin_exports: Vec<Option<(Rc<Package>, usize)>> = skins.iter().map(|s| s.and_then(|s| export_of(vm, s))).collect();
         let key = (loader::key(&mp, mi), skin_exports.iter().map(|s| s.as_ref().map(|(p, i)| loader::key(p, *i))).collect());
@@ -757,7 +778,7 @@ pub fn actor_instances(
         }
         // Something on a bone is drawn as part of the actor whose bone it is, as in the original: when that actor is
         // hidden (an armoured Peeves waiting to be woken up), its attachments are not drawn either.
-        if get(vm, a, "AttachmentBone").as_name() != hp3_script::Name::NONE
+        if hp3_world::rd(vm, a, "AttachmentBone").as_name() != hp3_script::Name::NONE
             && let Some(parent) = hp3_world::read(vm, a, base_slot).as_obj()
             && (hp3_world::read(vm, parent, hidden).as_bool() || hp3_world::read(vm, parent, special_hidden).as_bool())
         {
@@ -768,7 +789,7 @@ pub fn actor_instances(
         {
             continue;
         }
-        let mesh = if draw_type == DT_MESH { get(vm, a, "Mesh").as_obj() } else { get(vm, a, "StaticMesh").as_obj() };
+        let mesh = if draw_type == DT_MESH { hp3_world::rd(vm, a, "Mesh").as_obj() } else { hp3_world::rd(vm, a, "StaticMesh").as_obj() };
         let Some(mesh) = mesh else { continue };
         // HP3_HIDE_ACTOR=<name>: leaves that actor out of the picture (to see what on screen it is).
         if named(vm, a, hide_actor) {
@@ -777,11 +798,11 @@ pub fn actor_instances(
         // A skinned character that cannot be in view is not skinned at all.
         if draw_type == DT_MESH
             && let Some(v) = &view
-            && v.rules_out(vec3(&get(vm, a, "Location")))
+            && v.rules_out(hp3_world::rd_vec(vm, a, "Location"))
         {
             continue;
         }
-        let skins: Vec<Option<ObjId>> = match get(vm, a, "Skins") {
+        let skins: Vec<Option<ObjId>> = match hp3_world::rd(vm, a, "Skins") {
             Value::Array(v) => v.iter().map(Value::as_obj).collect(),
             _ => Vec::new(),
         };
