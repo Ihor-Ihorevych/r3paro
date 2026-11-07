@@ -26,7 +26,7 @@ pub fn static_exports(vm: &mut Vm<'_>, map: &Package) -> HashSet<usize> {
     let actors = world(vm).actors.clone();
     for a in actors {
         let Some((pkg, index)) = vm.db.objects.get(a).key.clone() else { continue };
-        if pkg.as_ref() == map.name.to_ascii_lowercase() && get(vm, a, "bStatic").as_bool() {
+        if pkg.as_ref() == map.name.to_ascii_lowercase() && get(vm, a, "bStatic").as_bool() && hp3_world::rd(vm, a, "LumosType").as_int() == 0 {
             out.insert(index);
         }
     }
@@ -706,6 +706,7 @@ pub fn actor_instances(
     );
     let (owner_slot, base_slot) = (hp3_world::actor_slot(vm, "Owner"), hp3_world::actor_slot(vm, "Base"));
     let skin_mod_slot = hp3_world::actor_slot(vm, "bUseSkinColorMod");
+    let lumos_slot = hp3_world::actor_slot(vm, "LumosType");
     // The debugging switches, read once (looking the environment up takes a lock, and this loop sees every actor).
     static DRAW_DEBUG: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     static HIDE_ACTOR: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
@@ -728,7 +729,7 @@ pub fn actor_instances(
                 hp3_world::read(vm, a, special_hidden)
             );
         }
-        if draw_type != DT_MESH && (draw_type != DT_STATIC_MESH || hp3_world::read(vm, a, static_slot).as_bool()) {
+        if draw_type != DT_MESH && (draw_type != DT_STATIC_MESH || (hp3_world::read(vm, a, static_slot).as_bool() && hp3_world::read(vm, a, lumos_slot).as_int() == 0)) {
             continue;
         }
         // `bSpecialHidden` keeps an actor out of the normal view (the animation helper of a ledge climb has it).
@@ -808,7 +809,7 @@ pub fn actor_instances(
                 actor_light::debug_print(vm, a, &result);
                 result
             }
-            None => ActorLight { ambient: Vec3::splat(0.5), lights: Vec::new() },
+            None => ActorLight { ambient: Vec3::splat(0.5), lights: Vec::new(), fade: 0.0 },
         };
         // HP3 gives a static mesh half of its zone ambient (and glow), drawn alone or batched; characters keep all of it.
         if lighting.is_some() && draw_type != DT_MESH && !hp3_world::rd(vm, a, "bUnlit").as_bool() {
@@ -835,6 +836,29 @@ pub fn actor_instances(
                 l.color *= tint;
             }
         }
+        // A wall the Lumos spell works on: while the hero's light is on, it turns see-through near the hero (a vanishing wall) or
+        // shows up near the hero (an appearing one). The original fades by distance from the light, down to about a fifth.
+        let lumos = hp3_world::read(vm, a, lumos_slot).as_int();
+        if lumos == 1 || lumos == 2 {
+            let hero = world(vm).level_info.and_then(|li| get(vm, li, "PlayerHeroActor").as_obj());
+            let (on, radius, at) = match hero {
+                Some(h) => (get(vm, h, "bLumosOn").as_bool(), get(vm, h, "fLumosRadius").as_float(), vec3(&get(vm, h, "Location"))),
+                None => (false, 0.0, Vec3::ZERO),
+            };
+            let radius = if radius > 0.0 { radius } else { 512.0 };
+            let middle = transform.transform_point3(gpu.local.transform_point3(gpu.bounds_centre));
+            // A wall is big and its middle far from the part near the light: allow for that.
+            let near = ((at.distance(middle) - 128.0).max(0.0) / (radius * 0.8)).min(1.0);
+            if lumos == 2 {
+                if on {
+                    light.fade = 0.78 * (1.0 - near);
+                }
+            } else if !on || near >= 0.98 {
+                continue;
+            } else {
+                light.fade = near;
+            }
+        }
         out.push((gpu, transform, light));
         INSTANCE_NS[3].fetch_add(t_rest.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     }
@@ -842,7 +866,7 @@ pub fn actor_instances(
     for piece in hp3_world::particles::collect_meshes(vm) {
         let Some(gpu) = cache.get(vm, loader, r, dynamic, piece.mesh, &[]) else { continue };
         let transform = Mat4::from_translation(piece.pos) * Mat4::from_mat3(piece.rot) * Mat4::from_scale(piece.scale);
-        out.push((gpu, transform, ActorLight { ambient: Vec3::splat(0.8), lights: Vec::new() }));
+        out.push((gpu, transform, ActorLight { ambient: Vec3::splat(0.8), lights: Vec::new(), fade: 0.0 }));
     }
     INSTANCE_NS[4].fetch_add(t_total.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     out

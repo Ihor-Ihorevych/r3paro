@@ -188,7 +188,7 @@ fn pose(root: &Path, package: &str, mesh: &str, out: &Path, seq: Option<&str>, f
     let gpu_scene = renderer.upload_scene(&scene::Scene::default());
     let camera = Camera { position: Vec3::new(180.0, 0.0, 10.0), rotation: [0, 32768, 0], fov_degrees: 70.0 };
     let (w, h) = (800, 800);
-    let refs = [(&gpu, glam::Mat4::IDENTITY, hp3_render::dynamic::ActorLight { ambient: glam::Vec3::splat(0.5), lights: Vec::new() })];
+    let refs = [(&gpu, glam::Mat4::IDENTITY, hp3_render::dynamic::ActorLight { ambient: glam::Vec3::splat(0.5), lights: Vec::new(), fade: 0.0 })];
     let rgba = renderer.render_frame_to_rgba(w, h, |c, d| dynamic.draw(&renderer, &gpu_scene, &refs, &camera, c, d, 1.0));
     write_png(out, w, h, &rgba)
 }

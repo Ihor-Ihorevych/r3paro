@@ -119,10 +119,11 @@ pub fn start(vm: &mut Vm<'_>, actor: ObjId, sound: &(String, usize)) {
     world(vm).lip_syncs.push(LipSync { actor, start: now, opening, step, mouth, started: false });
 }
 
-/// The jaw's turn: roll (axis 2) opens the mouth on Harry's rig (found by trying the three; `HP3_JAW_AXIS` picks another), for an opening of 0 to 1.
+/// The jaw's turn for an opening of 0 to 1. The jaw bone's own X runs forward to the chin and its Z across the face, so the hinge is yaw
+/// (axis 1) and a negative angle swings the chin down; roll (the old choice) only twists the mouth corners. `HP3_JAW_AXIS` picks another.
 fn jaw_turn(open: f32) -> [i32; 3] {
     static AXIS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    let mut axis = *AXIS.get_or_init(|| crate::envc::var("HP3_JAW_AXIS").ok().and_then(|v| v.parse().ok()).unwrap_or(2));
+    let mut axis = *AXIS.get_or_init(|| crate::envc::var("HP3_JAW_AXIS").ok().and_then(|v| v.parse().ok()).unwrap_or(1));
     if let Ok(cycle) = crate::envc::var("HP3_JAW_CYCLE") {
         // HP3_JAW_CYCLE=<ticks>: the axis changes every that many ticks (0, 1, 2), counted from tick 300; every fourth stretch has no turn, as a control.
         let n = cycle.parse::<u64>().unwrap_or(60).max(1);
@@ -133,7 +134,7 @@ fn jaw_turn(open: f32) -> [i32; 3] {
         axis = stage as usize;
     }
     // HP3_JAW_DEG=<degrees> sets the opening angle and HP3_JAW_HOLD keeps the jaw fully open (to find the right axis).
-    let deg = crate::envc::var("HP3_JAW_DEG").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(25.0);
+    let deg = crate::envc::var("HP3_JAW_DEG").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(-25.0);
     let open = if crate::envc::var_os("HP3_JAW_HOLD").is_some() { 1.0 } else { open };
     let mut turn = [0; 3];
     turn[axis.min(2)] = (open * 65536.0 * deg / 360.0) as i32;

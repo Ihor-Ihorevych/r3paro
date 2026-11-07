@@ -456,7 +456,7 @@ impl Collision {
                 // The triangle's own test first: most candidates are nowhere near the move, and the per-actor lookups
                 // below only ever skip a triangle that would be hit.
                 let Some(h) = tri_trace(t, start, end, extent) else { continue };
-                if t.actor.is_some_and(|a| self.inactive.contains(&a) || !self.blocks_mover(a) || self.uses_model(a, extent) || self.starts_in_volume(a, start)) {
+                if t.actor.is_some_and(|a| self.inactive.contains(&a) || !self.blocks_mover(a) || self.uses_model(a, extent) || self.starts_in_volume(a, start, extent)) {
                     continue;
                 }
                 keep(h);
@@ -535,8 +535,12 @@ impl Collision {
         self.volume_bounds = bounds;
     }
 
-    fn starts_in_volume(&self, actor: ObjId, start: Vec3) -> bool {
-        self.volume_bounds.get(&actor).is_some_and(|(lo, hi)| start.cmpgt(*lo).all() && start.cmplt(*hi).all())
+    /// Whether a move starts inside the volume `actor`: its centre is within the volume footprint and its box already sinks
+    /// well into the volume (a bean spawned below a chest that stands on a slab), which is no wall to bounce off.
+    fn starts_in_volume(&self, actor: ObjId, start: Vec3, extent: Vec3) -> bool {
+        self.volume_bounds.get(&actor).is_some_and(|(lo, hi)| {
+            start.x > lo.x && start.x < hi.x && start.y > lo.y && start.y < hi.y && start.z + extent.z > lo.z && start.z - extent.z < hi.z - 2.0
+        })
     }
 
     /// The world box of the baked triangles of `actor`.
@@ -768,7 +772,11 @@ fn tri_trace(t: &Tri, start: Vec3, end: Vec3, extent: Vec3) -> Option<Hit> {
         let toward_inside = edge_normal.dot(t.v[(i + 2) % 3] - a).signum();
         edge_normal.dot(contact - a) * toward_inside >= 0.0
     });
-    if !inside && (0..3).all(|i| segment_distance(contact, t.v[i], t.v[(i + 1) % 3]) > grow) {
+    // A box lower than it is wide (a bean) reaches only its own half height up and down a wall, not its radius: the circle
+    // approximation would otherwise keep a bean hovering above a slab's top hearing the slab's side face.
+    let squash = if extent.z > 0.0 && extent.z < grow { grow / extent.z } else { 1.0 };
+    let sq = |p: Vec3| Vec3::new(p.x, p.y, p.z * squash);
+    if !inside && (0..3).all(|i| segment_distance(sq(contact), sq(t.v[i]), sq(t.v[(i + 1) % 3])) > grow) {
         return None;
     }
     Some(Hit { time, location: at, normal: n, actor: t.actor })

@@ -116,7 +116,7 @@ Milestones are from the plan (M0 to M12).
   about 100 s). Checked by numbers only (the decoded audio has a speech-like spectrum, the overlap of blocks
   agrees much better with the DCT-III than with a DCT-IV, levels are sane); nobody has listened yet. The output
   gain is 1/frame length (calibrated, not derived). Ambient sounds (`AmbientSound`) loop at their actors while the listener is
-  within reach, and the game's `[ALAudio.ALAudioSubsystem]` volumes are used. Not yet: reverb/occlusion, lip-sync from the sound envelopes, music on a thread (a long track delays its start by a
+  within reach, and the game's `[ALAudio.ALAudioSubsystem]` volumes are used. Not yet: reverb/occlusion, music on a thread (a long track delays its start by a
   fraction of a second), Android output.
 - **Movies**: this install has no movie files and no Bink video decoder exists yet, so `Movie.Play` logs the
   skipped movie and reports it ended on the next tick; the game carries on (the studio logos of the preamble
@@ -244,3 +244,23 @@ Phone performance (POCO F6, OpenGL ES), InsideHub: 30 -> 55 fps. Posed character
 (writing into a buffer the GPU still read made the driver wait about 10 ms a frame); the default physics volume is found once;
 actor lights are looked up through a ground grid. `perf:` lines on Android now include posed KB, upload ms and draw calls;
 `env.flag` in the game folder sets debug switches (`NAME=value` lines).
+
+## Fixes from the 2026-11-07 bug list (written unattended, not yet seen on screen)
+
+- **Beans stuck in a chest** (Adv1Express `HPGenericSpawner1`, a chest on a `BlockingVolume` slab): a bean spawns 10 below the chest, inside the
+  slab's footprint and a few units into its top; the slab's side face then acted as a wall and every `HitWall` halved the bean's speed to
+  zero. `Collision::starts_in_volume` now skips a volume whose footprint holds the mover's centre and which the box already sinks into
+  (not only a centre strictly inside), and `tri_trace` shrinks the edge tolerance of a flat box (a bean) to its half height. All five
+  Adv1 chests now scatter their beans. Still open: Adv5Shack skull-shelf beans bounce off the edge of their floor and fall to a floor 2000
+  units lower (`SkullShelfSpwn*`, `KnightSpawner1` in Adv3Library were not looked at).
+- **Mouth**: the jaw was rolled about its own long axis (only the mouth corners moved). Its X runs to the chin, Z across the face, so it now
+  yaws, -25 degrees (`HP3_JAW_AXIS`/`HP3_JAW_DEG` still override). Not checked by eye. Real HP3 lip-sync is 9 viseme pose sequences on channels
+  25-33 (rooted at `Body__Mouth`) driven by the 26 curves of each dialog sound; only curve 19 is used for the jaw so far.
+- **Lumos walls**: `LumosSparklesTrigger` walls (`Actor.LumosType` 1 appear / 2 disappear) are no longer baked into the level; they are drawn live
+  and, while `PlayerHeroActor.bLumosOn`, fade by distance within `fLumosRadius` (the HP2 curve: down to about 22% opacity). Support:
+  `ActorLight.fade` goes to the dynamic shader (`extra.x`), a faded actor's sections all go through the blended pass. Not checked by eye;
+  walls now take the live (vertex) lighting instead of the baked one.
+- **Harry beside Ron before the control switch** (end of Adv1Express): not fixed. At the end of the cutscene Harry's own script finishes and
+  the hero controller gets him back; `DementorEncounter0` then starts `StateHWE_DementorEncounter`, whose `SwitchToFightStanceAnims` runs on
+  its pawn (Harry) and replaces his collapsed idle with `BattleIdle`; only afterwards `SwitchControlToMe` moves control to Ron. The original
+  presumably runs these in another order; where it differs is unknown.

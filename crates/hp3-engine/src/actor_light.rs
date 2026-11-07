@@ -291,7 +291,7 @@ pub(crate) fn actor_light_for(
     // HP3_ACTOR_LIGHTS=0: ambient light only (to measure what the lights cost).
     static NO_LIGHTS: OnceLock<bool> = OnceLock::new();
     if unlit || *NO_LIGHTS.get_or_init(|| std::env::var("HP3_ACTOR_LIGHTS").is_ok_and(|v| v == "0")) {
-        return ActorLight { ambient, lights: Vec::new() };
+        return ActorLight { ambient, lights: Vec::new(), fade: 0.0 };
     }
     let dramatic = read(vm, actor, s.dramatic).as_bool();
     let max_lights = {
@@ -406,7 +406,7 @@ pub(crate) fn actor_light_for(
         };
         out.push(shader);
     }
-    ActorLight { ambient, lights: out }
+    ActorLight { ambient, lights: out, fade: 0.0 }
 }
 
 /// Prints what lights an actor (HP3_ACTOR_LIGHT_DEBUG=<name>).

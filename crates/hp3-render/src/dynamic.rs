@@ -32,14 +32,14 @@ fn fog_factor(w: f32) -> f32 {
 // One light as the original hands it to Direct3D: a = position and kind (0 point, 1 sun, 2 spot), b = direction and range,
 // c = diffuse color and cos(phi/2), d = attenuation 0, 1, 2 and cos(theta/2).
 struct Light { a: vec4<f32>, b: vec4<f32>, c: vec4<f32>, d: vec4<f32> };
-// The model matrix, the actor's ambient light (w = how many lights) and its lights.
-struct Model { model: mat4x4<f32>, ambient: vec4<f32>, lights: array<Light, 8> };
+// The model matrix, the actor's ambient light (w = how many lights), extra.x = how much of it is faded out (0 solid) and its lights.
+struct Model { model: mat4x4<f32>, ambient: vec4<f32>, extra: vec4<f32>, lights: array<Light, 8> };
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
 @group(2) @binding(0) var<uniform> m: Model;
 
-struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) light: vec3<f32> };
+struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) light: vec3<f32>, @location(2) fade: f32 };
 
 // Fixed-function style lighting per vertex (smooth, clamped to 0..1 before it modulates the texture, doubled).
 @vertex fn vs(@location(0) position: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) light_uv: vec2<f32>,
@@ -48,6 +48,7 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @l
     let wp = m.model * vec4<f32>(position, 1.0);
     o.pos = globals.view_proj * wp;
     o.uv = uv;
+    o.fade = 1.0 - m.extra.x;
     let n = normalize((m.model * vec4<f32>(normal, 0.0)).xyz);
     var lit = m.ambient.rgb;
     let count = i32(m.ambient.w);
@@ -85,7 +86,7 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @l
 @fragment fn fs_blend(i: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, i.uv);
     if (c.a < 0.01) { discard; }
-    return vec4<f32>(c.rgb * i.light * 2.0, c.a * fog_factor(i.pos.w));
+    return vec4<f32>(c.rgb * i.light * 2.0, c.a * i.fade * fog_factor(i.pos.w));
 }
 "#;
 
@@ -93,7 +94,7 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @l
 const STRIDE: u64 = 768;
 
 /// Bytes of one actor's uniform block: model matrix, ambient (with the light count) and eight lights.
-const MODEL_BYTES: u64 = 64 + 16 + 8 * 64;
+const MODEL_BYTES: u64 = 64 + 16 + 16 + 8 * 64;
 
 struct MeshDraw {
     /// The `MeshGeom` batch this draw came from.
@@ -130,6 +131,8 @@ pub struct ShaderLight {
 pub struct ActorLight {
     pub ambient: glam::Vec3,
     pub lights: Vec<ShaderLight>,
+    /// How much of the actor is faded out (0 solid, 1 gone): a faded actor is drawn blended, whatever its materials are.
+    pub fade: f32,
 }
 
 /// A mesh uploaded once and drawn at any number of transforms.
@@ -400,8 +403,9 @@ impl Dynamic {
                 data[off..off + 64].copy_from_slice(bytemuck::cast_slice(&m));
                 let n = light.lights.len().min(8);
                 data[off + 64..off + 80].copy_from_slice(bytemuck::cast_slice(&light.ambient.extend(n as f32).to_array()));
+                data[off + 80..off + 96].copy_from_slice(bytemuck::cast_slice(&[light.fade, 0.0, 0.0, 0.0f32]));
                 for (k, l) in light.lights.iter().take(8).enumerate() {
-                    let at = off + 80 + k * 64;
+                    let at = off + 96 + k * 64;
                     let rows: [[f32; 4]; 4] = [
                         [l.position.x, l.position.y, l.position.z, l.kind as f32],
                         [l.direction.x, l.direction.y, l.direction.z, l.range],
@@ -419,10 +423,17 @@ impl Dynamic {
         let sections = |pass: &mut wgpu::RenderPass<'_>, kinds: &[(MaterialBlend, &wgpu::RenderPipeline)]| {
             for &(blend, pipeline) in kinds {
                 pass.set_pipeline(pipeline);
-                for (i, (mesh, _, _)) in meshes.iter().enumerate() {
+                for (i, (mesh, _, light)) in meshes.iter().enumerate() {
                     pass.set_bind_group(2, &inst.1, &[(i as u64 * STRIDE) as u32]);
+                    // A faded actor (a wall under Lumos) is all blended: its sections go with the alpha ones.
+                    let faded = light.fade > 0.0;
                     for (k, d) in mesh.draws.iter().enumerate() {
-                        if !((d.blend == MaterialBlend::Cutout && blend == MaterialBlend::Opaque) || d.blend == blend) {
+                        let wanted = if faded {
+                            blend == MaterialBlend::Alpha
+                        } else {
+                            (d.blend == MaterialBlend::Cutout && blend == MaterialBlend::Opaque) || d.blend == blend
+                        };
+                        if !wanted {
                             continue;
                         }
                         pass.set_bind_group(1, &d.bind, &[]);
