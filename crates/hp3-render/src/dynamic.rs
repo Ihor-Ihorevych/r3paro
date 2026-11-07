@@ -96,6 +96,48 @@ const STRIDE: u64 = 768;
 /// Bytes of one actor's uniform block: model matrix, ambient (with the light count) and eight lights.
 const MODEL_BYTES: u64 = 64 + 16 + 16 + 8 * 64;
 
+
+/// A soft shadow on the ground under a moving actor: a quad lying on the surface, darkest in the middle and fading out
+/// to its edge (not part of the original game).
+#[derive(Clone, Copy, Debug)]
+pub struct BlobShadow {
+    pub center: glam::Vec3,
+    /// Half-extents of the quad as world vectors (the shadow is an ellipse inside it).
+    pub axis_u: glam::Vec3,
+    pub axis_v: glam::Vec3,
+    /// Darkness in the middle, 0 to 1.
+    pub opacity: f32,
+}
+
+const SHADOW_SHADER: &str = r#"
+struct Globals { view_proj: mat4x4<f32>, fog_color: vec4<f32>, fog: vec4<f32> };
+@group(0) @binding(0) var<uniform> globals: Globals;
+struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) opacity: f32 };
+@vertex fn vs(@builtin(vertex_index) vi: u32, @location(0) c: vec4<f32>, @location(1) u: vec4<f32>, @location(2) v: vec4<f32>) -> VsOut {
+    var corners = array<vec2<f32>, 4>(vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(-1.0, 1.0), vec2<f32>(1.0, 1.0));
+    let q = corners[vi];
+    var o: VsOut;
+    o.pos = globals.view_proj * vec4<f32>(c.xyz + u.xyz * q.x + v.xyz * q.y, 1.0);
+    o.uv = q;
+    o.opacity = c.w;
+    return o;
+}
+@fragment fn fs(i: VsOut) -> @location(0) vec4<f32> {
+    let r = length(i.uv);
+    if (r >= 1.0) { discard; }
+    // A soft bell, fading to nothing at the edge (the output is blended in linear light, which makes a shadow look lighter, so it is strong).
+    let s = 1.0 - r * r;
+    var a = i.opacity * s * (0.75 + 0.25 * s);
+    if (globals.fog.z > 0.5) {
+        a = a * clamp((globals.fog.y - 1.0 / i.pos.w) / max(globals.fog.y - globals.fog.x, 1.0), 0.0, 1.0);
+    }
+    return vec4<f32>(0.0, 0.0, 0.0, a);
+}
+"#;
+
+/// Bytes of one shadow in the instance buffer: centre and opacity, then the two axes.
+const SHADOW_BYTES: u64 = 48;
+const SHADOW_CAPACITY: u64 = 256;
 struct MeshDraw {
     /// The `MeshGeom` batch this draw came from.
     batch: usize,
@@ -152,6 +194,9 @@ pub struct Dynamic {
     instances: RefCell<(wgpu::Buffer, wgpu::BindGroup, u64)>,
     images: RefCell<HashMap<ObjKey, wgpu::TextureView>>,
     posed: RefCell<PosedRing>,
+    shadow_pipeline: wgpu::RenderPipeline,
+    shadow_buffer: wgpu::Buffer,
+    shadow_count: std::cell::Cell<u32>,
 }
 
 /// The posed vertices of every skeletal mesh drawn in a frame go up in one write into one of three vertex buffers, used
@@ -230,8 +275,56 @@ impl Dynamic {
             alpha: wgpu::BlendComponent::OVER,
         };
         let additive_pipeline = make("dynamic additive", "fs_blend", Some(additive));
+        let shadow_shader = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("blob shadow"), source: wgpu::ShaderSource::Wgsl(SHADOW_SHADER.into()) });
+        let shadow_layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("blob shadow"), bind_group_layouts: &[r.globals_layout()], push_constant_ranges: &[] });
+        let shadow_pipeline = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("blob shadow"),
+            layout: Some(&shadow_layout),
+            vertex: wgpu::VertexState {
+                module: &shadow_shader,
+                entry_point: Some("vs"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: SHADOW_BYTES,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4],
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shadow_shader,
+                entry_point: Some("fs"),
+                targets: &[Some(wgpu::ColorTargetState { format: r.color_format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, cull_mode: None, ..Default::default() },
+            // Tested against the picture, never written; pulled a little toward the viewer so the ground it lies on does not cut it.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState { constant: -4, slope_scale: -2.0, clamp: 0.0 },
+            }),
+            multisample: Default::default(),
+            multiview: None,
+            cache: None,
+        });
+        let shadow_buffer = d.create_buffer(&wgpu::BufferDescriptor { label: Some("blob shadows"), size: SHADOW_CAPACITY * SHADOW_BYTES, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let (buffer, bind) = Self::instance_buffer(r, &model_layout, 256);
-        Dynamic { pipeline, alpha_pipeline, additive_pipeline, model_layout, instances: RefCell::new((buffer, bind, 256)), images: RefCell::new(HashMap::new()), posed: RefCell::default() }
+        Dynamic { pipeline, alpha_pipeline, additive_pipeline, model_layout, instances: RefCell::new((buffer, bind, 256)), images: RefCell::new(HashMap::new()), posed: RefCell::default(), shadow_pipeline, shadow_buffer, shadow_count: std::cell::Cell::new(0) }
+    }
+
+    /// The soft shadows to draw this frame (replaces last frame's).
+    pub fn set_shadows(&self, r: &Renderer, shadows: &[BlobShadow]) {
+        let n = shadows.len().min(SHADOW_CAPACITY as usize);
+        let mut data = Vec::with_capacity(n * 12);
+        for s in &shadows[..n] {
+            data.extend_from_slice(&[s.center.x, s.center.y, s.center.z, s.opacity, s.axis_u.x, s.axis_u.y, s.axis_u.z, 0.0, s.axis_v.x, s.axis_v.y, s.axis_v.z, 0.0]);
+        }
+        if n > 0 {
+            r.queue.write_buffer(&self.shadow_buffer, 0, bytemuck::cast_slice(&data));
+        }
+        self.shadow_count.set(n as u32);
     }
 
     fn instance_buffer(r: &Renderer, layout: &wgpu::BindGroupLayout, capacity: u64) -> (wgpu::Buffer, wgpu::BindGroup) {
@@ -458,6 +551,11 @@ impl Dynamic {
             |pass| sections(pass, &[(MaterialBlend::Opaque, &self.pipeline)]),
             // ...and the blended and added ones, then the particles, after them.
             |pass| {
+                if self.shadow_count.get() > 0 {
+                    pass.set_pipeline(&self.shadow_pipeline);
+                    pass.set_vertex_buffer(0, self.shadow_buffer.slice(..));
+                    pass.draw(0..4, 0..self.shadow_count.get());
+                }
                 sections(pass, &[(MaterialBlend::Alpha, &self.alpha_pipeline), (MaterialBlend::Additive, &self.additive_pipeline)]);
                 if let Some((renderer, frame)) = particles {
                     renderer.draw(pass, frame);

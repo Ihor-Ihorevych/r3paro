@@ -678,6 +678,9 @@ pub fn actor_instances(
     let t_total = std::time::Instant::now();
     let actors = world(vm).actors.clone();
     let mut out = Vec::new();
+    let mut shadows: Vec<hp3_render::dynamic::BlobShadow> = Vec::new();
+    let shadows_on = std::env::var_os("HP3_NO_SHADOWS").is_none();
+    let pawn_class = vm.db.find("Pawn");
     let time = if lighting.is_some() {
         cache.light.begin_frame(vm);
         let t = actor_light::level_time(vm);
@@ -836,6 +839,12 @@ pub fn actor_instances(
                 l.color *= tint;
             }
         }
+        // A soft shadow on the ground under a pawn (not in the original): from the strongest light on it, stretched away from it.
+        if draw_type == DT_MESH && shadows_on && pawn_class.is_some_and(|p| vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, p))) {
+            if let Some(s) = pawn_shadow(vm, a, shown, &light) {
+                shadows.push(s);
+            }
+        }
         // A wall the Lumos spell works on: while the hero's light is on, it turns see-through near the hero (a vanishing wall) or
         // shows up near the hero (an appearing one). The original fades by distance from the light, down to about a fifth.
         let lumos = hp3_world::read(vm, a, lumos_slot).as_int();
@@ -868,6 +877,10 @@ pub fn actor_instances(
         let transform = Mat4::from_translation(piece.pos) * Mat4::from_mat3(piece.rot) * Mat4::from_scale(piece.scale);
         out.push((gpu, transform, ActorLight { ambient: Vec3::splat(0.8), lights: Vec::new(), fade: 0.0 }));
     }
+    if std::env::var_os("HP3_SHADOW_DEBUG").is_some() {
+        eprintln!("shadows: {} {:?}", shadows.len(), shadows.first());
+    }
+    dynamic.set_shadows(r, &shadows);
     INSTANCE_NS[4].fetch_add(t_total.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     out
 }
@@ -915,4 +928,54 @@ pub fn particle_quads(vm: &mut Vm<'_>, loader: &Loader<'_>, cache: &mut Particle
         }
     }
     out
+}
+
+/// The soft shadow of a pawn standing at `at`: found by looking for the ground below, darkest when the pawn is close to it
+/// and lit from one side, and stretched away from the strongest light.
+fn pawn_shadow(vm: &mut Vm<'_>, a: ObjId, at: Vec3, light: &ActorLight) -> Option<hp3_render::dynamic::BlobShadow> {
+    let half_height = hp3_world::rd(vm, a, "CollisionHeight").as_float().max(1.0);
+    let radius = (hp3_world::rd(vm, a, "CollisionRadius").as_float() * 1.9).clamp(16.0, 56.0);
+    let hit = world(vm).collision.trace_static(at, at - Vec3::Z * (half_height + 220.0), Vec3::ZERO)?;
+    if hit.normal.z < 0.5 {
+        return None;
+    }
+    let feet_above = (at.z - half_height - hit.location.z).max(0.0);
+    let closeness = 1.0 - (feet_above / 180.0).clamp(0.0, 1.0);
+    if closeness <= 0.0 {
+        return None;
+    }
+    // The strongest light, as a direction along the ground away from it and how much it lights the pawn.
+    let luma = |c: Vec3| c.dot(Vec3::new(0.3, 0.59, 0.11));
+    let mut best = (0.0f32, Vec3::ZERO);
+    for l in &light.lights {
+        let (strength, away) = if l.kind == 1 {
+            (luma(l.color), l.direction)
+        } else {
+            let to = at - l.position;
+            let d = to.length();
+            if d < 1.0 || d > l.range.max(1.0) {
+                continue;
+            }
+            (luma(l.color) / (l.atten[0] + l.atten[1] * d + l.atten[2] * d * d).max(0.2), to / d)
+        };
+        if strength > best.0 {
+            best = (strength, away);
+        }
+    }
+    let lit = (best.0 + luma(light.ambient)).clamp(0.0, 1.0);
+    let along = Vec3::new(best.1.x, best.1.y, 0.0);
+    let reach = (along.length() / best.1.length().max(0.001)).clamp(0.0, 1.0);
+    let dir = if along.length() > 0.01 { along.normalize() } else { Vec3::X };
+    // On a slope the axes lie in the ground plane.
+    let u = (dir - hit.normal * dir.dot(hit.normal)).normalize_or_zero();
+    let u = if u == Vec3::ZERO { Vec3::X } else { u };
+    let v = hit.normal.cross(u);
+    let stretch = 1.0 + 0.7 * reach * (best.0 / (best.0 + 0.25));
+    let center = hit.location + hit.normal * 0.6 + u * (radius * 0.45 * reach);
+    Some(hp3_render::dynamic::BlobShadow {
+        center,
+        axis_u: u * radius * stretch * (1.0 + 0.4 * (1.0 - closeness)),
+        axis_v: v * radius * (1.0 + 0.4 * (1.0 - closeness)),
+        opacity: closeness * (0.75 + 0.25 * lit),
+    })
 }
