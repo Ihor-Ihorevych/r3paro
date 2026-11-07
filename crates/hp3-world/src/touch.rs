@@ -330,6 +330,8 @@ pub fn settle(vm: &mut Vm<'_>, a: ObjId) {
         prime(vm);
     }
     if world(vm).touch.depth >= MAX_DEPTH {
+        // Too deep inside events to look now: the end-of-tick pass must look at it.
+        vm.db.objects.get_mut(a);
         return;
     }
     let s = slots(vm);
