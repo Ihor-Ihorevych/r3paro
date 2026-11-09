@@ -721,7 +721,9 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
                 // the move go along the surface instead.
                 let mut stepped = false;
                 // (A ramp is not a tread: climbing its face as a step picked a spot off to one side, and the pawn went sideways.)
-                let ramp = hit.normal.z < 0.998 && crate::envc::var_os("HP3_RAMP_STEPUP").is_none();
+                // (A hero on a slide is the exception: its track is faceted, and going along each facet bled its speed away at every
+                // crease until it stood wedged on the slope; the step-up, as in the original, keeps the way it was going.)
+                let ramp = hit.normal.z < 0.998 && !sliding && crate::envc::var_os("HP3_RAMP_STEPUP").is_none();
                 if hit.time * delta.length() <= 1.0 && !ramp {
                     let before = vec(&get(vm, a, "Location"));
                     step_up(vm, a, remaining, hit, 0);
@@ -731,12 +733,28 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
                     }
                 }
                 if !stepped {
-                    let along = remaining - hit.normal * remaining.dot(hit.normal);
-                    if along.length_squared() > 1e-8 {
-                        move_actor(vm, a, along);
-                        if crate::envc::var_os("HP3_WALK_DEBUG").is_some_and(|v| human || v == "all") {
-                            eprintln!("walk: along {along} now at {}", vec(&get(vm, a, "Location")));
+                    // Along the surface; where that meets a second one (the crease between two slopes, a valley in a
+                    // slide track) the rest goes along the crease, so the pawn is not left wedged in it.
+                    let mut along = remaining - hit.normal * remaining.dot(hit.normal);
+                    let mut plane = hit.normal;
+                    for _ in 0..3 {
+                        if along.length_squared() <= 1e-8 {
+                            break;
                         }
+                        let along_hit = move_actor(vm, a, along);
+                        if crate::envc::var_os("HP3_WALK_DEBUG").is_some_and(|v| human || v == "all") {
+                            eprintln!("walk: along {along} now at {} hit {:?}", vec(&get(vm, a, "Location")), along_hit.map(|h| (h.time, h.normal, h.actor.map(|o| o.0))));
+                        }
+                        let Some(next) = along_hit.filter(|h| h.time < 1.0 && h.normal.length_squared() > 0.5) else { break };
+                        let left = along * (1.0 - next.time);
+                        let crease = plane.cross(next.normal);
+                        along = if crease.length_squared() > 1e-4 {
+                            let c = crease.normalize();
+                            c * c.dot(left)
+                        } else {
+                            left - next.normal * left.dot(next.normal)
+                        };
+                        plane = next.normal;
                     }
                 }
             }

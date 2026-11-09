@@ -442,7 +442,7 @@ checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 
 [[package]]
 name = "hp3"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "glam",
  "hp3-assets",
@@ -463,7 +463,7 @@ dependencies = [
 
 [[package]]
 name = "hp3-anim"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "glam",
  "hp3-assets",
@@ -472,7 +472,7 @@ dependencies = [
 
 [[package]]
 name = "hp3-assets"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "hp3-package",
  "log",
@@ -481,18 +481,18 @@ dependencies = [
 
 [[package]]
 name = "hp3-audio"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "lewton",
 ]
 
 [[package]]
 name = "hp3-core"
-version = "0.7.0"
+version = "0.7.1"
 
 [[package]]
 name = "hp3-engine"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "glam",
  "hp3-anim",
@@ -505,23 +505,23 @@ dependencies = [
 
 [[package]]
 name = "hp3-ffi"
-version = "0.7.0"
+version = "0.7.1"
 
 [[package]]
 name = "hp3-game"
-version = "0.7.0"
+version = "0.7.1"
 
 [[package]]
 name = "hp3-gui"
-version = "0.7.0"
+version = "0.7.1"
 
 [[package]]
 name = "hp3-movie"
-version = "0.7.0"
+version = "0.7.1"
 
 [[package]]
 name = "hp3-package"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "hp3-core",
  "log",
@@ -531,7 +531,7 @@ dependencies = [
 
 [[package]]
 name = "hp3-pkg"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "hp3-assets",
  "hp3-audio",
@@ -541,11 +541,11 @@ dependencies = [
 
 [[package]]
 name = "hp3-platform"
-version = "0.7.0"
+version = "0.7.1"
 
 [[package]]
 name = "hp3-render"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "bytemuck",
  "glam",
@@ -558,7 +558,7 @@ dependencies = [
 
 [[package]]
 name = "hp3-run"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "glam",
  "hp3-assets",
@@ -572,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "hp3-script"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "hp3-package",
  "log",
@@ -581,7 +581,7 @@ dependencies = [
 
 [[package]]
 name = "hp3-view"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "glam",
  "hp3-anim",
@@ -597,7 +597,7 @@ dependencies = [
 
 [[package]]
 name = "hp3-world"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "fontdue",
  "glam",
