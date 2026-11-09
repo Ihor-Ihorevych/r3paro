@@ -31,6 +31,8 @@ pub enum Event {
     Music { song: String, handle: i32, fade_in: f32, looping: bool, stab: bool },
     StopMusic { handle: i32, fade_out: f32 },
     StopAllMusic { fade_out: f32 },
+    /// The `stopsounds` console command (a skipped cutscene runs it): every sound effect stops, music goes on.
+    StopAllSounds,
 }
 
 #[derive(Default)]

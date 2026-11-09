@@ -19,6 +19,10 @@ pub enum Blend {
     Alpha,
     Additive,
     Modulate,
+    /// `PTDS_Darken`: what is behind is scaled by one minus the particle's colour.
+    Darken,
+    /// `PTDS_Brighten`: the particle's colour plus what is behind scaled by one minus it (a screen, not a plain sum).
+    Brighten,
 }
 
 /// How wide the line segments of a spark are (the original draws 1-pixel lines).
@@ -200,9 +204,12 @@ impl Config {
             eprintln!("particle style: {} draw_style {} texture {}", hp3_script::natives::object_path(vm, o), draw_style, tex);
         }
         let blend = match draw_style {
-            // Translucent and Brighten add light; Modulated and Darken darken what is behind.
-            3 | 6 => Blend::Additive,
-            2 | 5 => Blend::Modulate,
+            // The draw styles (EParticleDrawStyle): 3 Translucent adds, 2 Modulated multiplies (twice), 5 Darken is dest * (1 - colour) and 6 Brighten
+            // is colour + dest * (1 - colour). The original's dragon fire has a black hole in its middle: SmokeSequence, grey puffs, drawn with style 5.
+            // (HP3's D3DDrv.dll has two 7-way switches that looked like a swap of 5 and 6; that reading was wrong for this, see `HP3_STYLE5_DARKEN`.)
+            3 => Blend::Additive,
+            2 => Blend::Modulate,
+            5 | 6 => if (draw_style == 5) == swapped_5_6() { Blend::Darken } else { Blend::Brighten },
             _ => Blend::Alpha,
         };
         let regular = flag(vm, o, "UseRegularSizeScale");
@@ -482,7 +489,22 @@ fn spawn(config: &Config, rng: &mut Rng, origin: Vec3, rot: Mat3, fill_age: f32,
         spin_rate: if config.spin { config.spins_per_second.pick(rng) * std::f32::consts::TAU } else { 0.0 },
         mult: {
             let m = config.color_mult.pick(rng);
-            if m == Vec3::ZERO { Vec3::ONE } else { m }
+            // The data holds multipliers such as (255, 1, 200) (the dragon fire's flare) and (128, 1, 1): read as plain factors they turn yellow
+            // into magenta, which the original does not show, so a multiplier only dims a channel, it never brightens it. `HP3_RAW_COLOR_MULT`
+            // keeps the numbers as they are, `HP3_NO_COLOR_MULT` drops them.
+            if m == Vec3::ZERO || std::env::var_os("HP3_NO_COLOR_MULT").is_some() {
+                Vec3::ONE
+            } else if std::env::var_os("HP3_RAW_COLOR_MULT").is_some() {
+                m
+            } else if m.max_element() > 1.0 && std::env::var_os("HP3_CLAMP_COLOR_MULT").is_none() {
+                // A multiplier above 1 holds byte values for a green glow: the first component is the green, the weakest of the others is red and
+                // blue. The flare (255, 1, 200) is the clean green of the original's dragon fire (the 200 must not reach red: that gives yellow),
+                // the Lapifors statue's sparkles (128, 1, 1) a dim green.
+                let low = m.y.min(m.z);
+                Vec3::new(low, m.x, low).clamp(Vec3::ZERO, Vec3::splat(255.0)) / 255.0
+            } else {
+                m.clamp(Vec3::ZERO, Vec3::ONE)
+            }
         },
         frame: if config.random_sub { min + (rng.next() * (max - min + 1) as f32) as i32 } else { min },
         end: Vec3::ZERO,
@@ -921,7 +943,10 @@ pub fn collect(vm: &mut Vm<'_>, right: Vec3, up: Vec3) -> Vec<Quad> {
             {
                 alpha *= ((1.0 - t) / (1.0 - start)).max(0.0);
             }
-            let rgb = [color[0] * p.mult.x * glow, color[1] * p.mult.y * glow, color[2] * p.mult.z * glow];
+            // The original's particle colour is a vertex colour in bytes: what the multiplier makes of the scale colour stops at full intensity
+            // (flare4 multiplies by 255, 1 and 200: unclamped, its dim texels saturate red and blue only, which is magenta). The spell glow is ours,
+            // on top of that.
+            let rgb = [(color[0] * p.mult.x).clamp(0.0, 1.0) * glow, (color[1] * p.mult.y).clamp(0.0, 1.0) * glow, (color[2] * p.mult.z).clamp(0.0, 1.0) * glow];
             let colour = [rgb[0], rgb[1], rgb[2], alpha.clamp(0.0, 1.0)];
             // Texture sub-frame.
             let (ud, vd) = (c.u_div.max(1), c.v_div.max(1));
@@ -1120,4 +1145,10 @@ mod tests {
         assert!(points.iter().all(|p| p.z.abs() < 0.5));
         assert!(points.iter().any(|p| p.x.abs() > 50.0) && points.iter().any(|p| p.y.abs() > 50.0));
     }
+}
+
+/// Whether draw style 5 is "Darken" (the script's name for it, as in UT2004) rather than 6 (`HP3_STYLE5_DARKEN=1` / `0` to compare the two).
+fn swapped_5_6() -> bool {
+    static S: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *S.get_or_init(|| std::env::var("HP3_STYLE5_DARKEN").map(|v| v != "0").unwrap_or(true))
 }

@@ -1,4 +1,4 @@
-//! Object states: switching state, running state code, latent actions, and script events.
+//! Obje&& is_cutscene(vm, o)t states: switching state, running state code, latent actions, and script events.
 //!
 //! Written from standard UnrealScript semantics (NOT yet verified against HP3's Core.dll).
 
@@ -185,6 +185,11 @@ pub fn register(vm: &mut Vm<'_>) {
     vm.register("Object.GotoState", |vm, this, a| {
         if let Some(o) = this {
             vm.goto_state(o, name_arg(a, 0), name_arg(a, 1))?;
+            // A cutscene that starts takes hold of its pawns at once: an event starts it (a boss's defeat) and the pawns it needs
+            // (that boss, which destroys itself in its own state code the same frame) must not get ahead of it.
+            if vm.db.names.get(name_arg(a, 0)).eq_ignore_ascii_case("Running") && is_cutscene(vm, o) {
+                vm.tick_state(o, 0.0)?;
+            }
         }
         Ok(Value::Empty)
     });
@@ -229,4 +234,16 @@ pub fn register(vm: &mut Vm<'_>) {
         vm.latent.insert(o, Latent::Sleep(a.first().map(Value::as_float).unwrap_or(0.0)));
         Ok(Value::Empty)
     });
+}
+
+/// Whether the object is a cutscene (a `KWCutScene` or a class made from it).
+fn is_cutscene(vm: &Vm<'_>, o: ObjId) -> bool {
+    let mut class = vm.db.objects.get(o).class;
+    while let Some(c) = class {
+        if vm.db.names.get(vm.db.get(c).name).eq_ignore_ascii_case("KWCutScene") {
+            return true;
+        }
+        class = vm.db.get(c).super_;
+    }
+    false
 }

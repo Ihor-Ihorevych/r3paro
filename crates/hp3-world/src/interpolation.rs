@@ -423,7 +423,9 @@ pub fn step(vm: &mut Vm<'_>, mgr: ObjId, dt: f32) {
 
         match object(vm, mgr, "Dest") {
             Some(end) => {
-                fire(vm, end, "InterpolateEnd", &mut [Value::Object(Some(mgr)), Value::Bool(forward)]);
+                // HP3's points handle it as `KWInterpolateEnd` (the UT2004 name, `InterpolateEnd`, does not exist there).
+                let event = if crate::envc::var_os("HP3_OLD_INTERP_END").is_some() { "InterpolateEnd" } else { "KWInterpolateEnd" };
+                fire(vm, end, event, &mut [Value::Object(Some(mgr)), Value::Bool(forward)]);
             }
             None => {
                 fire(vm, mgr, "FinishedInterpolation", &mut [Value::Object(None)]);

@@ -549,6 +549,18 @@ fn add_terrain(b: &mut Batcher<'_, '_>, map: &Rc<Package>, inputs: &MapInputs) {
             })
             .flatten()
             .unwrap_or_default();
+        // Quads whose diagonal the level turned (from (x + 1, y) to (x, y + 1)), by the same bit index.
+        let turned = b
+            .loader
+            .with_tags(map, i, |tags, _| {
+                props::find(map, tags, "EdgeTurnBitmap", 0).map(|t| {
+                    let mut r = hp3_package::Reader::new(t.data);
+                    let n = r.ci().unwrap_or(0).max(0) as usize;
+                    (0..n).filter_map(|_| r.u32().ok()).collect::<Vec<u32>>()
+                })
+            })
+            .flatten()
+            .unwrap_or_default();
         let quad_visible = |x: usize, y: usize| {
             // One bit per heightmap cell (a 64x64 map has a 4096-bit bitmap), so a row is the full width, not width - 1.
             let q = y * w + x;
@@ -599,7 +611,12 @@ fn add_terrain(b: &mut Batcher<'_, '_>, map: &Rc<Package>, inputs: &MapInputs) {
                         continue;
                     }
                     let (a, bb, c, d) = ((y * w + x) as u32, (y * w + x + 1) as u32, ((y + 1) * w + x) as u32, ((y + 1) * w + x + 1) as u32);
-                    batch.indices.extend_from_slice(&[a, bb, d, a, d, c]);
+                    let q = y * w + x;
+                    if turned.get(q / 32).is_some_and(|b| b & (1 << (q % 32)) != 0) {
+                        batch.indices.extend_from_slice(&[a, bb, c, c, bb, d]);
+                    } else {
+                        batch.indices.extend_from_slice(&[a, bb, d, a, d, c]);
+                    }
                 }
             }
             b.scene.stats.terrain_triangles += batch.indices.len() / 3;

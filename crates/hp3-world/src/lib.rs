@@ -531,6 +531,8 @@ pub fn travel(vm: &mut Vm<'_>, url: &str) -> Result<Rc<Package>, VmError> {
     {
         fire(vm, store, "TravelExporting", &mut []);
     }
+    // The chosen profile (New Game slot) belongs to the player, not the level.
+    interactions::carry_user_id(vm);
     // The old level goes: its actors are dropped from the VM's per-object state.
     let old = vm.ext.take().and_then(|e| e.downcast::<World>().ok()).ok_or_else(|| VmError::Runtime("no world".into()))?;
     for a in &old.actors {
@@ -748,6 +750,10 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
                 set(vm, a, "PhysicsVolume", Value::Object(Some(default)));
             }
         }
+    }
+    // `HP3_GAMESTATE=<name>` (debugging): starts the level in that game state, as if the story had got there.
+    if let (Ok(state), Some(game)) = (std::env::var("HP3_GAMESTATE"), world(vm).level_info.and_then(|li| get(vm, li, "Game").as_obj())) {
+        set(vm, game, "CurrentGameState", Value::Str(state));
     }
     // Actors that do not belong to the current game state are hidden and stop colliding.
     for &a in &actors {
@@ -997,6 +1003,36 @@ fn sync_baked_collision(vm: &mut Vm<'_>) {
     let owners = world(vm).collision.baked_owners().to_vec();
     if !world(vm).volumes_marked {
         world(vm).volumes_marked = true;
+        // The ring knights of the Carpe levels are placed with a per-axis stretch on top of their draw scale and tower over the
+        // free knight; they are drawn at their draw scale alone.
+        // Carpe Retractum B: the invisible volume across the doorway of the knight ring would keep the player out of the chamber where
+        // the knights' goodies land; there only the models' own collision is in the way.
+        if world(vm).map.name.eq_ignore_ascii_case("HP3_Ch1CarpeRetractumB") {
+            let actors = world(vm).actors.clone();
+            for a in actors {
+                if vm.db.names.get(vm.db.objects.get(a).name).eq_ignore_ascii_case("KWBlockingVolume0") {
+                    set(vm, a, "bBlockPlayers", Value::Bool(false));
+                }
+            }
+        }
+        // A charmed skeleton with `bEmbedCompanionCastTarget` set shatters at the first Rictusempra hit; cleared, the first hit
+        // takes its arm off and the second shatters it, as in the original where they take two hits even from a perfect cast.
+        if let Some(skeleton) = vm.db.find("CharmedSkeleton") {
+            let actors = world(vm).actors.clone();
+            for a in actors {
+                if vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, skeleton)) {
+                    set(vm, a, "bEmbedCompanionCastTarget", Value::Bool(false));
+                }
+            }
+        }
+        if let Some(knight) = vm.db.find("KnightSpawner") {
+            let actors = world(vm).actors.clone();
+            for a in actors {
+                if vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, knight)) {
+                    set(vm, a, "DrawScale3D", Value::Struct(vec![Value::Float(1.0), Value::Float(1.0), Value::Float(1.0)].into()));
+                }
+            }
+        }
         let volumes: std::collections::HashSet<ObjId> = owners
             .iter()
             .copied()
@@ -1467,6 +1503,20 @@ pub fn destroy_actor(vm: &mut Vm<'_>, o: ObjId) -> bool {
     }
     if get(vm, o, "bStatic").as_bool() || get(vm, o, "bNoDelete").as_bool() {
         return false;
+    }
+    if envc::var_os("HP3_TRACE_DESTROY").is_some() {
+        let name = hp3_script::natives::object_path(vm, o);
+        let trace = std::backtrace::Backtrace::force_capture().to_string();
+        let frames: Vec<&str> = trace.lines().filter(|l| l.contains("hp3_world") || l.contains("hp3_script")).take(14).collect();
+        eprintln!("destroy {name}:\n{}", frames.join("\n"));
+    }
+    // An actor in a state hears `EndState` before `Destroyed`, as in the original's `DestroyActor`: a spell destroyed while it charges
+    // fades out the effects its charge made.
+    if vm.state_of(o).is_some() && envc::var_os("HP3_NO_DESTROY_ENDSTATE").is_none() {
+        fire(vm, o, "EndState", &mut []);
+        if vm.db.objects.get(o).deleted {
+            return true;
+        }
     }
     fire(vm, o, "Destroyed", &mut []);
     touch::forget(vm, o);
@@ -1969,7 +2019,9 @@ fn build_collision(vm: &mut Vm<'_>, map: &Rc<Package>, model: Option<ObjRef>, ac
             }
             continue;
         }
-        if let Some(mesh) = mesh.filter(|_| blocks) {
+        // A static mesh with `bUseCylinderCollision` collides as its collision cylinder (see `refresh_actor_boxes`), not as its triangles.
+        let cylinder = get(vm, a, "bUseCylinderCollision").as_bool();
+        if let Some(mesh) = mesh.filter(|_| blocks && !cylinder) {
             let Some((mkey_pkg, mkey_idx)) = vm.db.objects.get(mesh).key.clone() else { continue };
             let Ok(mp) = vm.db.set.get(&mkey_pkg) else { continue };
             let chain = vm.db.set.export_chain(&mp, mkey_idx);
@@ -2072,6 +2124,11 @@ fn build_collision(vm: &mut Vm<'_>, map: &Rc<Package>, model: Option<ObjRef>, ac
             continue;
         }
         let chain = vm.db.set.export_chain(map, i);
+        // A terrain the map carries but the level does not place (a leftover or deleted one) has no collision: GroundsHub holds a
+        // small one over a pit that would leave a player floating above the Spongify pad inside it.
+        if !actors.contains(&vm.db.obj_for(map, i)) {
+            continue;
+        }
         let Some(Asset::Terrain(t)) = native_asset(map, i, &chain) else { continue };
         let (w, h) = (t.heightmap_x as usize, t.heightmap_y as usize);
         let v = |x: usize, y: usize| t.vertices.get(y * w + x).map(|p| Vec3::new(p.x, p.y, p.z));
@@ -2082,7 +2139,22 @@ fn build_collision(vm: &mut Vm<'_>, map: &Rc<Package>, model: Option<ObjRef>, ac
             Value::Array(bits) => bits.iter().map(|b| b.as_int() as u32).collect(),
             _ => Vec::new(),
         };
+        let turned: Vec<u32> = match get(vm, terrain_actor, "EdgeTurnBitmap") {
+            Value::Array(bits) if crate::envc::var_os("HP3_NO_EDGE_TURN").is_none() => bits.iter().map(|b| b.as_int() as u32).collect(),
+            _ => Vec::new(),
+        };
         if crate::envc::var_os("HP3_TERRAIN_DEBUG").is_some() {
+            eprintln!("terrain collision {i}: {} quads with a turned edge", turned.iter().map(|b| b.count_ones()).sum::<u32>());
+            if let Ok(spec) = std::env::var("HP3_TERRAIN_AT") {
+                let p: Vec<f32> = spec.split(',').filter_map(|s| s.parse().ok()).collect();
+                if p.len() == 2 {
+                    let best = (0..h)
+                        .flat_map(|y| (0..w).map(move |x| (x, y)))
+                        .filter_map(|(x, y)| v(x, y).map(|q| (q, (q.x - p[0]).powi(2) + (q.y - p[1]).powi(2))))
+                        .min_by(|a, b| a.1.total_cmp(&b.1));
+                    eprintln!("terrain {i} nearest vertex to {spec}: {best:?}");
+                }
+            }
             let hidden: u32 = visible.iter().map(|b| b.count_zeros()).sum();
             eprintln!("terrain collision {i}: {w}x{h}, {} visibility words, {hidden} quads hidden", visible.len());
             let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
@@ -2107,8 +2179,16 @@ fn build_collision(vm: &mut Vm<'_>, map: &Rc<Package>, model: Option<ObjRef>, ac
                     continue;
                 }
                 if let (Some(a0), Some(b0), Some(c0), Some(d0)) = (v(x, y), v(x + 1, y), v(x, y + 1), v(x + 1, y + 1)) {
-                    col.add_triangle([a0, b0, d0], None);
-                    col.add_triangle([a0, d0, c0], None);
+                    // A quad's diagonal runs from (x, y) to (x + 1, y + 1), or, when the level turned its edge, from (x + 1, y)
+                    // to (x, y + 1): a hill's ridge is where the terrain is drawn and walked on only with the right one.
+                    let q = y * w + x;
+                    if turned.get(q / 32).is_some_and(|b| b & (1 << (q % 32)) != 0) {
+                        col.add_triangle([a0, b0, c0], None);
+                        col.add_triangle([c0, d0, b0], None);
+                    } else {
+                        col.add_triangle([a0, b0, d0], None);
+                        col.add_triangle([a0, d0, c0], None);
+                    }
                 }
             }
         }
@@ -2129,7 +2209,20 @@ pub fn find_object_of(vm: &mut Vm<'_>, path: &str, class: Option<&str>) -> Optio
     let set = vm.db.set;
     let index = class
         .and_then(|c| pkg.find_export_path_where(rest, |i| set.export_chain(&pkg, i).iter().any(|n| n.eq_ignore_ascii_case(c))))
-        .or_else(|| pkg.find_export_path(rest))?;
+        .or_else(|| pkg.find_export_path(rest))
+        // A name without its group (`soundeffects.Thunder03` for `soundeffects.Quidditch.thunder03`, as a cutscene's PlaySound
+        // gives it): the object of that class with that name in whichever group of the package holds it.
+        .or_else(|| {
+            let c = class?;
+            // Only sounds are named that way; other classes keep the exact path, where a missing object means "none".
+            if rest.contains('.') || !c.eq_ignore_ascii_case("Sound") {
+                return None;
+            }
+            (0..pkg.exports.len()).find(|&i| {
+                pkg.ref_name(hp3_package::package::ObjRef::from_export(i)).eq_ignore_ascii_case(rest)
+                    && set.export_chain(&pkg, i).iter().any(|n| n.eq_ignore_ascii_case(c))
+            })
+        })?;
     if pkg.exports[index].class.is_none() {
         let s = vm.db.load_struct(&pkg, index)?;
         return Some(vm.db.get(s).object);
@@ -2241,3 +2334,28 @@ pub fn memprobe(tag: &str) {
 }
 #[cfg(not(windows))]
 pub fn memprobe(_tag: &str) {}
+
+/// The story state a level picked from a menu should start in: the lowest `GState` the map's actors are grouped under apart
+/// from the starting one (a level that is jumped to starts in its first story state, not in `GState000`, which the next level's
+/// start spots do not expect and where the way out of the level ends in a staging room). `None` when the map has no such groups.
+pub fn menu_start_state(vm: &mut Vm<'_>, map: &str) -> Option<String> {
+    // Levels whose story state the actors' groups do not give: the Library is entered from the hub after the Boggart lesson, in
+    // `GState070`, and the hub's start cutscene for that state is the one that stands the party outside its door.
+    if url_map(map).eq_ignore_ascii_case("HP3_Adv3Library") {
+        return Some("GState070".to_string());
+    }
+    let pkg = vm.db.set.get(&url_map(map)).ok()?;
+    let mut best: Option<u32> = None;
+    for n in &pkg.names {
+        let text = n.name.to_ascii_lowercase();
+        for part in text.split(',') {
+            if let Some(num) = part.trim().strip_prefix("gstate").and_then(|d| d.parse::<u32>().ok())
+                && num > 0
+                && best.is_none_or(|b| num < b)
+            {
+                best = Some(num);
+            }
+        }
+    }
+    best.map(|n| format!("GState{n:03}"))
+}

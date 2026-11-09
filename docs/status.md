@@ -279,3 +279,32 @@ actor lights are looked up through a ground grid. `perf:` lines on Android now i
 - **Soft shadows** (new, not in the original): `actor_instances` traces down from every pawn (`pawn_shadow`) and gives the renderer a quad
   lying on the ground (`Dynamic::set_shadows`, `BlobShadow`): a soft bell, stretched away from the strongest light on the pawn, weaker when
   the pawn is high above the ground or poorly lit. `HP3_NO_SHADOWS=1` turns them off, `HP3_SHADOW_DEBUG=1` prints the count.
+
+## Fixes from the tester bug list (2026-11-07, afternoon)
+
+- **Save slots**: the six New Game slots are profiles (`iSaveSlotID = HPGUIController.CurUserID * 100 + slot`); the controller is made again for each level, so
+  the profile reset to 0 after the first travel and every save went to slot 0. `interactions::carry_user_id` carries it over in `travel()`.
+- **Out of the world**: walking and falling pawns in zone 0 (outside the BSP) now raise `FellOutOfWorld` (`physics::fell_out_of_world`, `HP3_NO_FELL_CHECK` turns it
+  off). No false positives on the 32 maps; never seen to fire on a real fall (the Glacius report).
+- **Hints**: the GUI calls the top page's `ChangeHint` with the control under the cursor's `Hint` (the card pages put a card's name and description there).
+- **`stopsounds`** (a skipped cutscene's console command) stops every sound effect, music goes on.
+- **Cast pose stuck after the Lapifors rabbit** (and likely other cast hangs): the original raises `AnimEnd` for a looping channel each time it wraps
+  (`UnSkeletalMesh.cpp`, "End-anim notify 1"); we only did it for finishing ones. `HPCharacter.AnimEnd` fades the cast channels out with `blendOutCast`, so the
+  looping `castaim` held forever once the creature control ended. Looping wraps now raise `AnimEnd` (silenced channels excepted). Repro:
+  `HP3_PRESS=Enter@1400 HP3_CAST=LapiforsSpell:LapiforsStatue:0@500 HP3_CAST_DIRECT=1 HP3_CHANNELS=Hermione3@100 hp3-run level ../spike-hp3 HP3_FA2Hermione 2300`.
+- **Debug**: `HP3_PRESS=<key>@<tick>` in hp3-run; F6 (`dumpnear`) logs the actors around the player; F12 cheat list on the desktop (`cheat cakes|pasties` added).
+- **Open**: knight goodies in Carpe Retractum can't be picked up (Ron can't get close to the knight); Skip/cutscene hangs need the testers' `game.log`.
+
+## Dragon fire and particle colours (2026-11-07 night)
+
+- **Draw styles** (`EParticleDrawStyle`, as the script and UT2004 name them): 3 Translucent adds, 2 Modulated multiplies twice, 5 Darken is `dest * (1 - colour)`, 6 Brighten is
+  `colour + dest * (1 - colour)` (new blends `Darken`/`Brighten` in `hp3-render/src/particles.rs`). The original's dragon fire has a black hole in its middle: the
+  `SmokeSequence` emitter (grey puffs on black, style 5). HP3's `D3DDrv.dll` has two 7-way switches that looked like 5 and 6 swapped; that reading made the hole a bright
+  spot, so it was wrong (`HP3_STYLE5_DARKEN=0` still gives it, for comparison).
+- **Colour**: the vertex colour is clamped to full intensity (a byte colour in the original) before the spell glow.
+- **`ColorMultiplierRange` above 1**: the data holds (255, 1, 200) for the dragon fire's flare (`flare4`, `UseColorScale` off) and (128, 1, 1) for the Lapifors statue's
+  sparkles. As plain factors they give magenta (the tester's "magenta fire"), which the original does not show. The original's ring is a clean green, so a multiplier
+  above 1 is read as bytes: green = first / 255, red and blue = the weakest of the other two / 255 (`particles.rs`, `HP3_CLAMP_COLOR_MULT`, `HP3_RAW_COLOR_MULT`,
+  `HP3_NO_COLOR_MULT`). A guess that fits the two cases, not read from the engine; the channel mapping is the part to revisit if another effect looks off.
+- Tools: `hp3-view tex <folder> <package> <object> <out.png>` decodes a texture; `hp3-view play ... ` with `HP3_VIEW_CAM=x,y,z,pitch,yaw` renders a spot with live particles
+  deterministically; `hp3-run` `HP3_PARTICLE_COLORS=<texture>`, `HP3_PARTICLE_NEAR=x,y,z,r`, `HP3_SPAWN=<class>`.

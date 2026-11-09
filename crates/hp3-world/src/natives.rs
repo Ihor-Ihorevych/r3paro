@@ -465,6 +465,12 @@ pub fn register(vm: &mut Vm<'_>) {
                     vm.log.push(format!("physics: {who} {old_physics} -> {new}"));
                 }
                 set(vm, o, "Physics", Value::Byte(new));
+                // A pickup thrown by a vendor (a student's wizard card, `ThrownPickup`) falls onto the floor. The pickup that spawned it had
+                // switched its world collision off when it left its bounce-into-place state, so without this a card that missed the player fell
+                // through the floor for good and the sale was lost.
+                if new == 2 && vm.state_of(o).is_some_and(|s| vm.db.names.get(vm.db.get(s).name) == "ThrownPickup") {
+                    set(vm, o, "bCollideWorld", Value::Bool(true));
+                }
                 if matches!(new, 2 | 3 | 4 | 6 | 7 | 8 | 10 | 11 | 13 | 14) && get(vm, o, "Base").as_obj().is_some() {
                     set_base(vm, o, None, false);
                 }

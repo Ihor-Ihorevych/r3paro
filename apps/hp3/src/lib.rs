@@ -26,6 +26,7 @@ use sdl3::mouse::MouseButton;
 #[cfg(target_os = "android")]
 pub mod android;
 mod audio;
+mod cheatmenu;
 pub mod commands;
 mod gamelog;
 mod levelmenu;
@@ -475,6 +476,8 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
     let mut in_menu = false;
     // F11 level list; G ghost, F fly, H walk (debug movement).
     let mut levels = levelmenu::LevelMenu::new(root);
+    // F12 cheat list (the phone debug menu's entries).
+    let mut cheats = cheatmenu::CheatMenu::new();
     let mut current_map = map.clone();
     platform::set_level(&current_map);
     // HP3_OPEN_LEVELS=1 starts with the list open (for screenshots).
@@ -497,9 +500,12 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         for event in events.poll_iter() {
             match event {
                 Event::Quit { .. } => break 'main,
-                Event::KeyDown { scancode: Some(Scancode::F11), repeat: false, .. } => levels.toggle(&current_map),
+                Event::KeyDown { scancode: Some(Scancode::F11), repeat: false, .. } if !cheats.open => levels.toggle(&current_map),
+                Event::KeyDown { scancode: Some(Scancode::F12), repeat: false, .. } if !levels.open => cheats.toggle(),
                 // F7: gamma, brightness and contrast back to the defaults (also while a menu is open).
                 Event::KeyDown { scancode: Some(Scancode::F7), repeat: false, .. } => commands::push("resetpicture"),
+                // F6: the actors around the player go to the log (what a pickup that cannot be taken looks like to the engine).
+                Event::KeyDown { scancode: Some(Scancode::F6), repeat: false, .. } if !in_menu => commands::push("dumpnear"),
                 // [ and ] (or numpad - and +): the field of view narrows or widens by 5 degrees.
                 Event::KeyDown { scancode: Some(sc @ (Scancode::LeftBracket | Scancode::RightBracket | Scancode::KpMinus | Scancode::KpPlus)), .. } if !in_menu && !cfg!(target_os = "android") => {
                     let delta = if matches!(sc, Scancode::LeftBracket | Scancode::KpMinus) { -5.0 } else { 5.0 };
@@ -517,6 +523,20 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                     fps_note = Some((Instant::now(), next));
                     eprintln!("fps limit: {}", if next == 0 { "none".to_string() } else { next.to_string() });
                 }
+                // The cheat list takes the keyboard and the mouse the same way.
+                Event::KeyDown { scancode: Some(sc), .. } if cheats.open => match sc {
+                    Scancode::Up => cheats.step(-1),
+                    Scancode::Down => cheats.step(1),
+                    Scancode::Home => cheats.home(),
+                    Scancode::End => cheats.end(),
+                    Scancode::Return | Scancode::KpEnter => match cheats.choose() {
+                        cheatmenu::Pick::Command(c) => commands::push(c),
+                        cheatmenu::Pick::Levels => levels.toggle(&current_map),
+                    },
+                    Scancode::Escape => cheats.open = false,
+                    _ => {}
+                },
+                Event::MouseMotion { .. } | Event::MouseButtonDown { .. } if cheats.open => {}
                 // While the level list is open it takes the keyboard and the mouse.
                 Event::KeyDown { scancode: Some(sc), .. } if levels.open => match sc {
                     Scancode::Up => levels.step(-1),
@@ -660,6 +680,17 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                 _ => {}
             }
         }
+        // HP3_COMMANDS=<command>@<tick>[;<command>@<tick>...] (debugging): runs those commands at those world ticks (`quicksave@100;quickload@200`).
+        if let Ok(list) = std::env::var("HP3_COMMANDS") {
+            let tick = hp3_world::world(&mut vm).frame;
+            for item in list.split(';') {
+                if let Some((command, at)) = item.rsplit_once('@')
+                    && at.trim().parse::<u64>() == Ok(tick as u64)
+                {
+                    commands::push(command.trim());
+                }
+            }
+        }
         for command in commands::take() {
             commands::run(&mut vm, &command, &mut pending_level);
         }
@@ -787,6 +818,15 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                 a.apply_settings(&vm);
             }
         }
+        // A level picked from a menu (a plain map name) starts in its first story state, so what leads out of it lands where the
+        // next level expects the story to be.
+        if let Some(menu_url) = pending_level.take_if(|u| !u.contains('?')) {
+            let state = hp3_world::menu_start_state(&mut vm, &menu_url);
+            pending_level = Some(match state {
+                Some(s) if std::env::var_os("HP3_MENU_STATE0").is_none() => format!("{menu_url}?GameState={s}"),
+                _ => menu_url,
+            });
+        }
         if let Some(url) = hp3_world::take_travel(&mut vm).or_else(|| pending_level.take()) {
             let t = Instant::now();
             let pkg = hp3_world::travel(&mut vm, &url)?;
@@ -865,6 +905,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         let mut quads = hp3_engine::hud_quads(&mut vm, &loader, &mut hud_cache, width, height);
         quads.extend(hp3_engine::screen_flash(&mut vm, width, height));
         quads.extend(levels.quads(width, height, &current_map));
+        quads.extend(cheats.quads(width, height));
         let images = |k: &hp3_assets::loader::ObjKey| hud_cache.image(&loader, k);
         let hud = overlay.draw(&renderer, &quads, &images, &view, width, height);
         stages.push(("hud", frame_start.elapsed().as_secs_f32() * 1000.0));

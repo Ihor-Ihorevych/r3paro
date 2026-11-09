@@ -987,6 +987,8 @@ pub fn particle_quads(vm: &mut Vm<'_>, loader: &Loader<'_>, cache: &mut Particle
             hp3_world::particles::Blend::Alpha => ParticleBlend::Alpha,
             hp3_world::particles::Blend::Additive => ParticleBlend::Additive,
             hp3_world::particles::Blend::Modulate => ParticleBlend::Modulate,
+            hp3_world::particles::Blend::Darken => ParticleBlend::Darken,
+            hp3_world::particles::Blend::Brighten => ParticleBlend::Brighten,
         };
         out.push(ParticleQuad { texture, blend, corners: q.corners.map(|c| c.to_array()), uv: q.uv, color: q.color });
     }

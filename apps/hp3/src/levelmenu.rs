@@ -62,12 +62,12 @@ fn glyph(c: char) -> [u8; 7] {
     }
 }
 
-fn pixel(out: &mut Vec<Quad>, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
+pub(crate) fn pixel(out: &mut Vec<Quad>, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
     out.push(Quad { texture: None, rect: [x, y, w, h], uv: [0.0, 0.0, 1.0, 1.0], color, blend: Blend::Alpha });
 }
 
 /// Draws `text` with its top-left at (`x`, `y`), each font pixel `s` screen pixels wide.
-fn text(out: &mut Vec<Quad>, text: &str, x: f32, y: f32, s: f32, color: [f32; 4]) {
+pub(crate) fn text(out: &mut Vec<Quad>, text: &str, x: f32, y: f32, s: f32, color: [f32; 4]) {
     for (i, c) in text.chars().enumerate() {
         let g = glyph(c);
         let cx = x + i as f32 * 6.0 * s;

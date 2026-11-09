@@ -145,9 +145,10 @@ fn layout(vm: &mut Vm<'_>, o: ObjId, screen: Screen) -> [f32; 4] {
         [b[0], b[1], b[2] - b[0], b[3] - b[1]]
     });
     let bound = get(vm, o, "bBoundToParent").as_bool();
-    // The trade page's bound children are laid out in fractions of the page (as the page's script expects); taking them
-    // as fractions of the screen on top of the page's origin pushed Yes and No down past the parchment.
-    let in_vendor = owner.is_some_and(|m| is_a(vm, m, "HPPageVendor"));
+    // The bound children of the trade, final exam and Yes/No pages are laid out in fractions of the page (as the
+    // pages' scripts expect); taking them as fractions of the screen on top of the page's origin pushed the buttons
+    // down past the parchment, off the screen. Other pages (the card pages) keep the screen-fraction rule.
+    let in_vendor = owner.is_some_and(|m| ["HPPageVendor", "HPPageFinalExam", "HPPageYesNo"].iter().any(|c| is_a(vm, m, c)));
     let scale = get(vm, o, "bScaleToParent").as_bool() || (bound && in_vendor);
     let (pw, ph) = match (parent, scale) {
         (Some(p), true) => (p[2], p[3]),
@@ -517,6 +518,20 @@ pub fn mouse_move(vm: &mut Vm<'_>, x: f32, y: f32) {
             set(vm, o, "MenuState", Value::Byte(MSAT_WATCHED));
         }
         set(vm, gui, "ActiveControl", Value::Object(over));
+        // The page shows the hint of what the cursor is on (the card pages put a card's name and description there; an empty
+        // hint makes the page show its default one). The scripts only set `Hint`, nothing else tells the page.
+        let hint = over.map(|o| get(vm, o, "Hint").as_str().to_string()).unwrap_or_default();
+        call_method_with(vm, page, "ChangeHint", &mut [Value::Str(hint)]);
+    }
+}
+
+/// Runs a script function of an object with arguments, if it has one by that name.
+fn call_method_with(vm: &mut Vm<'_>, o: ObjId, name: &str, args: &mut [Value]) {
+    let n = vm.db.names.intern(name);
+    if let Some(f) = vm.find_function(Some(o), None, n)
+        && let Err(e) = vm.invoke(f, Some(o), args)
+    {
+        world(vm).errors.push(format!("GUI {name}: {e}"));
     }
 }
 

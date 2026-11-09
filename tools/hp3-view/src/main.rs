@@ -28,6 +28,7 @@ fn main() -> ExitCode {
             args.get(5).map(String::as_str),
             args.get(6).and_then(|f| f.parse().ok()).unwrap_or(0.0),
         ),
+        Some("tex") if args.len() >= 5 => tex(Path::new(&args[1]), &args[2], &args[3], Path::new(&args[4])),
         Some("play") if args.len() >= 4 => play(Path::new(&args[1]), &args[2], Path::new(&args[3]), args.get(4).and_then(|t| t.parse().ok()).unwrap_or(60)),
         _ => {
             eprintln!("usage: hp3-view shot <HP3 folder> <map> <out.png> [x,y,z,pitch,yaw]\n       hp3-view play <HP3 folder> <map> <out.png> [ticks]");
@@ -492,4 +493,40 @@ fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn st
         ]
     });
     write_png(out, w, h, &rgba)
+}
+
+/// `hp3-view tex <HP3 folder> <package> <object path> <out.png>`: a texture as the engine decodes it (to look at its colours).
+fn tex(root: &Path, package: &str, path: &str, out: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let set = PackageSet::open(root)?;
+    let loader = Loader::new(&set);
+    let pkg = set.get(package)?;
+    let want = format!("{package}.{path}");
+    for i in 0..pkg.exports.len() {
+        if pkg.ref_path(hp3_package::ObjRef::from_export(i)).eq_ignore_ascii_case(&want) {
+            let img = loader.image(&pkg, i).ok_or("not decodable")?;
+            // Over a white backdrop and over black, side by side, so alpha and colour can both be read.
+            let (w, h) = (img.width as usize, img.height as usize);
+            let mut px = vec![255u8; w * 2 * h * 4];
+            for y in 0..h {
+                for x in 0..w {
+                    let s = &img.rgba[(y * w + x) * 4..(y * w + x) * 4 + 4];
+                    let a = s[3] as f32 / 255.0;
+                    for (k, back) in [(0usize, 255.0f32), (1, 0.0)] {
+                        let d = (y * w * 2 + k * w + x) * 4;
+                        for c in 0..3 {
+                            px[d + c] = (s[c] as f32 * a + back * (1.0 - a)) as u8;
+                        }
+                        px[d + 3] = 255;
+                    }
+                }
+            }
+            eprintln!("{want}: {}x{}, masked {}, translucent {}", img.width, img.height, img.masked, img.translucent);
+            for (name, (x, y)) in [("centre", (w / 2, h / 2)), ("quarter", (w / 4, h / 2)), ("corner", (2, 2))] {
+                let s = &img.rgba[(y * w + x) * 4..(y * w + x) * 4 + 4];
+                eprintln!("  {name}: rgba {:?}", s);
+            }
+            return write_png(out, (w * 2) as u32, h as u32, &px);
+        }
+    }
+    Err(format!("no object {want}").into())
 }

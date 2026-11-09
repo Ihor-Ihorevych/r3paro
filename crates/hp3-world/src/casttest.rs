@@ -106,7 +106,7 @@ pub fn step(vm: &mut Vm<'_>, t: &mut CastTest, frame: u32) {
     if t.target.is_none() {
         // Wait until the player has control (opening cutscenes and loading screens are over).
         let ready = crate::world(vm).player.is_some_and(|pc| {
-            get(vm, pc, "Pawn").as_obj().is_some() && state_name(vm, pc) == "PlayerWalking"
+            get(vm, pc, "Pawn").as_obj().is_some() && matches!(state_name(vm, pc).as_str(), "PlayerWalking" | "StateNoPawnMoveCanTurn")
         });
         if !ready {
             if frame % 600 == 0 {

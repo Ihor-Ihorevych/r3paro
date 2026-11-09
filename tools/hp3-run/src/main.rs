@@ -55,6 +55,16 @@ fn trigger_named(vm: &mut hp3_script::Vm<'_>, tag: &str) {
 
 /// HP3_LIST_CLASS=<class> lists the level's actors of that class with their main properties.
 fn list_class(vm: &mut hp3_script::Vm<'_>) {
+    // HP3_SPAWN=<class>: one actor of that class is made first (to read the defaults of an effect nothing in the level has made yet).
+    if let Ok(name) = std::env::var("HP3_SPAWN")
+        && let Some(c) = hp3_world::find_object(vm, &name)
+    {
+        let li = hp3_world::world(vm).level_info;
+        match hp3_world::natives::spawn(vm, li, &[hp3_script::Value::Object(Some(c))]) {
+            Ok(v) => println!("spawned {name}: {v:?}"),
+            Err(e) => println!("spawn {name} failed: {e:?}"),
+        }
+    }
     if let Ok(class) = std::env::var("HP3_LIST_CLASS") {
         let actors = hp3_world::world(vm).actors.clone();
         let want = vm.db.find(&class);
@@ -494,6 +504,46 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                 );
             }
         }
+        // HP3_SPAWN_FADE=<Package.Class>: that class is spawned at tick 50 and sent `FadeOut(0.1)` at tick 60 (an effect that should fade
+        // and destroy itself); whether it is still there is printed from tick 60 on, every 20 ticks.
+        if let Ok(class) = std::env::var("HP3_SPAWN_FADE") {
+            thread_local! { static FADER: std::cell::Cell<Option<hp3_script::ObjId>> = const { std::cell::Cell::new(None) }; }
+            if frame == 50 && let Some(c) = hp3_world::find_object(&mut vm, &class) {
+                let li = hp3_world::world(&mut vm).level_info;
+                if let Ok(hp3_script::Value::Object(Some(o))) = hp3_world::natives::spawn(&mut vm, li, &[hp3_script::Value::Object(Some(c))]) {
+                    FADER.with(|f| f.set(Some(o)));
+                    println!("fade test: spawned {}", hp3_script::natives::object_path(&vm, o));
+                }
+            }
+            if let Some(o) = FADER.with(|f| f.get()) {
+                if frame == 60 {
+                    hp3_world::fire(&mut vm, o, "FadeOut", &mut [hp3_script::Value::Float(0.1)]);
+                }
+                if frame >= 60 && frame % 20 == 0 {
+                    let state = vm.state_of(o).map(|s| vm.db.names.get(vm.db.get(s).name).to_string());
+                    println!("fade test {frame}: deleted {} state {state:?}", vm.db.objects.get(o).deleted);
+                }
+            }
+        }
+        // HP3_GOD=1: the player's controller stays in god mode (as the `cheat god` command), so a fight can be left running.
+        if std::env::var_os("HP3_GOD").is_some()
+            && let Some(pc) = hp3_world::world(&mut vm).player
+        {
+            hp3_world::set(&mut vm, pc, "bGodMode", hp3_script::Value::Bool(true));
+        }
+        // HP3_CAMERA_LOG=<every>: the game's camera (position, turn, field of view) and the player's pawn place every so many ticks.
+        if let Ok(every) = std::env::var("HP3_CAMERA_LOG").map(|v| v.parse::<u32>().unwrap_or(0))
+            && every > 0
+            && frame % every == 0
+        {
+            let view = hp3_world::player_view(&mut vm);
+            let pawn = hp3_world::world(&mut vm).player.and_then(|pc| hp3_world::get(&mut vm, pc, "Pawn").as_obj());
+            let at = pawn.map(|p| hp3_world::physics::vec(&hp3_world::get(&mut vm, p, "Location")));
+            let game = hp3_world::world(&mut vm).level_info.and_then(|li| hp3_world::get(&mut vm, li, "Game").as_obj());
+            let state = game.map(|g| hp3_world::get(&mut vm, g, "CurrentGameState").as_str().to_string());
+            println!("camera {frame}: game state {state:?}");
+            println!("camera {frame}: view {view:?} pawn {at:?}");
+        }
         // HP3_WATCH=<name>,<name>@<every>: prints those actors' place, turn and state every so many ticks.
         if let Ok(spec) = std::env::var("HP3_WATCH")
             && let Some((names, every)) = spec.split_once('@')
@@ -648,6 +698,20 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                 }
             }
         }
+        // HP3_FORCE_YAW=<yaw>@<tick>: from that tick on the player's controller and pawn are turned to that yaw every tick, to walk a way.
+        if let Ok(spec) = std::env::var("HP3_FORCE_YAW")
+            && let Some((yaw, at)) = spec.split_once('@')
+            && let (Ok(yaw), Ok(at)) = (yaw.parse::<i32>(), at.parse::<u32>())
+            && frame >= at
+            && let Some(pc) = hp3_world::world(&mut vm).player
+        {
+            let r = hp3_script::Value::Struct(vec![hp3_script::Value::Int(0), hp3_script::Value::Int(yaw), hp3_script::Value::Int(0)].into());
+            hp3_world::set(&mut vm, pc, "Rotation", r.clone());
+            if let Some(pawn) = hp3_world::get(&mut vm, pc, "Pawn").as_obj() {
+                hp3_world::set(&mut vm, pawn, "Rotation", r.clone());
+                hp3_world::set(&mut vm, pawn, "DesiredRotation", r);
+            }
+        }
         // HP3_TELEPORT=<x>,<y>,<z>@<tick>[;<x>,<y>,<z>@<tick>...]: moves the player's pawn there (as SetLocation does), to walk into a trigger.
         for spec in std::env::var("HP3_TELEPORT").unwrap_or_default().split(';') {
             let Some((at, tick)) = spec.split_once('@') else { continue };
@@ -655,8 +719,11 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                 continue;
             }
             let c: Vec<f32> = at.split(',').filter_map(|v| v.parse().ok()).collect();
-            if let (&[x, y, z], Some(pc)) = (c.as_slice(), hp3_world::world(&mut vm).player)
-                && let Some(pawn) = hp3_world::get(&mut vm, pc, "Pawn").as_obj()
+            // HP3_TELEPORT_ACTOR=<name>: the pawn to move when the player has none (a cutscene holds it).
+            let held = std::env::var("HP3_TELEPORT_ACTOR").ok().and_then(|n| hp3_world::world(&mut vm).actors.clone().into_iter().find(|&a| hp3_script::natives::object_path(&vm, a).ends_with(&format!(".{n}"))));
+            let player = hp3_world::world(&mut vm).player;
+            let pawn = player.and_then(|pc| hp3_world::get(&mut vm, pc, "Pawn").as_obj()).or(held);
+            if let (&[x, y, z], Some(pc), Some(pawn)) = (c.as_slice(), player, pawn)
             {
                 hp3_world::physics::far_move(&mut vm, pawn, glam::Vec3::new(x, y, z), false, false);
                 if let Ok(yaw) = std::env::var("HP3_TELEPORT_YAW").map(|v| v.parse::<i32>().unwrap_or(0)) {
@@ -748,6 +815,84 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             }
             if frame == to {
                 hp3_world::world(&mut vm).input.key_up(key);
+            }
+        }
+        // HP3_FIRE=<actor name>.<Event>@<tick>: raises a script event with no arguments on the first actor with that name (e.g. a vendor item's
+        // `Purchased`), and prints what the level's inventory carrier is and how many cards the manager says are owned before and after.
+        let fire_specs = std::env::var("HP3_FIRE").unwrap_or_default();
+        for spec in fire_specs.split(';') {
+            let Some((what, tick)) = spec.rsplit_once('@') else { continue };
+            if tick.trim().parse::<u32>() != Ok(frame) {
+                continue;
+            }
+            let Some((name, event)) = what.split_once('.') else { continue };
+            let actors = hp3_world::world(&mut vm).actors.clone();
+            let carrier = hp3_world::world(&mut vm).level_info.and_then(|li| hp3_world::get(&mut vm, li, "InventoryCarrierPawn").as_obj());
+            let cname = carrier.map(|c| hp3_script::natives::object_path(&vm, c));
+            let cclass = carrier.and_then(|c| vm.db.objects.get(c).class).map(|c| vm.db.names.get(vm.db.get(c).name).to_string());
+            println!("fire: carrier {cname:?} class {cclass:?}");
+            let mgr = actors.iter().copied().find(|&a| hp3_script::natives::object_path(&vm, a).contains("WizardCardManager"));
+            let count = |vm: &mut hp3_script::Vm<'_>| mgr.map(|m| hp3_world::fire(vm, m, "GetFoundCardCount", &mut []).as_int());
+            let before = count(&mut vm);
+            if let Some(a) = actors.iter().copied().find(|&a| hp3_script::natives::object_path(&vm, a).rsplit('.').next() == Some(name)) {
+                println!("fire: {event} on {}", hp3_script::natives::object_path(&vm, a));
+                if let Some(state) = event.strip_prefix("goto:") {
+                    let n = vm.db.names.intern(state);
+                    let _ = vm.goto_state(a, n, hp3_script::Name::NONE);
+                } else {
+                    hp3_world::fire(&mut vm, a, event, &mut []);
+                }
+            } else {
+                println!("fire: no actor {name}");
+            }
+            println!("fire: cards owned {before:?} -> {:?}", count(&mut vm));
+        }
+        // HP3_THROW=<x>,<y>,<z>,<vx>,<vy>,<vz>@<tick>: a wizard card is made there in its thrown state (as a student's sale does) and its place is
+        // printed every 10 ticks for the next 200: whether it lands, bounces or falls through.
+        if let Ok(spec) = std::env::var("HP3_THROW")
+            && let Some((what, tick)) = spec.rsplit_once('@')
+            && let Ok(tick) = tick.trim().parse::<u32>()
+        {
+            let v: Vec<f32> = what.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+            if frame == tick && v.len() == 6 {
+                if let Some(c) = hp3_world::find_object(&mut vm, &std::env::var("HP3_THROW_CLASS").unwrap_or_else(|_| "HGame.WizardCard".into())) {
+                    let li = hp3_world::world(&mut vm).level_info;
+                    if let Ok(card) = hp3_world::natives::spawn(&mut vm, li, &[hp3_script::Value::Object(Some(c))]) && let Some(card) = card.as_obj() {
+                        let mk = |a: f32, b: f32, c: f32| hp3_script::Value::Struct(vec![hp3_script::Value::Float(a), hp3_script::Value::Float(b), hp3_script::Value::Float(c)].into());
+                        hp3_world::fire(&mut vm, card, "SetLocation", &mut [mk(v[0], v[1], v[2])]);
+                        let n = vm.db.names.intern(&std::env::var("HP3_THROW_STATE").unwrap_or_else(|_| "ThrownPickup".into()));
+                        let _ = vm.goto_state(card, n, hp3_script::Name::NONE);
+                        if std::env::var_os("HP3_THROW_COLLIDE").is_some() { hp3_world::set(&mut vm, card, "bCollideWorld", hp3_script::Value::Bool(true)); }
+                        if std::env::var_os("HP3_THROW_FALL").is_some() { hp3_world::set(&mut vm, card, "Physics", hp3_script::Value::Byte(2)); }
+                        hp3_world::set(&mut vm, card, "Velocity", mk(v[3], v[4], v[5]));
+                        THROWN.with(|t| t.set(Some((card, frame))));
+                    }
+                }
+            }
+        }
+        if let Some((card, from)) = THROWN.with(|t| t.get())
+            && frame >= from
+            && frame <= from + 200
+            && (frame - from) % 10 == 0
+        {
+            let deleted = vm.db.objects.get(card).deleted;
+            let at = hp3_world::physics::vec(&hp3_world::get(&mut vm, card, "Location"));
+            let st = vm.state_of(card).map(|s| vm.db.names.get(vm.db.get(s).name).to_string());
+            println!("throw +{}: card at {at} state {st:?} physics {} hidden {} deleted {deleted}", frame - from, hp3_world::get(&mut vm, card, "Physics").as_byte(), hp3_world::get(&mut vm, card, "bHidden").as_bool());
+        }
+        // HP3_PRESS=<key>@<tick>[,<key>@<tick>...]: taps a key (down at that tick, up five ticks later), e.g. Enter to end a creature's control.
+        if let Ok(spec) = std::env::var("HP3_PRESS") {
+            for item in spec.split(',') {
+                if let Some((key, tick)) = item.rsplit_once('@')
+                    && let Ok(tick) = tick.trim().parse::<u32>()
+                {
+                    if frame == tick {
+                        hp3_world::world(&mut vm).input.key_down(key.trim());
+                    }
+                    if frame == tick + 5 {
+                        hp3_world::world(&mut vm).input.key_up(key.trim());
+                    }
+                }
             }
         }
         // HP3_DEBUG_MODE=<walk|fly|ghost>@<tick>: the debug movement modes.
@@ -892,6 +1037,279 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
         }
     }
     println!("particles alive: {}", hp3_world::particles::live(&mut vm));
+    // HP3_PARTICLE_COLORS=<texture substring>: the colours (red, green, blue, alpha) of the live particle quads drawn with a matching texture:
+    // the brightest, as the renderer gets them (before the texture and blending).
+    // HP3_PROBE_ACTOR=<actor name>[,<extent half width>,<half height>]: box traces of a player-sized box (a player's mover: blocked by world and
+    // by `bBlockPlayers` actors) towards that actor's middle from eight sides, from 300 away at its height: how close the box gets and what stops it.
+    if let Ok(spec) = std::env::var("HP3_PROBE_ACTOR") {
+        let mut it = spec.split(',');
+        let name = it.next().unwrap_or("").to_string();
+        let ext = glam::Vec3::new(it.next().and_then(|v| v.parse().ok()).unwrap_or(15.0), it.next().and_then(|v| v.parse().ok()).unwrap_or(15.0), it.next().and_then(|v| v.parse().ok()).unwrap_or(46.0));
+        let ext = glam::Vec3::new(ext.x, ext.x, ext.y.max(ext.z));
+        let actors = hp3_world::world(&mut vm).actors.clone();
+        if let Some(a) = actors.into_iter().find(|&a| hp3_script::natives::object_path(&vm, a).ends_with(&format!(".{name}"))) {
+            let at = hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "Location"));
+            // HP3_PROBE_ITEM: a thrown pickup instead (blocked by the world only, not a player).
+            let item = std::env::var_os("HP3_PROBE_ITEM").is_some();
+            let movers = std::env::var("HP3_PROBE_ITEM").is_ok_and(|v| v == "movers");
+            let how = hp3_world::collision::Mover { player: !item, blocks_actors: !item || movers, collide_world: true };
+            for k in 0..8 {
+                let ang = k as f32 * std::f32::consts::FRAC_PI_4;
+                let dir = glam::Vec3::new(ang.cos(), ang.sin(), 0.0);
+                let (start, end) = if item { (at, at + dir * 300.0) } else { (at + dir * 300.0, at) };
+                let hit = hp3_world::world(&mut vm).collision.trace_for(how, start, end, ext, None);
+                let hit_name = hit.and_then(|h| h.actor).map(|o| hp3_script::natives::object_path(&vm, o));
+                let stop = hit.map(|h| (start - end).length() * h.time);
+                let shown = stop.map(|t| if item { t.round() } else { (300.0 - t).round() });
+                println!("probe {name} from {k}: stopped {shown:?} from the middle: hit {hit_name:?}");
+            }
+        } else {
+            println!("probe: no actor {name}");
+        }
+    }
+    // HP3_PROBE_DOWN=<actor name>,<half width>,<half height>: player-sized boxes dropped 200 above the actor's middle onto it on a grid of
+    // offsets (-120..120): where the box comes to rest, to see whether a platform holds a pawn everywhere.
+    if let Ok(spec) = std::env::var("HP3_PROBE_DOWN") {
+        let mut it = spec.split(',');
+        let name = it.next().unwrap_or("").to_string();
+        let w: f32 = it.next().and_then(|v| v.parse().ok()).unwrap_or(15.0);
+        let hh: f32 = it.next().and_then(|v| v.parse().ok()).unwrap_or(46.0);
+        let actors = hp3_world::world(&mut vm).actors.clone();
+        if let Some(a) = actors.into_iter().find(|&a| hp3_script::natives::object_path(&vm, a).ends_with(&format!(".{name}"))) {
+            let mut at = hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "Location"));
+            // HP3_PROBE_AT=x,y,z puts the drop at a place instead of at the actor.
+            if let Ok(p) = std::env::var("HP3_PROBE_AT") {
+                let v: Vec<f32> = p.split(',').filter_map(|s| s.parse().ok()).collect();
+                if v.len() == 3 {
+                    at = glam::Vec3::new(v[0], v[1], v[2]);
+                }
+            }
+            let how = hp3_world::collision::Mover { player: true, blocks_actors: true, collide_world: true };
+            let from_h: f32 = std::env::var("HP3_PROBE_DOWN_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(500.0);
+            for dy in (-120..=120).step_by(40) {
+                let mut row = String::new();
+                for dx in (-120..=120).step_by(40) {
+                    let p = at + glam::Vec3::new(dx as f32, dy as f32, 0.0);
+                    let hit = hp3_world::world(&mut vm).collision.trace_for(how, p + glam::Vec3::Z * from_h, p - glam::Vec3::Z * 300.0, glam::Vec3::new(w, w, hh), None);
+                    row.push_str(&match hit {
+                        Some(h) => format!(" {:>6.0}", p.z + from_h - (from_h + 300.0) * h.time),
+                        None => "   none".into(),
+                    });
+                }
+                println!("down {name} dy {dy:>4}:{row}");
+            }
+            let h = hp3_world::world(&mut vm).collision.trace_for(how, at + glam::Vec3::Z * 500.0, at - glam::Vec3::Z * 300.0, glam::Vec3::new(w, w, hh), None);
+            let what = h.and_then(|h| h.actor).map(|o| hp3_script::natives::object_path(&vm, o));
+            println!("down {name} middle hit: {what:?} {:?}", h.map(|h| h.normal));
+            println!("down {name} at z {}", at.z);
+        }
+    }
+    // HP3_SLICE=x0,y0,x1,y1,step,z,half width,half height: a map of where a box centred there fits ('.') or is blocked ('#', by
+    // geometry with no actor 'W' for the level's BSP, 'm' for a mesh), seen from above at that height.
+    if let Ok(spec) = std::env::var("HP3_SLICE") {
+        let v: Vec<f32> = spec.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        if v.len() == 8 {
+            let ext = glam::Vec3::new(v[6], v[6], v[7]);
+            let mut y = v[3];
+            while y >= v[1] {
+                let mut line = String::new();
+                let mut x = v[0];
+                while x <= v[2] {
+                    let p = glam::Vec3::new(x, y, v[5]);
+                    let h = hp3_world::world(&mut vm).collision.trace_static(p, p + glam::Vec3::X * 0.01, ext);
+                    line.push(match h {
+                        Some(h) if h.time <= 0.0 => if h.actor.is_some() { 'm' } else { 'W' },
+                        _ => '.',
+                    });
+                    x += v[4];
+                }
+                println!("y {y:8.0} {line}");
+                y -= v[4];
+            }
+        }
+    }
+    // HP3_WALK=x,y,z: the BSP nodes the point walks through.
+    if let Ok(spec) = std::env::var("HP3_WALK") {
+        let v: Vec<f32> = spec.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        if v.len() == 3 {
+            for line in hp3_world::world(&mut vm).collision.debug_walk(glam::Vec3::new(v[0], v[1], v[2])) {
+                println!("{line}");
+            }
+        }
+    }
+    // HP3_PROBE_WALK=x,y,z,half width,half height,dx,dy,max step: a walker that goes 3 units a time along (dx,dy), stepping up
+    // when blocked and settling down onto the floor, to where it stops and what holds it.
+    if let Ok(spec) = std::env::var("HP3_PROBE_WALK") {
+        let n: Vec<f32> = spec.split(',').filter_map(|s| s.parse().ok()).collect();
+        if n.len() == 8 {
+            let how = hp3_world::collision::Mover { player: true, blocks_actors: true, collide_world: true };
+            let ext = glam::Vec3::new(n[3], n[3], n[4]);
+            let dir = glam::Vec3::new(n[5], n[6], 0.0).normalize() * 3.0;
+            let mut p = glam::Vec3::new(n[0], n[1], n[2]);
+            for i in 0..400 {
+                let mut moved = false;
+                for lift in [0.0, 1.0, 2.5, 5.0, 10.0, n[7]] {
+                    let from = p + glam::Vec3::Z * lift;
+                    let up = hp3_world::world(&mut vm).collision.trace_for(how, p, from, ext, None);
+                    if up.is_some_and(|h| h.time < 1.0) { continue; }
+                    let h = hp3_world::world(&mut vm).collision.trace_for(how, from, from + dir, ext, None);
+                    if h.is_none() {
+                        let to = from + dir;
+                        let d = hp3_world::world(&mut vm).collision.trace_for(how, to, to - glam::Vec3::Z * (lift + 6.0), ext, None);
+                        p = match d { Some(d) => to - glam::Vec3::Z * ((lift + 6.0) * d.time), None => to - glam::Vec3::Z * (lift + 6.0) };
+                        moved = true;
+                        break;
+                    }
+                }
+                if !moved {
+                    let h = hp3_world::world(&mut vm).collision.trace_for(how, p, p + dir, ext, None);
+                    println!("walk stopped after {i} steps at {p:?}; blocked by {:?}", h.map(|h| (h.time, h.normal, h.actor.map(|o| hp3_script::natives::object_path(&vm, o)))));
+                    break;
+                }
+                if i % 10 == 0 { println!("walk {i}: {p:?}"); }
+            }
+        }
+    }
+    // HP3_PROBE_PROFILE=x,y0,y1,step,half width,half height: along a line in y, the highest box position that fits (floor)
+    // within 80 above/below -55 and the headroom above it.
+    if let Ok(spec) = std::env::var("HP3_PROBE_PROFILE") {
+        let n: Vec<f32> = spec.split(',').filter_map(|s| s.parse().ok()).collect();
+        if n.len() == 6 {
+            let how = hp3_world::collision::Mover { player: true, blocks_actors: true, collide_world: true };
+            let ext = glam::Vec3::new(n[4], n[4], n[5]);
+            let mut y = n[1];
+            while y <= n[2] {
+                let top = glam::Vec3::new(n[0], y, -35.0);
+                let d = hp3_world::world(&mut vm).collision.trace_for(how, top, top - glam::Vec3::Z * 200.0, ext, None);
+                match d {
+                    Some(d) => {
+                        let z = -35.0 - 200.0 * d.time;
+                        let at = glam::Vec3::new(n[0], y, z);
+                        let u = hp3_world::world(&mut vm).collision.trace_for(how, at, at + glam::Vec3::Z * 120.0, ext, None);
+                        println!("profile y {y}: floor centre z {z:.1} floor normal z {:.2} headroom {:?}", d.normal.z, u.map(|h| h.time * 120.0));
+                    }
+                    None => println!("profile y {y}: nothing"),
+                }
+                y += n[3];
+            }
+        }
+    }
+    // HP3_PROBE_EXACT=x,y,z,half width,half height,dx,dy,dz: how far along that direction (up to 80) a box first overlaps a
+    // static-mesh triangle exactly, against how far the swept trace says it gets.
+    if let Ok(spec) = std::env::var("HP3_PROBE_EXACT") {
+        let n: Vec<f32> = spec.split(',').filter_map(|s| s.parse().ok()).collect();
+        if n.len() == 8 {
+            let at = glam::Vec3::new(n[0], n[1], n[2]);
+            let half = glam::Vec3::new(n[3], n[3], n[4]);
+            let dir = glam::Vec3::new(n[5], n[6], n[7]).normalize();
+            let mut exact = None;
+            let mut d = 0.0f32;
+            while d <= 80.0 {
+                if hp3_world::world(&mut vm).collision.box_overlaps_triangles(at + dir * d, half, None) { exact = Some(d); break; }
+                d += 0.25;
+            }
+            let how = hp3_world::collision::Mover { player: true, blocks_actors: true, collide_world: true };
+            let tr = hp3_world::world(&mut vm).collision.trace_for(how, at, at + dir * 80.0, half, None);
+            println!("exact: first overlap at {exact:?}; trace says {:?} normal {:?}", tr.map(|h| h.time * 80.0), tr.map(|h| h.normal));
+        }
+    }
+    // HP3_PROBE_RING=x,y,z,half width,half height: a box swept 80 out in 16 directions from there, at that height and at
+    // 10, 20 and 30 above it: how far each gets and what stops it.
+    if let Ok(spec) = std::env::var("HP3_PROBE_RING") {
+        let n: Vec<f32> = spec.split(',').filter_map(|s| s.parse().ok()).collect();
+        if n.len() == 5 {
+            let how = hp3_world::collision::Mover { player: true, blocks_actors: true, collide_world: true };
+            let at = glam::Vec3::new(n[0], n[1], n[2]);
+            let ext = glam::Vec3::new(n[3], n[3], n[4]);
+            for up in [0.0f32, 10.0, 20.0, 30.0] {
+                let start = at + glam::Vec3::Z * up;
+                let ov = hp3_world::world(&mut vm).collision.trace_for(how, start, start, ext, None);
+                println!("ring up {up}: in place {:?}", ov.map(|h| (h.time, h.normal, h.actor.map(|o| hp3_script::natives::object_path(&vm, o)))));
+                let mut row = String::new();
+                for k in 0..16 {
+                    let a = k as f32 * std::f32::consts::TAU / 16.0;
+                    let end = start + glam::Vec3::new(a.cos(), a.sin(), 0.0) * 80.0;
+                    let h = hp3_world::world(&mut vm).collision.trace_for(how, start, end, ext, None);
+                    if let Some(h) = h && up == 0.0 {
+                        println!("  dir {k}: {:.1} normal {:?} actor {:?}", h.time * 80.0, h.normal, h.actor.map(|o| hp3_script::natives::object_path(&vm, o)));
+                    }
+                    row.push_str(&match h {
+                        Some(h) => format!(" {:>3.0}", h.time * 80.0),
+                        None => "  80".into(),
+                    });
+                }
+                println!("ring up {up}:{row}");
+                let hu = hp3_world::world(&mut vm).collision.trace_for(how, start, start + glam::Vec3::Z * 120.0, ext, None);
+                println!("ring up {up}: straight up reaches {:?}", hu.map(|h| h.time * 120.0));
+            }
+        }
+    }
+    // HP3_PROBE_OVERLAP=<mover>,<x>,<y>,<z>,<half width>,<half height>: does the mover overlap a box there, as it is raised from 400 below its place to 400 above?
+    if let Ok(spec) = std::env::var("HP3_PROBE_OVERLAP") {
+        let p: Vec<&str> = spec.split(',').collect();
+        let n: Vec<f32> = p.iter().skip(1).filter_map(|s| s.parse().ok()).collect();
+        let actors = hp3_world::world(&mut vm).actors.clone();
+        if let (Some(name), 5) = (p.first(), n.len()) && let Some(a) = actors.into_iter().find(|&a| hp3_script::natives::object_path(&vm, a).ends_with(&format!(".{name}"))) {
+            let home = hp3_world::physics::vec(&hp3_world::get(&mut vm, a, "Location"));
+            let (at, ext) = (glam::Vec3::new(n[0], n[1], n[2]), glam::Vec3::new(n[3], n[3], n[4]));
+            let mut row = String::new();
+            for dz in (-400..=400).step_by(20) {
+                let loc = home + glam::Vec3::Z * dz as f32;
+                hp3_world::set(&mut vm, a, "Location", hp3_script::Value::Struct(vec![hp3_script::Value::Float(loc.x), hp3_script::Value::Float(loc.y), hp3_script::Value::Float(loc.z)].into()));
+                hp3_world::physics::place_mover_shape(&mut vm, a);
+                let hit = hp3_world::world(&mut vm).collision.mover(a).is_some_and(|m| m.overlaps(at, ext));
+                row.push_str(&format!(" {dz}:{}", if hit { "X" } else { "." }));
+            }
+            println!("overlap {name}{row}");
+        }
+    }
+    if let Ok(filter) = std::env::var("HP3_PARTICLE_COLORS") {
+        let quads = hp3_world::particles::collect(&mut vm, glam::Vec3::X, glam::Vec3::Z);
+        let mut by: std::collections::BTreeMap<String, (usize, [f32; 4], hp3_world::particles::Blend)> = std::collections::BTreeMap::new();
+        for q in &quads {
+            let Some(m) = q.material else { continue };
+            let name = hp3_script::natives::object_path(&vm, m);
+            if !name.to_ascii_lowercase().contains(&filter.to_ascii_lowercase()) {
+                continue;
+            }
+            let e = by.entry(name).or_insert((0, [0.0; 4], q.blend));
+            e.0 += 1;
+            if q.color[0] + q.color[1] + q.color[2] > e.1[0] + e.1[1] + e.1[2] {
+                e.1 = q.color;
+            }
+        }
+        for (name, (n, c, blend)) in by {
+            println!("  quads {name}: {n} quads, brightest colour {:.2} {:.2} {:.2} alpha {:.2}, blend {blend:?}", c[0], c[1], c[2], c[3]);
+        }
+    }
+    // HP3_PARTICLE_NEAR=x,y,z,radius: the live particle quads whose middle is within that radius of the point, per texture: how many, their
+    // average colour and alpha, the blend and the average width (what is drawn at one spot, such as a pickup's glow).
+    if let Ok(spec) = std::env::var("HP3_PARTICLE_NEAR") {
+        let v: Vec<f32> = spec.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+        if v.len() == 4 {
+            let at = glam::Vec3::new(v[0], v[1], v[2]);
+            let quads = hp3_world::particles::collect(&mut vm, glam::Vec3::X, glam::Vec3::Z);
+            type Sum = (usize, [f32; 4], f32, hp3_world::particles::Blend);
+            let mut by: std::collections::BTreeMap<String, Sum> = std::collections::BTreeMap::new();
+            for q in &quads {
+                let mid = (q.corners[0] + q.corners[1] + q.corners[2] + q.corners[3]) * 0.25;
+                if (mid - at).length() > v[3] {
+                    continue;
+                }
+                let name = q.material.map(|m| hp3_script::natives::object_path(&vm, m)).unwrap_or_else(|| "(none)".into());
+                let e = by.entry(name).or_insert((0, [0.0; 4], 0.0, q.blend));
+                e.0 += 1;
+                for k in 0..4 {
+                    e.1[k] += q.color[k];
+                }
+                e.2 += (q.corners[1] - q.corners[0]).length();
+            }
+            for (name, (n, c, w, blend)) in by {
+                let n_f = n as f32;
+                println!("  near {name}: {n} quads, mean colour {:.2} {:.2} {:.2} alpha {:.2}, width {:.0}, blend {blend:?}", c[0] / n_f, c[1] / n_f, c[2] / n_f, c[3] / n_f, w / n_f);
+            }
+        }
+    }
     if let Ok(filter) = std::env::var("HP3_PARTICLE_LIST") {
         for (name, at, n) in hp3_world::particles::summary(&mut vm) {
             if name.to_ascii_lowercase().contains(&filter.to_ascii_lowercase()) {
@@ -1550,4 +1968,9 @@ fn float_check(vm: &mut hp3_script::Vm<'_>) -> Vec<String> {
 fn probe_ext() -> glam::Vec3 {
     let v: Vec<f32> = std::env::var("HP3_PROBE_EXT").ok().map(|s| s.split(',').filter_map(|p| p.trim().parse().ok()).collect()).unwrap_or_default();
     if v.len() == 3 { glam::Vec3::new(v[0], v[1], v[2]) } else { glam::Vec3::new(15.0, 15.0, 38.0) }
+}
+
+thread_local! {
+    /// The card `HP3_THROW` made and the tick it was thrown.
+    static THROWN: std::cell::Cell<Option<(hp3_script::ObjId, u32)>> = const { std::cell::Cell::new(None) };
 }

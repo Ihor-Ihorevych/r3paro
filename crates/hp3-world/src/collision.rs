@@ -176,7 +176,23 @@ impl MoverShape {
 
     /// Whether a box centered at `at` overlaps the mover's triangles.
     pub fn overlaps(&self, at: Vec3, extent: Vec3) -> bool {
-        self.trace(at + Vec3::Z * 0.1, at, extent).is_some_and(|h| h.time <= 0.0)
+        if self.trace(at + Vec3::Z * 0.1, at, extent).is_some_and(|h| h.time <= 0.0) {
+            return true;
+        }
+        // A surface that has moved into the box (a platform rising through a pawn's feet) is not met by the short trace, which
+        // only sees a box that touches a surface from outside; test every triangle the box reaches.
+        let origin = self.to_world.w_axis.truncate();
+        if origin.distance(at) > self.radius + extent.length() + 1.0 {
+            return false;
+        }
+        if (at - extent - 1.0).cmpgt(self.bounds.1).any() || (at + extent + 1.0).cmplt(self.bounds.0).any() {
+            return false;
+        }
+        self.tris.iter().any(|t| {
+            let v = t.v.map(|p| self.to_world.transform_point3(p));
+            let normal = self.to_world.transform_vector3(t.normal).normalize_or_zero();
+            tri_box_overlap(&v, normal, at, extent)
+        })
     }
 
     fn trace(&self, start: Vec3, end: Vec3, extent: Vec3) -> Option<Hit> {
@@ -198,7 +214,7 @@ impl MoverShape {
             && if extent == Vec3::ZERO { *lines } else { *boxes }
         {
             let mut out = None;
-            bsp_trace(model, 0, 0.0, 1.0, ls, le, ls, le, extent, Vec3::Z, &mut out);
+            bsp_trace(model, 0, 0.0, 1.0, ls, le, ls, le, extent, Vec3::Z, None, &mut out);
             return out.map(|h| Hit {
                 time: h.time,
                 location: start + (end - start) * h.time,
@@ -424,7 +440,12 @@ impl Collision {
             && !model.nodes.is_empty()
         {
             let mut out = None;
-            bsp_trace(model, 0, 0.0, 1.0, start, end, start, end, extent, Vec3::Z, &mut out);
+            if csg_outside() && extent != Vec3::ZERO && !model.leaf_hulls.is_empty() {
+                out = leaf_hull_trace(model, start, end, extent);
+            } else {
+                let root = if csg_outside() { Some(model.root_outside != 0) } else { None };
+                bsp_trace(model, 0, 0.0, 1.0, start, end, start, end, extent, Vec3::Z, root, &mut out);
+            }
             if let Some(h) = out {
                 keep(h);
             }
@@ -478,7 +499,7 @@ impl Collision {
                     continue;
                 }
                 let mut out = None;
-                bsp_trace(&m.model, 0, 0.0, 1.0, start, end, start, end, extent, Vec3::Z, &mut out);
+                bsp_trace(&m.model, 0, 0.0, 1.0, start, end, start, end, extent, Vec3::Z, None, &mut out);
                 if let Some(h) = out {
                     keep(Hit { actor: Some(m.actor), ..h });
                 }
@@ -616,6 +637,30 @@ impl Collision {
         false
     }
 
+    /// The BSP nodes a point walks through down to its leaf, with the side it takes at each and whether that makes it solid.
+    pub fn debug_walk(&self, p: Vec3) -> Vec<String> {
+        let Some(model) = &self.model else { return Vec::new() };
+        let mut out = Vec::new();
+        let mut node = 0usize;
+        let mut outside = model.root_outside != 0;
+        for _ in 0..model.nodes.len() {
+            let nd = &model.nodes[node];
+            let (n, w) = plane_of(model, node);
+            let d = n.dot(p) - w;
+            let csg = nd.num_vertices > 0 && nd.node_flags & 0x21 == 0 && !node_passes_through(model, node);
+            let front = d >= 0.0;
+            outside = if front { outside || csg } else { outside && !csg };
+            out.push(format!("node {node} normal ({:.2},{:.2},{:.2}) dist {d:.1} {} csg {csg} verts {} nf {:#x} -> outside {outside}", n.x, n.y, n.z, if front { "front" } else { "back" }, nd.num_vertices, nd.node_flags));
+            let child = if front { nd.front } else { nd.back };
+            if child < 0 {
+                out.push(format!("leaf: {} collision_bound {} hulls_len {}", if outside { "empty" } else { "SOLID" }, nd.collision_bound, model.leaf_hulls.len()));
+                break;
+            }
+            node = child as usize;
+        }
+        out
+    }
+
     /// For debugging: every BSP polygon of the level model whose bounds touch the box `lo`..`hi`, as text lines (flags, brush
     /// actor, plane, bounds), to see what the level holds in a place whatever the collision does with it.
     pub fn debug_polygons_in(&self, lo: Vec3, hi: Vec3) -> Vec<String> {
@@ -639,8 +684,8 @@ impl Collision {
             let flags = model.surfs.get(node.surf as usize).map(|s| s.poly_flags).unwrap_or(0);
             let actor = model.surfs.get(node.surf as usize).map(|s| s.actor.0).unwrap_or(0);
             out.push(format!(
-                "node {i} flags {flags:#010x} actor ref {actor} normal ({:.2},{:.2},{:.2}) bounds ({:.0},{:.0},{:.0})..({:.0},{:.0},{:.0})",
-                node.plane.normal.x, node.plane.normal.y, node.plane.normal.z, blo.x, blo.y, blo.z, bhi.x, bhi.y, bhi.z
+                "node {i} nf {:#x} front {} back {} flags {flags:#010x} actor ref {actor} normal ({:.2},{:.2},{:.2}) bounds ({:.0},{:.0},{:.0})..({:.0},{:.0},{:.0})",
+                node.node_flags, node.front, node.back, node.plane.normal.x, node.plane.normal.y, node.plane.normal.z, blo.x, blo.y, blo.z, bhi.x, bhi.y, bhi.z
             ));
         }
         out
@@ -698,6 +743,7 @@ fn bsp_trace(
     end: Vec3,
     extent: Vec3,
     entry_normal: Vec3,
+    outside: Option<bool>,
     out: &mut Option<Hit>,
 ) {
     if out.is_some_and(|h| h.time <= f0) {
@@ -711,10 +757,18 @@ fn bsp_trace(
     let pass = node_passes_through(model, node);
     let front = nd.front;
     let back = nd.back;
+    // As the original engine tracks it: a plane that is not a CSG splitter (a transparent or not-solid surface, or one
+    // with no polygon) does not change which side counts as solid; only the splitters do.
+    let csg = nd.num_vertices > 0 && nd.node_flags & 0x21 == 0 && !pass;
     let visit = |child: i32, is_back: bool, f0: f32, f1: f32, p0: Vec3, p1: Vec3, normal: Vec3, out: &mut Option<Hit>| {
+        let child_outside = outside.map(|o| if is_back { o && !csg } else { o || csg });
+        let solid = match child_outside {
+            Some(o) => !o,
+            None => is_back && !pass,
+        };
         if child >= 0 {
-            bsp_trace(model, child as usize, f0, f1, p0, p1, start, end, extent, normal, out);
-        } else if is_back && !pass {
+            bsp_trace(model, child as usize, f0, f1, p0, p1, start, end, extent, normal, child_outside, out);
+        } else if solid {
             // A solid leaf: the move stops where it entered it.
             let time = (f0 - EPSILON / (end - start).length().max(EPSILON)).max(0.0);
             if out.is_none_or(|h| time < h.time) {
@@ -1032,4 +1086,221 @@ impl Collision {
     pub fn zone_actor_export(&self, zone: usize) -> Option<usize> {
         self.model.as_ref()?.zones.get(zone)?.actor.export()
     }
+}
+
+/// `HP3_BSP_OLD=1` goes back to treating every empty back side of a plane as solid.
+fn csg_outside() -> bool {
+    static OLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*OLD.get_or_init(|| crate::envc::var_os("HP3_BSP_OLD").is_some())
+}
+
+/// A box swept through the level's BSP against each solid leaf's convex collision hull (the planes the model stores per leaf,
+/// the leaf's bounding box and the hull's edges, which round the hull's corners off), so a thin or sharp leaf blocks
+/// no further than the box can really reach it.
+struct LeafHullTrace<'a> {
+    model: &'a Model,
+    start: Vec3,
+    end: Vec3,
+    extent: Vec3,
+    t0: f32,
+    t1: f32,
+    local_normal: Vec3,
+    best: f32,
+    best_normal: Vec3,
+    hit: bool,
+    /// Only asking whether the box fits at `start`: a plane then holds it when it is closer than the box's reach.
+    point: bool,
+}
+
+/// A plane as (normal, distance): points on it satisfy `normal . p = distance`.
+type HullPlane = (Vec3, f32);
+
+impl LeafHullTrace<'_> {
+    /// Narrows the part of the sweep that is inside the plane pushed out by the box; false when none is left.
+    fn clip(&mut self, (n, w): HullPlane) -> bool {
+        let push = plane_offset(n, self.extent);
+        if self.point {
+            let d = n.dot(self.start) - w;
+            if d > 0.0 && d < push && d < self.best {
+                self.best = d;
+                self.best_normal = n;
+            }
+            return d < push;
+        }
+        let d0 = n.dot(self.start) - w;
+        let d1 = n.dot(self.end) - w;
+        let mut adj = d0 - push;
+        if d0 > d1 && adj >= -push && adj < 0.0 {
+            adj = 0.0;
+        }
+        if d0 - d1 < -0.00001 {
+            let t = adj / (d0 - d1);
+            if t < self.t1 {
+                self.t1 = t;
+            }
+        } else if d0 - d1 > 0.00001 {
+            let t = adj / (d0 - d1);
+            if t > self.t0 {
+                self.t0 = t;
+                self.local_normal = n;
+            }
+        } else if d0 > push && d1 > push {
+            return false;
+        }
+        self.t0 < self.t1
+    }
+
+    fn leaf(&mut self, parent: usize) {
+        let m = self.model;
+        let Ok(bound) = usize::try_from(m.nodes[parent].collision_bound) else { return };
+        let mut planes: Vec<HullPlane> = Vec::new();
+        let mut k = bound;
+        while let Some(&entry) = m.leaf_hulls.get(k) {
+            if entry < 0 || planes.len() >= 64 {
+                break;
+            }
+            let (n, w) = plane_of(m, (entry & !0x4000_0000) as usize);
+            planes.push(if entry & 0x4000_0000 != 0 { (-n, -w) } else { (n, w) });
+            k += 1;
+        }
+        let b: Vec<f32> = (0..6).map(|i| m.leaf_hulls.get(k + 1 + i).map_or(0.0, |&v| f32::from_bits(v as u32))).collect();
+        if b.len() < 6 {
+            return;
+        }
+        self.t0 = -1.0;
+        self.t1 = self.best;
+        self.local_normal = Vec3::ZERO;
+        for &p in &planes {
+            if !self.clip(p) {
+                return;
+            }
+        }
+        // The hull's own box, a little in so flat faces are told apart.
+        let faces = [
+            (Vec3::new(0.0, 0.0, -1.0), 0.1 - b[2]),
+            (Vec3::new(0.0, 0.0, 1.0), b[5] + 0.1),
+            (Vec3::new(-1.0, 0.0, 0.0), 0.1 - b[0]),
+            (Vec3::new(1.0, 0.0, 0.0), b[3] - 0.1),
+            (Vec3::new(0.0, -1.0, 0.0), 0.1 - b[1]),
+            (Vec3::new(0.0, 1.0, 0.0), b[4] - 0.1),
+        ];
+        for f in faces {
+            if !self.clip(f) {
+                return;
+            }
+        }
+        // The hull's edges: for each pair of planes whose edge a box axis can slide along, a plane through the edge.
+        let flags: Vec<u8> = planes
+            .iter()
+            .map(|(n, _)| {
+                (if n.x < 0.0 { 1 } else if n.x > 0.0 { 2 } else { 0 })
+                    | (if n.y < 0.0 { 4 } else if n.y > 0.0 { 8 } else { 0 })
+                    | (if n.z < 0.0 { 16 } else if n.z > 0.0 { 32 } else { 0 })
+            })
+            .collect();
+        for i in 0..planes.len() {
+            for j in 0..i {
+                let both = flags[i] | flags[j];
+                for (axis, mask) in [(Vec3::X, 3u8), (Vec3::Y, 12), (Vec3::Z, 48)] {
+                    if both & mask != mask {
+                        continue;
+                    }
+                    let (ni, wi) = planes[i];
+                    let (nj, wj) = planes[j];
+                    if axis.cross(ni).dot(axis.cross(nj)) <= 0.001 {
+                        continue;
+                    }
+                    let d = ni.cross(nj);
+                    let d2 = d.length_squared();
+                    if d2 < 1e-12 {
+                        continue;
+                    }
+                    let point = (nj.cross(d) * wi + d.cross(ni) * wj) / d2;
+                    let mut a = axis.cross(d).normalize_or_zero();
+                    if ni.dot(a) < 0.0 {
+                        a = -a;
+                    }
+                    if !self.clip((a, a.dot(point))) {
+                        return;
+                    }
+                }
+            }
+        }
+        if self.point {
+            self.hit = true;
+        } else if self.t0 > -1.0 && self.t0 < self.t1 && self.t1 > 0.0 {
+            self.best = self.t0;
+            self.best_normal = self.local_normal;
+            self.hit = true;
+        }
+    }
+
+    fn walk(&mut self, mut parent: usize, mut node: i32, mut outside: bool) {
+        let m = self.model;
+        if self.point {
+            while node >= 0 {
+                let nd = &m.nodes[node as usize];
+                let (n, w) = plane_of(m, node as usize);
+                let push = plane_offset(n, self.extent * 1.1);
+                let d = n.dot(self.start) - w;
+                let csg = nd.num_vertices > 0 && nd.node_flags & 0x21 == 0 && !node_passes_through(m, node as usize);
+                if d > -push {
+                    self.walk(node as usize, nd.front, outside || csg);
+                }
+                parent = node as usize;
+                node = nd.back;
+                outside = outside && !csg;
+                if d > push {
+                    return;
+                }
+            }
+            if !outside {
+                self.leaf(parent);
+            }
+            return;
+        }
+        while node >= 0 {
+            let nd = &m.nodes[node as usize];
+            let (n, w) = plane_of(m, node as usize);
+            let d0 = n.dot(self.start) - w;
+            let d1 = n.dot(self.end) - w;
+            let push = plane_offset(n, self.extent * 1.1);
+            let use_side = [d0 <= push || d1 <= push, d0 >= -push || d1 >= -push];
+            let front_first = d0 >= d1;
+            let csg = nd.num_vertices > 0 && nd.node_flags & 0x21 == 0 && !node_passes_through(m, node as usize);
+            let child_outside = |front: bool, o: bool| if front { o || csg } else { o && !csg };
+            let children = [nd.back, nd.front];
+            let ff = front_first as usize;
+            if use_side[ff] {
+                self.walk(node as usize, children[ff], child_outside(front_first, outside));
+            }
+            if !use_side[1 - ff] {
+                return;
+            }
+            parent = node as usize;
+            node = children[1 - ff];
+            outside = child_outside(!front_first, outside);
+        }
+        if !outside {
+            self.leaf(parent);
+        }
+    }
+}
+
+/// The first solid the box meets going from `start` to `end` in the level model, by the leaf hulls.
+fn leaf_hull_trace(model: &Model, start: Vec3, end: Vec3, extent: Vec3) -> Option<Hit> {
+    if model.nodes.is_empty() {
+        return None;
+    }
+    let mut t = LeafHullTrace { model, start, end, extent, t0: -1.0, t1: 1.0, local_normal: Vec3::ZERO, best: 1.0, best_normal: Vec3::ZERO, hit: false, point: false };
+    t.walk(0, 0, model.root_outside != 0);
+    if !t.hit {
+        // Starting inside a solid the sweep meets no surface to cross: that is a hit at the start.
+        let mut p = LeafHullTrace { model, start, end: start, extent, t0: -1.0, t1: 1.0, local_normal: Vec3::ZERO, best: f32::MAX, best_normal: Vec3::Z, hit: false, point: true };
+        p.walk(0, 0, model.root_outside != 0);
+        return p.hit.then_some(Hit { time: 0.0, location: start, normal: p.best_normal, actor: None });
+    }
+    let len = (end - start).length().max(EPSILON);
+    let time = (t.best - EPSILON / len).clamp(0.0, 1.0);
+    Some(Hit { time, location: start + (end - start) * time, normal: t.best_normal, actor: None })
 }

@@ -325,6 +325,12 @@ impl AudioSystem {
                         m.stop_music(handle, fade_out);
                     }
                 }
+                Event::StopAllSounds => {
+                    self.note("STOPSOUNDS".to_string());
+                    if let Ok(mut m) = self.mixer.lock() {
+                        m.stop_all();
+                    }
+                }
                 Event::StopAllMusic { fade_out } => {
                     self.note(format!("STOPALLMUSIC fade {fade_out}"));
                     if let Ok(mut m) = self.mixer.lock() {

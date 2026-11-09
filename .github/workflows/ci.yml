@@ -93,6 +93,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # mimalloc (the global allocator) compiles C code, so even a check for the phone needs the NDK's clang for aarch64; the
+      # runner image ships the NDK but does not put its compiler on the PATH, where cc-rs looks for `aarch64-linux-android-clang`
+      - name: Android NDK compiler
+        run: |
+          NDK="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}}"
+          if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then echo "::error::no Android NDK on the runner"; exit 1; fi
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "CC_aarch64_linux_android=$BIN/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$BIN/llvm-ar" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$BIN/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+
       # the shared library (linking against Flipendo's libSDL3.so happens in Flipendo's build): the code must type-check
       # for the phone
       - name: Check the Android library

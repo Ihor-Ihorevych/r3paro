@@ -22,6 +22,20 @@ fn new_named(vm: &mut Vm<'_>, class: &str) -> Option<ObjId> {
     Some(vm.new_object(c, n))
 }
 
+thread_local! {
+    /// The profile (New Game slot) the GUI controller had when its level was left. The original's controller belongs to the
+    /// viewport and outlives levels; ours is made again for each level, so the profile is carried over by hand. Without it every
+    /// level after the first saved to profile 0 (`iSaveSlotID = CurUserID * 100 + slot`).
+    static CARRIED_USER_ID: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+}
+
+/// Called as a level is left: remembers the profile chosen on the New Game or Load page for the next level's controller.
+pub fn carry_user_id(vm: &mut Vm<'_>) {
+    let Some(gui) = world(vm).viewport.gui else { return };
+    let id = get(vm, gui, "CurUserID").as_int();
+    CARRIED_USER_ID.with(|c| c.set(Some(id)));
+}
+
 /// Creates the player's viewport objects for `pc` and adds the configured console and GUI controller.
 pub fn init(vm: &mut Vm<'_>, pc: ObjId) {
     let Some(player) = new_named(vm, "Viewport").or_else(|| new_named(vm, "Player")) else { return };
@@ -44,6 +58,9 @@ pub fn init(vm: &mut Vm<'_>, pc: ObjId) {
         // The engine initializes the controller once created: its styles and fonts.
         if let Some(g) = gui {
             fire(vm, g, "InitializeController", &mut []);
+            if let Some(id) = CARRIED_USER_ID.with(|c| c.get()) {
+                set(vm, g, "CurUserID", Value::Int(id));
+            }
         }
     }
     world(vm).viewport = Viewport { player: Some(player), master: Some(master), console, gui };

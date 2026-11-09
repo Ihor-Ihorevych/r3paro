@@ -61,6 +61,7 @@ fn refresh_actor_boxes(vm: &mut Vm<'_>) {
     let actors = std::mem::take(&mut world(vm).actors);
     let s = Slots::get(vm);
     let (collide_type, collision_width, rotation) = (crate::actor_slot(vm, "CollideType"), crate::actor_slot(vm, "CollisionWidth"), crate::actor_slot(vm, "Rotation"));
+    let use_cylinder = crate::actor_slot(vm, "bUseCylinderCollision");
     let mut boxes = Vec::new();
     // Which actors have a box at all is worked out again only for actors written since the last tick.
     let mut memo = std::mem::take(&mut crate::world(vm).memo_boxes);
@@ -72,7 +73,7 @@ fn refresh_actor_boxes(vm: &mut Vm<'_>) {
         let blocks_actors = crate::read(vm, a, s.block).as_bool();
         let blocks_players = crate::read(vm, a, s.block_players).as_bool();
         let (r, h) = (crate::read(vm, a, s.radius).as_float(), crate::read(vm, a, s.height).as_float());
-        let has_box = crate::read(vm, a, s.collide).as_bool() && (blocks_actors || blocks_players) && crate::read(vm, a, s.static_mesh).as_obj().is_none() && r > 0.0 && h > 0.0;
+        let has_box = crate::read(vm, a, s.collide).as_bool() && (blocks_actors || blocks_players) && (crate::read(vm, a, s.static_mesh).as_obj().is_none() || crate::read(vm, a, use_cylinder).as_bool()) && r > 0.0 && h > 0.0;
         memo.set(a, if has_box { 2 } else { 1 });
         if !has_box {
             continue;
@@ -719,15 +720,23 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
                 // feet. It is stepped onto like any other step (up, over, down); only when that gets nowhere does
                 // the move go along the surface instead.
                 let mut stepped = false;
-                if hit.time * delta.length() <= 1.0 {
+                // (A ramp is not a tread: climbing its face as a step picked a spot off to one side, and the pawn went sideways.)
+                let ramp = hit.normal.z < 0.998 && crate::envc::var_os("HP3_RAMP_STEPUP").is_none();
+                if hit.time * delta.length() <= 1.0 && !ramp {
                     let before = vec(&get(vm, a, "Location"));
                     step_up(vm, a, remaining, hit, 0);
                     stepped = (vec(&get(vm, a, "Location")) - before).truncate().length_squared() > 0.0025;
+                    if crate::envc::var_os("HP3_WALK_DEBUG").is_some_and(|v| human || v == "all") {
+                        eprintln!("walk: step_up from {before} to {} stepped {stepped}", vec(&get(vm, a, "Location")));
+                    }
                 }
                 if !stepped {
                     let along = remaining - hit.normal * remaining.dot(hit.normal);
                     if along.length_squared() > 1e-8 {
                         move_actor(vm, a, along);
+                        if crate::envc::var_os("HP3_WALK_DEBUG").is_some_and(|v| human || v == "all") {
+                            eprintln!("walk: along {along} now at {}", vec(&get(vm, a, "Location")));
+                        }
                     }
                 }
             }
@@ -743,6 +752,10 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
             Some(floor) => {
                 let loc = vec(&get(vm, a, "Location"));
                 set(vm, a, "Floor", value(floor.normal));
+                if sliding && is_player_pawn(vm, a) {
+                    let z = vec(&get(vm, a, "Location")).z;
+                    SLIDE_GROUND_Z.with(|g| g.set(z));
+                }
                 let drop = (MAX_STEP_HEIGHT + 2.0) * floor.time;
                 if drop > 0.5 {
                     set(vm, a, "Location", value(loc - Vec3::Z * (drop - 0.5)));
@@ -1214,7 +1227,54 @@ fn find_ledge(col: &crate::collision::Collision, l: &Ledge) -> Option<Vec3> {
     flat.or(first)
 }
 
+/// A walking or falling pawn whose point lies in the level's zone 0 (outside the BSP) has left the world: the original's
+/// `physWalking` and `physFalling` raise `FellOutOfWorld` there (the script respawns the player or kills the pawn). Flying
+/// and swimming pawns never do. Returns true when the event was raised, so the caller skips this tick's move.
+/// `HP3_NO_FELL_CHECK` turns it off.
+fn fell_out_of_world(vm: &mut Vm<'_>, a: ObjId) -> bool {
+    if !is_pawn(vm, a) || crate::envc::var_os("HP3_NO_FELL_CHECK").is_some() {
+        return false;
+    }
+    let loc = vec(&get(vm, a, "Location"));
+    if world(vm).collision.zone_at(loc) != Some(0) {
+        return false;
+    }
+    vm.log.push(format!("{} fell out of the world at {loc}", hp3_script::natives::object_path(vm, a)));
+    fire(vm, a, "FellOutOfWorld", &mut [Value::Byte(0)]);
+    true
+}
+
+thread_local! {
+    /// The height a sliding player last stood on the track at.
+    static SLIDE_GROUND_Z: std::cell::Cell<f32> = const { std::cell::Cell::new(f32::NEG_INFINITY) };
+}
+
+/// A sliding hero that falls far below the track and is not in a jump the level made for it has left the track: the game
+/// marks that (`bFlewOffTrack`, with the jump time restarted) and its slide state, seeing the mark last longer than
+/// `SlideLeaveTrackDieTimeout`, sends the player back to the last telepit. The game sets the mark itself when the surface
+/// next to the player is of the off-track kind (a material read by a trace), which the engine's traces do not give.
+fn left_the_track(vm: &mut Vm<'_>, a: ObjId) {
+    if !get(vm, a, "bIsSliding").as_bool() || !is_player_pawn(vm, a) {
+        SLIDE_GROUND_Z.with(|z| z.set(f32::NEG_INFINITY));
+        return;
+    }
+    let z = vec(&get(vm, a, "Location")).z;
+    let ground = SLIDE_GROUND_Z.with(std::cell::Cell::get);
+    if z > ground - 400.0 {
+        // Not far below the track yet (a jump the level planned stays within this).
+        return;
+    }
+    let Some(pc) = get(vm, a, "Controller").as_obj() else { return };
+    let now = world(vm).level_info.map_or(0.0, |li| get(vm, li, "TimeSeconds").as_float());
+    let last_jump = get(vm, a, "LastSlideJumpTime").as_float();
+    if now - last_jump > 1.0 && !get(vm, pc, "bFlewOffTrack").as_bool() {
+        set(vm, pc, "bFlewOffTrack", Value::Bool(true));
+        set(vm, a, "LastSlideJumpTime", Value::Float(now));
+    }
+}
+
 fn fall(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
+    left_the_track(vm, a);
     // A pawn nobody controls that is placed with its box sunk into a static mesh (a statue a few units into its
     // pedestal) stays where the level put it: sweeping out of it would drop it through.
     if !is_player_pawn(vm, a) && get(vm, a, "Controller").as_obj().is_none() {
@@ -1609,7 +1669,7 @@ fn rotator_value(r: [i32; 3]) -> Value {
 }
 
 /// Puts a mover's collision shape where the actor now is.
-fn place_mover_shape(vm: &mut Vm<'_>, a: ObjId) {
+pub fn place_mover_shape(vm: &mut Vm<'_>, a: ObjId) {
     let t = crate::mover_transform(vm, a);
     if let Some(m) = world(vm).collision.mover_mut(a) {
         m.place(t);
@@ -1652,12 +1712,23 @@ fn can_be_encroached(vm: &mut Vm<'_>, mover: ObjId, other: ObjId) -> bool {
     if stands_on(vm, other, mover) || stands_on(vm, mover, other) || world(vm).collision.mover(other).is_some() {
         return false;
     }
+    // What is hard-attached to a mover (a knight fixed to its alcove) goes where that mover goes and is not in the way of the other
+    // movers that pass it: the alcoves of the knight ring turn through each other's places.
+    if get(vm, other, "bHardAttach").as_bool() && get(vm, other, "Base").as_obj().is_some_and(|b| world(vm).collision.mover(b).is_some()) {
+        return false;
+    }
     let class = vm.db.objects.get(other).class;
     !vm.db.find("StaticMeshActor").is_some_and(|sm| class.is_some_and(|c| vm.is_child_of(c, sm)))
 }
 
 /// Actors that overlap the mover where it now is, among those it has to deal with.
 fn encroached_by(vm: &mut Vm<'_>, a: ObjId) -> Vec<ObjId> {
+    encroached_by_margin(vm, a, 0.0)
+}
+
+/// Like `encroached_by`, with every actor's box made `margin` smaller on each side, so only a real overlap counts and an actor
+/// that merely touches the mover (standing on it) does not.
+fn encroached_by_margin(vm: &mut Vm<'_>, a: ObjId, margin: f32) -> Vec<ObjId> {
     // Only blocking actors near the mover can be in its way (their boxes are kept for the frame).
     let at = vec(&get(vm, a, "Location"));
     let reach = world(vm).collision.mover(a).map_or(0.0, |m| m.reach());
@@ -1674,7 +1745,7 @@ fn encroached_by(vm: &mut Vm<'_>, a: ObjId) -> Vec<ObjId> {
             continue;
         }
         let (at, ext) = (vec(&get(vm, o, "Location")), extent(vm, o));
-        if world(vm).collision.mover(a).is_some_and(|m| m.overlaps(at, ext)) {
+        if world(vm).collision.mover(a).is_some_and(|m| m.overlaps(at, (ext - Vec3::splat(margin)).max(Vec3::splat(0.5)))) {
             found.push(o);
         }
     }
@@ -1686,10 +1757,18 @@ fn encroached_by(vm: &mut Vm<'_>, a: ObjId) -> Vec<ObjId> {
 /// does end up overlapping are told with `EncroachedBy`.
 fn clear_way(vm: &mut Vm<'_>, a: ObjId, from: Vec3, to: Vec3, rot: [i32; 3]) -> bool {
     let old_rot = rotator_ints(&get(vm, a, "Rotation"));
+    // What the mover already overlaps where it stands was placed that way (a gargoyle in the niche behind a portrait): the
+    // step neither pushes nor crushes it, the mover slides through.
+    let overlapping_now = slide_through(vm, a);
     set(vm, a, "Location", value(to));
     set(vm, a, "Rotation", rotator_value(rot));
     place_mover_shape(vm, a);
-    let in_way = encroached_by(vm, a);
+    let in_way: Vec<ObjId> = encroached_by(vm, a).into_iter().filter(|o| !overlapping_now.contains(o)).collect();
+    if crate::envc::var_os("HP3_TRACE_MOVER").is_some() {
+        let names: Vec<String> = in_way.iter().map(|&o| hp3_script::natives::object_path(vm, o)).collect();
+        let skipped: Vec<String> = overlapping_now.iter().map(|&o| hp3_script::natives::object_path(vm, o)).collect();
+        eprintln!("mover {} step to {to}: in the way {names:?}, already overlapping {skipped:?}", hp3_script::natives::object_path(vm, a));
+    }
     // Pushing happens with the mover where it still is.
     set(vm, a, "Location", value(from));
     set(vm, a, "Rotation", rotator_value(old_rot));
@@ -1716,7 +1795,7 @@ fn clear_way(vm: &mut Vm<'_>, a: ObjId, from: Vec3, to: Vec3, rot: [i32; 3]) -> 
         place_mover_shape(vm, a);
         return false;
     }
-    for o in encroached_by(vm, a) {
+    for o in encroached_by(vm, a).into_iter().filter(|o| !overlapping_now.contains(o)) {
         fire(vm, o, "EncroachedBy", &mut [Value::Object(Some(a))]);
     }
     true
@@ -1902,6 +1981,7 @@ pub fn step_actor(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
             moving_brush(vm, a, dt);
             return;
         }
+        PHYS_WALKING | PHYS_FALLING if fell_out_of_world(vm, a) => return,
         PHYS_WALKING => walk_smoothed(vm, a, dt),
         PHYS_FALLING => {
             drop_step_offset(vm, a);
@@ -2146,6 +2226,7 @@ pub fn step(vm: &mut Vm<'_>, dt: f32) {
                 moving_brush(vm, a, dt);
                 continue;
             }
+            PHYS_WALKING | PHYS_FALLING if fell_out_of_world(vm, a) => continue,
             PHYS_WALKING => walk_smoothed(vm, a, dt),
             PHYS_FALLING => {
                 drop_step_offset(vm, a);
@@ -2412,4 +2493,26 @@ pub fn mark(vm: &mut Vm<'_>) -> String {
     }
     out += &format!("  floor sweeps: {}\n", debug_floor(vm, a));
     out
+}
+
+thread_local! {
+    /// For each mover, the actors it was placed overlapping and has not yet cleared.
+    static SLIDE_THROUGH: std::cell::RefCell<hp3_script::fx::FxHashMap<ObjId, Vec<ObjId>>> = Default::default();
+}
+
+/// The actors a mover slides through instead of pushing or crushing: those that overlapped it deeply when it began to move
+/// (a gargoyle in the niche behind a portrait), until the mover has cleared them. An actor that only touches the mover
+/// (standing on it) never counts.
+fn slide_through(vm: &mut Vm<'_>, a: ObjId) -> Vec<ObjId> {
+    if crate::envc::var_os("HP3_NO_SLIDE_THROUGH").is_some() {
+        return Vec::new();
+    }
+    let mut kept = SLIDE_THROUGH.with(|s| s.borrow().get(&a).cloned().unwrap_or_default());
+    let touching = encroached_by(vm, a);
+    kept.retain(|o| touching.contains(o));
+    if kept.is_empty() {
+        kept = encroached_by_margin(vm, a, 6.0);
+    }
+    SLIDE_THROUGH.with(|s| s.borrow_mut().insert(a, kept.clone()));
+    kept
 }

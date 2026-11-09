@@ -807,6 +807,8 @@ pub fn console(vm: &mut Vm<'_>, command: &str) -> String {
                 write(vm, slot);
             }
         }
+        // A skipped cutscene stops the sounds it started.
+        "STOPSOUNDS" => world(vm).audio.events.push(crate::audio::Event::StopAllSounds),
         // The Quit page's Yes: the app leaves its main loop (on the phone the game's activity then ends).
         "EXIT" | "QUIT" => world(vm).quit_requested = true,
         "COPYSAVEDGAME" => {

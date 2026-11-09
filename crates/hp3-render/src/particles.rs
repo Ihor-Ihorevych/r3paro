@@ -52,6 +52,12 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @l
     let c = textureSample(tex, samp, i.uv) * i.color;
     return vec4<f32>(mix(vec3<f32>(0.5), mix(vec3<f32>(0.5), c.rgb, c.a), fog_factor(i.pos.w)), 1.0);
 }
+
+// Darken and brighten: the picture's colour times the particle's, scaled by its alpha, is the colour taken from (or added over) what is behind.
+@fragment fn fs_premul(i: VsOut) -> @location(0) vec4<f32> {
+    let c = textureSample(tex, samp, i.uv) * i.color;
+    return vec4<f32>(c.rgb * c.a * fog_factor(i.pos.w), 1.0);
+}
 "#;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -59,6 +65,10 @@ pub enum ParticleBlend {
     Alpha,
     Additive,
     Modulate,
+    /// `dest * (1 - source)`.
+    Darken,
+    /// `source + dest * (1 - source)`.
+    Brighten,
     /// Modulate by the picture's colour only, faded by the quad's alpha (the picture's alpha is ignored).
     Decal,
 }
@@ -92,6 +102,8 @@ pub struct ParticleRenderer {
     alpha: wgpu::RenderPipeline,
     additive: wgpu::RenderPipeline,
     modulate: wgpu::RenderPipeline,
+    darken: wgpu::RenderPipeline,
+    brighten: wgpu::RenderPipeline,
     decal: wgpu::RenderPipeline,
     binds: RefCell<HashMap<Option<ObjKey>, Rc<wgpu::BindGroup>>>,
 }
@@ -102,6 +114,14 @@ fn blend_state(b: ParticleBlend) -> wgpu::BlendState {
         ParticleBlend::Alpha => wgpu::BlendState::ALPHA_BLENDING,
         ParticleBlend::Additive => wgpu::BlendState {
             color: BlendComponent { src_factor: F::SrcAlpha, dst_factor: F::One, operation: Add },
+            alpha: BlendComponent { src_factor: F::Zero, dst_factor: F::One, operation: Add },
+        },
+        ParticleBlend::Darken => wgpu::BlendState {
+            color: BlendComponent { src_factor: F::Zero, dst_factor: F::OneMinusSrc, operation: Add },
+            alpha: BlendComponent { src_factor: F::Zero, dst_factor: F::One, operation: Add },
+        },
+        ParticleBlend::Brighten => wgpu::BlendState {
+            color: BlendComponent { src_factor: F::One, dst_factor: F::OneMinusSrc, operation: Add },
             alpha: BlendComponent { src_factor: F::Zero, dst_factor: F::One, operation: Add },
         },
         // result = 2 * source * destination (the source being centred on 0.5).
@@ -159,6 +179,8 @@ impl ParticleRenderer {
             alpha: pipeline(ParticleBlend::Alpha, "fs"),
             additive: pipeline(ParticleBlend::Additive, "fs"),
             modulate: pipeline(ParticleBlend::Modulate, "fs_modulate"),
+            darken: pipeline(ParticleBlend::Darken, "fs_premul"),
+            brighten: pipeline(ParticleBlend::Brighten, "fs_premul"),
             decal: pipeline(ParticleBlend::Decal, "fs_decal"),
             binds: RefCell::new(HashMap::new()),
         }
@@ -219,6 +241,8 @@ impl ParticleRenderer {
                 ParticleBlend::Alpha => &self.alpha,
                 ParticleBlend::Additive => &self.additive,
                 ParticleBlend::Modulate => &self.modulate,
+                ParticleBlend::Darken => &self.darken,
+                ParticleBlend::Brighten => &self.brighten,
                 ParticleBlend::Decal => &self.decal,
             });
             pass.set_bind_group(1, bind.as_ref(), &[]);

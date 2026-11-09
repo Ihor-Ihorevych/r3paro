@@ -494,11 +494,21 @@ pub(crate) fn play(vm: &mut Vm<'_>, actor: ObjId, seq: Name, rate: f32, tween: f
     };
     let name = vm.db.names.get(seq).to_string();
     if crate::envc::var("HP3_ANIM_TRACE").is_ok() {
-        eprintln!("anim: play {actor:?} {name} channel {channel} looping {looping}");
+        let info = set.find(&name).map(|i| format!("frames {} rate {}", set.sequences[i].frames, set.sequences[i].rate));
+        eprintln!("anim: play {actor:?} {name} channel {channel} looping {looping} rate {rate} tween {tween} {info:?}");
     }
-    let Some(si) = set.find(&name) else {
+    // The fight stance's hold sequence (BattleCastAim) was disabled in the retail data (only BattleCastAimXX remains): the usual hold takes its place.
+    let fallback = (name.eq_ignore_ascii_case("BattleCastAim") && crate::envc::var_os("HP3_NO_HOLD_FALLBACK").is_none()).then(|| set.find("castaim")).flatten();
+    let Some(si) = set.find(&name).or(fallback) else {
         if crate::envc::var("HP3_ANIM_TRACE").is_ok() {
             eprintln!("anim: {actor:?} has no sequence {name}");
+            if name.to_ascii_lowercase().contains("cast") {
+                let l: Vec<String> = (0..set.sequences.len())
+                    .map(|i| format!("{:?}", set.sequences[i].name))
+                    .filter(|n| n.to_ascii_lowercase().contains("cast") || n.to_ascii_lowercase().contains("battle"))
+                    .collect();
+                eprintln!("anim:   set has {l:?}");
+            }
         }
         return false;
     };
@@ -579,6 +589,12 @@ pub fn tick_actor(vm: &mut Vm<'_>, actor: ObjId, dt: f32) {
                     let step = if ch.blend_rate > 0.0 { ch.blend_rate * dt } else { f32::MAX };
                     ch.alpha = if ch.alpha < ch.target_alpha { (ch.alpha + step).min(ch.target_alpha) } else { (ch.alpha - step).max(ch.target_alpha) };
                 }
+                // A blended channel faded out to nothing after its one-shot finished has no pose left to show: a later
+                // fade-in of the channel must not bring back that stale last frame (Harry's hold pose in the dementor
+                // battle, where the hold sequence does not exist and only the release animation ever plays).
+                if ci > 0 && ch.scripted_blend && ch.alpha <= 0.0 && ch.target_alpha <= 0.0 && ch.sequence.is_some() && !ch.looping && (!ch.playing || ch.rate == 0.0) && ch.from.is_none() {
+                    ch.sequence = None;
+                }
                 // While a new sequence fades in it waits on its first frame: time goes to the fade, and only what is
                 // left over after it plays the sequence.
                 let mut dt = dt;
@@ -623,6 +639,9 @@ pub fn tick_actor(vm: &mut Vm<'_>, actor: ObjId, dt: f32) {
                     if ch.looping {
                         ch.frame %= frames.max(1.0);
                         looped |= ci == 0;
+                        // A looping animation says `AnimEnd` each time it wraps, as a finishing one does (silenced channels excepted
+                        // below). The cast pose is such a loop: the character's `AnimEnd` fades it out.
+                        ended.push(ci);
                     } else {
                         ch.frame = frames;
                         ch.playing = false;
@@ -1018,8 +1037,16 @@ pub fn register(vm: &mut Vm<'_>) {
     vm.register("Actor.FinishAnim", |vm, this, a| {
         let Some(o) = this else { return Ok(Value::Empty) };
         let ci = channel_arg(a, 0);
-        let target = if world(vm).anim.actors.contains_key(&o) { Some(o) } else { get(vm, o, "Pawn").as_obj() };
+        // A controller waits on its pawn's channel (the original's `AController::StartAnimPoll`), even when script calls made on the
+        // controller itself (`AnimBlendParams`) have given it channels of its own that never play anything.
+        let is_controller = vm.db.find("Controller").zip(vm.db.objects.get(o).class).is_some_and(|(k, c)| vm.is_child_of(c, k));
+        let own = if crate::envc::var_os("HP3_OLD_FINISHANIM").is_some() { true } else { !is_controller };
+        let target = if own && world(vm).anim.actors.contains_key(&o) { Some(o) } else { get(vm, o, "Pawn").as_obj() };
         let Some(t) = target else { return Ok(Value::Empty) };
+        if crate::envc::var("HP3_ANIM_TRACE").is_ok() {
+            let ch = world(vm).anim.actors.get(&t).and_then(|x| x.channels.get(ci)).map(|c| (c.playing, c.sequence, c.looping));
+            eprintln!("anim: FinishAnim by {o:?} on {t:?} channel {ci}: {ch:?}");
+        }
         let playing = match world(vm).anim.actors.get_mut(&t).and_then(|x| x.channels.get_mut(ci)) {
             Some(ch) if ch.playing && ch.sequence.is_some() => {
                 ch.looping = false;
