@@ -7,10 +7,12 @@
 use glam::Vec3;
 
 use super::flight::BroomState;
+use super::rng::Rng;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BludgerTuning {
     /// Launches are refused while Harry is closer than this to the Bludger home: too close to be a fair shot.
+    /// Must exceed `hit_radius`, or a launch can be an instant hit.
     pub launch_inner: f32,
     /// Launches happen only while Harry is within this distance of the Bludger home.
     pub launch_outer: f32,
@@ -56,29 +58,10 @@ pub enum BludgerEvent {
     Missed,
 }
 
-/// Plausible cap on Bludgers in flight at once.
+/// Hard cap: at most this many Bludgers are in flight at once (a launch waits until one is gone).
 const MAX_IN_FLIGHT: usize = 2;
 /// Longest dt a single step integrates; larger values are clamped.
 const MAX_DT: f32 = 1.0;
-
-/// splitmix64: tiny deterministic PRNG, so a seed fully determines the launch schedule.
-#[derive(Debug, Clone)]
-struct Rng(u64);
-
-impl Rng {
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    /// Uniform in [0, 1).
-    fn unit(&mut self) -> f32 {
-        (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32
-    }
-}
 
 #[derive(Debug, Clone, Copy)]
 struct Flying {
@@ -113,7 +96,7 @@ impl Bludgers {
     pub fn with_tuning(seed: u64, tuning: BludgerTuning) -> Bludgers {
         let mut b = Bludgers {
             tuning,
-            rng: Rng(seed),
+            rng: Rng::new(seed),
             home: Vec3::ZERO,
             flying: Vec::new(),
             countdown: 0.0,

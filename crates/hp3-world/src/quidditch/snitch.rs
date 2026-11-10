@@ -4,6 +4,7 @@ use glam::Vec3;
 
 use super::arena::ArenaBounds;
 use super::flight::BroomState;
+use super::rng::Rng;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SnitchTuning {
@@ -63,25 +64,6 @@ enum Phase {
     Done,
 }
 
-/// splitmix64: tiny deterministic PRNG, so a seed fully determines the path.
-#[derive(Debug, Clone)]
-struct Rng(u64);
-
-impl Rng {
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    /// Uniform in [0, 1).
-    fn unit(&mut self) -> f32 {
-        (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32
-    }
-}
-
 pub struct Snitch {
     tuning: SnitchTuning,
     rng: Rng,
@@ -105,7 +87,7 @@ impl Snitch {
         let hi = Vec3::new(arena.center.x + arena.half.x, arena.center.y + arena.half.y, hi_z);
         let mut s = Snitch {
             tuning,
-            rng: Rng(seed),
+            rng: Rng::new(seed),
             lo,
             hi,
             pos: Vec3::ZERO,
