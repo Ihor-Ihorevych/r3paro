@@ -23,6 +23,7 @@ pub mod memo;
 pub mod natives;
 pub mod particles;
 mod perception;
+pub mod quidditch;
 pub mod physics;
 pub mod save;
 pub mod shadows;
