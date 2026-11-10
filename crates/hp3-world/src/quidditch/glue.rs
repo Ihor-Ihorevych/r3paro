@@ -3,7 +3,8 @@
 //!
 //! This is the only Quidditch file that touches the VM; everything it drives (`flight`, `snitch`, `bludger`,
 //! `rules`, `arena`) is pure Rust, unit-tested on its own. The match state lives in `World::quidditch`, so it
-//! goes away with the level and a map that never starts a match pays nothing but one `is_none` check a frame.
+//! goes away with the level and a map that never starts a match pays nothing but one `take()` of a `None` a
+//! frame. `World::quidditch_gate` keeps `start` and `stop` honest when they are called from inside `tick`.
 //!
 //! Flight control, the camera and the input are Task 7; the HUD, sound and the hoop rings come later. What is
 //! here is the arena layout and start / stop / tick.
@@ -22,8 +23,19 @@ use super::snitch::Snitch;
 /// retail scripts with empty bodies, which is why the engine drives them.
 const HARRY_CLASS: &str = "HGame.HarryQuid";
 const SNITCH_CLASS: &str = "HGame.Snitch";
-/// What the stadium pieces are spawned as.
+/// What the stadium pieces and the broom are spawned as.
 const MESH_ACTOR_CLASS: &str = "Engine.StaticMeshActor";
+/// The broom Harry rides. Its group inside the package is not documented anywhere (unlike the `Quid_Stadium`
+/// meshes), so it is looked up by name; `find_static_mesh` logs the full path it resolved to. The plan called
+/// the mesh `QuidBroom_SM`, but no static mesh of that name exists in the retail package (only the string, in
+/// its name table): the mesh is `miscDetails.QuiddichBroom_SM`. Both spellings are tried, in that order.
+const BROOM_PACKAGE: &str = "HP3_InteriorAccents_SM";
+const BROOM_MESHES: [&str; 2] = ["QuidBroom_SM", "QuiddichBroom_SM"];
+/// Bones of the `HarryQuid` skeleton the broom may hang from, best first. The first one the mesh has wins;
+/// with none of them the broom is based on the pawn instead (it still rides along, just not off a bone).
+/// `body_broom` is the real one: the retail `HarryQuid` skeleton carries a bone for exactly this (its last,
+/// after the hand and finger bones). The rest are fallbacks in case another mesh is used for the rider.
+const BROOM_BONES: [&str; 5] = ["body_broom", "broom", "body_rhand", "body_lhand", "body_root"];
 
 /// A match in progress: the pure systems, the arena they play in, and the actors that show them.
 pub struct QuidditchMatch {
@@ -46,6 +58,54 @@ pub struct QuidditchMatch {
     restart_at: Option<u64>,
     /// Whether the end of the match has been reported.
     reported: bool,
+}
+
+/// A `start` or `stop` that was asked for while a tick was in progress.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Request {
+    Start(String),
+    Stop,
+}
+
+/// Keeps `start` and `stop` out of the window in which `tick` holds the match in a local and
+/// `World::quidditch` is therefore `None`. Called in that window, a `stop` would destroy nothing (the actors
+/// would leak and the match would never end) and a `start` would install a match the tick's put-back then
+/// overwrites, orphaning its actors. So a request made inside the window is recorded instead, and `tick`
+/// applies it once the match is back in the world.
+///
+/// One slot, last request of the tick wins: that is not a loss, because a `start` stops whatever is running
+/// anyway, and a `stop` after a `start` means the caller ended up wanting no match.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Gate {
+    ticking: bool,
+    pending: Option<Request>,
+}
+
+impl Gate {
+    /// Whether a tick is holding the match out of the world right now.
+    pub fn ticking(&self) -> bool {
+        self.ticking
+    }
+
+    /// Records `r` and answers whether it has to wait for the end of the tick.
+    pub fn defer(&mut self, r: Request) -> bool {
+        if !self.ticking {
+            return false;
+        }
+        self.pending = Some(r);
+        true
+    }
+
+    /// Opens the window.
+    pub fn begin(&mut self) {
+        self.ticking = true;
+    }
+
+    /// Closes the window and hands back the request to run now, if one was made.
+    pub fn end(&mut self) -> Option<Request> {
+        self.ticking = false;
+        self.pending.take()
+    }
 }
 
 fn v3(v: Vec3) -> Value {
@@ -87,6 +147,74 @@ fn spawn_piece(vm: &mut Vm<'_>, class: ObjId, p: &ArenaPiece) -> Option<ObjId> {
     Some(a)
 }
 
+/// The first of `names` that is a static mesh of `package`, whatever group it sits in, with the full path it
+/// was found at. `find_object_of` needs the whole `Package.Group.Name`, which is not known for the broom.
+fn find_static_mesh(vm: &mut Vm<'_>, package: &str, names: &[&str]) -> Option<(ObjId, String)> {
+    let pkg = vm.db.set.get(package).ok()?;
+    let meshes: Vec<(usize, String)> = (0..pkg.exports.len())
+        .filter(|&i| pkg.export_class_name(i).eq_ignore_ascii_case("StaticMesh"))
+        .map(|i| (i, pkg.ref_name(hp3_package::ObjRef::from_export(i)).to_string()))
+        .collect();
+    for want in names {
+        if let Some(&(i, _)) = meshes.iter().find(|(_, n)| n.eq_ignore_ascii_case(want)) {
+            let path = pkg.ref_path(hp3_package::ObjRef::from_export(i));
+            return Some((vm.db.obj_for(&pkg, i), path));
+        }
+    }
+    if crate::envc::var_os("HP3_QUID_DEBUG").is_some() {
+        let like: Vec<&String> = meshes.iter().map(|(_, n)| n).filter(|n| n.to_ascii_lowercase().contains("broom")).collect();
+        println!("quidditch: no {names:?} in {package}; its broom-like meshes are {like:?}");
+    }
+    None
+}
+
+/// Gives `harry` his broom: a static mesh actor hung off a bone of his skeleton, so it follows every pose the
+/// animation puts him in. Returns the broom actor, which the match owns like any other.
+fn attach_broom(vm: &mut Vm<'_>, harry: ObjId) -> Option<ObjId> {
+    let Some((mesh, path)) = find_static_mesh(vm, BROOM_PACKAGE, &BROOM_MESHES) else {
+        vm.log.push(format!("quidditch: no broom mesh {BROOM_MESHES:?} in {BROOM_PACKAGE}, Harry rides nothing"));
+        return None;
+    };
+    let class = crate::find_object(vm, MESH_ACTOR_CLASS)?;
+    let (at, facing) = (crate::rd_vec(vm, harry, "Location"), crate::rd_rot(vm, harry, "Rotation"));
+    let args = [Value::Object(Some(class)), Value::Object(Some(harry)), Value::Empty, v3(at), rot(facing)];
+    let broom = crate::natives::spawn(vm, None, &args).ok()?.as_obj()?;
+    crate::set(vm, broom, "StaticMesh", Value::Object(Some(mesh)));
+    // A static mesh actor is born `bStatic`, which would stop it following the pawn: the broom moves.
+    crate::set(vm, broom, "bStatic", Value::Bool(false));
+    crate::set(vm, broom, "bNoDelete", Value::Bool(false));
+    // The bones of Harry's skeletal mesh, to pick the one the broom hangs from.
+    let bones = crate::get(vm, harry, "Mesh")
+        .as_obj()
+        .and_then(|m| crate::anim::skeleton_of(vm, m))
+        .map(|s| s.skeleton.names.clone())
+        .unwrap_or_default();
+    let bone = BROOM_BONES.iter().find(|b| bones.iter().any(|n| n == *b)).copied();
+    match bone {
+        // Exactly what `Actor.AttachToBone` does: base, bone name, and the engine's attachment table, which
+        // puts the child on the bone every frame in `anim::update_attachments`.
+        Some(b) => {
+            let name = vm.db.names.intern(b);
+            crate::set(vm, broom, "Base", Value::Object(Some(harry)));
+            crate::set(vm, broom, "AttachmentBone", Value::Name(name));
+            crate::world(vm).ever_base.insert(harry);
+            crate::world(vm).anim.attachments.insert(broom, (harry, b.to_string()));
+            crate::anim::update_attachments(vm);
+            vm.log.push(format!("quidditch: broom {path} on bone {b}"));
+        }
+        // No bone of ours is in the skeleton: the broom is based on the pawn, so it still moves with him.
+        // The bone list is logged so the right name can be added to `BROOM_BONES`.
+        None => {
+            crate::natives::set_base(vm, broom, Some(harry), false);
+            vm.log.push(format!("quidditch: broom {path} based on the pawn, no bone of {BROOM_BONES:?} in its skeleton"));
+            if crate::envc::var_os("HP3_QUID_DEBUG").is_some() {
+                println!("quidditch: HarryQuid bones: {bones:?}");
+            }
+        }
+    }
+    Some(broom)
+}
+
 /// Spawns an actor of `path`'s class at `pos` facing `yaw`.
 fn spawn_class(vm: &mut Vm<'_>, path: &str, pos: Vec3, yaw: i32) -> Option<ObjId> {
     let class = crate::find_object(vm, path);
@@ -119,8 +247,13 @@ fn log_hoops(pieces: &[ArenaPiece]) {
 }
 
 /// Builds the arena in the loaded level and starts a match against `opponent`. Called again while a match is
-/// running, it stops that one first, so it is safe to re-enter.
+/// running, it stops that one first, so it is safe to re-enter. Called from inside `tick` (where the match is
+/// out of the world) it is recorded and run at the end of that tick instead.
 pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
+    if crate::world(vm).quidditch_gate.defer(Request::Start(opponent.to_string())) {
+        vm.log.push(format!("quidditch: start against {opponent} asked for during the tick, deferred to its end"));
+        return Ok(());
+    }
     let re_entry = crate::world(vm).quidditch.is_some();
     if re_entry {
         stop(vm);
@@ -144,9 +277,14 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
     // steers it yet: Task 7 gives it the flight model and the camera, and possesses it.
     let start_at = arena::harry_start(&bounds);
     let harry = spawn_class(vm, HARRY_CLASS, start_at, 16384);
+    let mut broom = None;
     if let Some(h) = harry {
         crate::set(vm, h, "Physics", Value::Byte(crate::physics::PHYS_FLYING));
         actors.push(h);
+        broom = attach_broom(vm, h);
+        if let Some(b) = broom {
+            actors.push(b);
+        }
     }
     // The Snitch actor is only a marker the pure snitch drives; `tick` writes its `Location` every frame.
     let snitch = Snitch::new(seed, &bounds);
@@ -175,14 +313,16 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
         restart_at: (!re_entry).then(|| crate::envc::var("HP3_MATCH_RESTART").ok().and_then(|v| v.parse().ok()).filter(|&n| n > 0)).flatten(),
         reported: false,
     };
+    let yes_no = |o: Option<ObjId>| if o.is_some() { "yes" } else { "MISSING" };
     let line = format!(
-        "quidditch: match against {} started, phase {:?}, {} actors spawned ({} stadium pieces, Harry {}, Snitch {})",
+        "quidditch: match against {} started, phase {:?}, {} actors spawned ({} stadium pieces, Harry {}, broom {}, Snitch {})",
         m.opponent,
         m.rules.phase(),
         m.actors.len(),
         pieces.len(),
-        if m.harry.is_some() { "yes" } else { "MISSING" },
-        if m.snitch_actor.is_some() { "yes" } else { "MISSING" },
+        yes_no(m.harry),
+        yes_no(broom),
+        yes_no(m.snitch_actor),
     );
     println!("{line}");
     vm.log.push(line);
@@ -191,11 +331,16 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
 }
 
 /// Ends the match: every actor `start` made is destroyed and the state cleared. Does nothing when no match
-/// is running.
+/// is running. Called from inside `tick` it is recorded and run at the end of that tick instead.
 pub fn stop(vm: &mut Vm<'_>) {
+    if crate::world(vm).quidditch_gate.defer(Request::Stop) {
+        vm.log.push("quidditch: stop asked for during the tick, deferred to its end".into());
+        return;
+    }
     let Some(m) = crate::world(vm).quidditch.take() else { return };
     let mut gone = 0;
-    for a in &m.actors {
+    // Backwards, so a child goes before what it rides on (the broom before Harry).
+    for a in m.actors.iter().rev() {
         // Scenery is born `bStatic`, which `destroy_actor` refuses to remove: clear the flag first.
         crate::set(vm, *a, "bStatic", Value::Bool(false));
         crate::set(vm, *a, "bNoDelete", Value::Bool(false));
@@ -217,18 +362,19 @@ pub fn stop(vm: &mut Vm<'_>) {
 
 /// One frame of the match. A no-op while none is running, which is every level but a Quidditch one.
 pub fn tick(vm: &mut Vm<'_>, dt: f32) {
-    if crate::world(vm).quidditch.is_none() {
-        return;
-    }
-    // Taken out and put back: the pure systems are stepped while the world is borrowed elsewhere.
+    // Taken out and put back: the pure systems are stepped while the world is borrowed elsewhere. The gate is
+    // open for exactly that window, so a `start` or `stop` made inside it waits for the put-back.
     let Some(mut m) = crate::world(vm).quidditch.take() else { return };
+    crate::world(vm).quidditch_gate.begin();
     m.frames += 1;
     if m.restart_at == Some(m.frames) {
-        // Debug only: `start` stops the running match first, so this exercises the whole round trip.
+        // Debug only, and deliberately through the public entry points while the match is out of the world:
+        // this is exactly the call that used to destroy nothing and leak every actor. Both must be deferred,
+        // and the later one must win (the `start` stops the running match itself).
         let opponent = m.opponent.clone();
-        crate::world(vm).quidditch = Some(m);
+        stop(vm);
         let _ = start(vm, &opponent);
-        return;
+        debug_assert!(crate::world(vm).quidditch.is_none(), "the match must still be held by this tick");
     }
     // Until Task 7 steers the broom, Harry's flight state follows his pawn.
     if let Some(h) = m.harry.filter(|&h| !vm.db.objects.get(h).deleted) {
@@ -276,6 +422,14 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         vm.log.push(line);
     }
     crate::world(vm).quidditch = Some(m);
+    // The match is back in the world, so whatever was asked for meanwhile can run for real.
+    match crate::world(vm).quidditch_gate.end() {
+        Some(Request::Start(opponent)) => {
+            let _ = start(vm, &opponent);
+        }
+        Some(Request::Stop) => stop(vm),
+        None => {}
+    }
 }
 
 /// `HP3_MATCH=<opponent>` (debugging): starts a match as soon as a level has finished loading. Called by
@@ -291,4 +445,62 @@ pub fn start_from_env(vm: &mut Vm<'_>) -> Result<(), VmError> {
         return Ok(());
     }
     start(vm, opponent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Outside a tick nothing is deferred and nothing is left behind.
+    #[test]
+    fn gate_lets_requests_straight_through_outside_a_tick() {
+        let mut g = Gate::default();
+        assert!(!g.ticking());
+        assert!(!g.defer(Request::Stop));
+        assert!(!g.defer(Request::Start("Slytherin".into())));
+        assert_eq!(g, Gate::default());
+    }
+
+    /// Inside the tick window a request waits, and the end of the tick hands it back exactly once.
+    #[test]
+    fn gate_defers_a_request_and_hands_it_back_at_the_end_of_the_tick() {
+        let mut g = Gate::default();
+        g.begin();
+        assert!(g.ticking());
+        assert!(g.defer(Request::Stop));
+        assert_eq!(g.end(), Some(Request::Stop));
+        assert!(!g.ticking());
+        assert_eq!(g.end(), None);
+        assert_eq!(g, Gate::default());
+    }
+
+    /// Several requests in one tick: the last one is what the caller ended up wanting, and it is the only one
+    /// applied. A `start` stops whatever runs anyway, so nothing is lost either way round.
+    #[test]
+    fn gate_keeps_the_last_request_of_a_tick() {
+        let mut g = Gate::default();
+        g.begin();
+        assert!(g.defer(Request::Start("Ravenclaw".into())));
+        assert!(g.defer(Request::Stop));
+        assert!(g.defer(Request::Start("Slytherin".into())));
+        assert_eq!(g.end(), Some(Request::Start("Slytherin".into())));
+
+        let mut g = Gate::default();
+        g.begin();
+        assert!(g.defer(Request::Start("Slytherin".into())));
+        assert!(g.defer(Request::Stop));
+        assert_eq!(g.end(), Some(Request::Stop));
+    }
+
+    /// A tick nobody asked anything of leaves no request, and the window really closes.
+    #[test]
+    fn gate_is_empty_after_a_quiet_tick_and_reopens() {
+        let mut g = Gate::default();
+        g.begin();
+        assert_eq!(g.end(), None);
+        assert!(!g.defer(Request::Stop));
+        g.begin();
+        assert!(g.defer(Request::Stop));
+        assert_eq!(g.end(), Some(Request::Stop));
+    }
 }

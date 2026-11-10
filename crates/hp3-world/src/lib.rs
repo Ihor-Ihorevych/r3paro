@@ -148,6 +148,9 @@ pub struct World {
     /// The Quidditch match being played in this level, if any (`quidditch::glue`). None on every other level,
     /// and gone with the level itself.
     pub quidditch: Option<quidditch::glue::QuidditchMatch>,
+    /// Holds a `quidditch::glue::start` or `stop` asked for while the match is being ticked until the tick is
+    /// over (see `quidditch::glue::Gate`).
+    pub quidditch_gate: quidditch::glue::Gate,
 }
 
 /// The world stored in the VM. Panics if no level is loaded.
@@ -691,6 +694,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         tick_skipped: Default::default(),
         actor_slots: Default::default(),
         quidditch: None,
+        quidditch_gate: Default::default(),
         config,
     }));
     memprobe("world made");

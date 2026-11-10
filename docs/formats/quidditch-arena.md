@@ -19,6 +19,11 @@ space; world values below apply the placement of the retail map `HP3_Quidditch.u
 There is no `Quid_GoldHoop` mesh in any static mesh package (a scan of every `.usx` and the map for names containing
 `hoop` finds only `Quid_GoalPosts_SM`).
 
+Harry's broom is **not** in this package and is **not** called `QuidBroom_SM`: that string is in the name table of
+`StaticMeshes/HP3_InteriorAccents_SM.usx` but no static mesh carries it. The mesh is
+`HP3_InteriorAccents_SM.miscDetails.QuiddichBroom_SM`, and the retail `HarryQuid` skeleton has a bone named
+`body_broom` (its last bone, after the hand and finger bones) to hang it from.
+
 ## Assembled or loose
 
 Loose parts. The pitch is four copies of one quadrant mesh (`QUid_Pitch_SM`, which spans x -4283..3, y 0..6630) around
