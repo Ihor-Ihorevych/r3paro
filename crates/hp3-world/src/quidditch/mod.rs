@@ -4,4 +4,5 @@ pub mod arena;
 pub mod bludger;
 pub mod flight;
 mod rng;
+pub mod rules;
 pub mod snitch;
