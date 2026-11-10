@@ -145,6 +145,9 @@ pub struct World {
     pub memo_projectors: memo::Memo,
     /// Per-actor answer of the particle tick (1: not an emitter).
     pub memo_emitters: memo::Memo,
+    /// The Quidditch match being played in this level, if any (`quidditch::glue`). None on every other level,
+    /// and gone with the level itself.
+    pub quidditch: Option<quidditch::glue::QuidditchMatch>,
 }
 
 /// The world stored in the VM. Panics if no level is loaded.
@@ -687,6 +690,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         memo_emitters: Default::default(),
         tick_skipped: Default::default(),
         actor_slots: Default::default(),
+        quidditch: None,
         config,
     }));
     memprobe("world made");
@@ -869,6 +873,9 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
             }
         }
     }
+    // `HP3_MATCH=<opponent>` (debugging): the level is loaded and the player is logged in, so a Quidditch
+    // match can build its arena and spawn into it. Every other level leaves the match state empty.
+    quidditch::glue::start_from_env(vm)?;
     Ok(())
 }
 
@@ -1269,6 +1276,10 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     }
     world(vm).memo_tick = memo;
     mark(vm, "actors");
+    // The Quidditch match, after the actors have moved: it reads Harry's pawn and puts the snitch where its
+    // own simulation has it. A no-op on every level where no match is running.
+    quidditch::glue::tick(vm, dt);
+    mark(vm, "quidditch");
     touch::frame_pass(vm);
     mark(vm, "touching");
     anim::update_movement(vm, dt);
