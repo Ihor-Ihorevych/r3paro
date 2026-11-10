@@ -8,6 +8,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use hp3_world::casttest;
 mod itemcheck;
 mod langcheck;
+mod quidarena;
 mod mounttest;
 mod saveload;
 
@@ -152,6 +153,7 @@ fn main() -> ExitCode {
         Some("call") if args.len() >= 4 => call(Path::new(&args[1]), &args[2], &args[3], &args[4..]),
         Some("items") if args.len() >= 4 => itemcheck::run(Path::new(&args[1]), &args[2], &args[3]),
         Some("lang") if args.len() >= 3 => langcheck::check(Path::new(&args[1]), &args[2], args.get(3).map(Path::new)),
+        Some("quid-arena") if args.len() >= 2 => quidarena::run(&args[1..]).map(|()| ExitCode::SUCCESS).map_err(Into::into),
         _ => {
             eprintln!("usage: hp3-run classes <HP3 folder> [class]");
             return ExitCode::from(2);
