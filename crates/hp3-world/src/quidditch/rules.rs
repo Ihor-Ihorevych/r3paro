@@ -83,7 +83,8 @@ impl Rules {
     ///   the snitch emits `OutOfTries` in the same step, which ends it).
     /// - `Caught`: +150 to home, then the match ends. The outcome is decided by the TOTAL
     ///   score after the catch: home > away is Won; a tie or less is Lost.
-    /// - `OutOfTries`: ends the match as Lost.
+    /// - `OutOfTries`: the opposing Seeker has the snitch: +150 to away, then the match ends, decided by
+    ///   the total score in the same way.
     /// - `ClosingIn` / `Lost`: no rules effect.
     pub fn on_snitch(&mut self, e: SnitchEvent) {
         if !self.live() {
@@ -98,7 +99,14 @@ impl Rules {
                     if self.score.home > self.score.away { Outcome::Won } else { Outcome::Lost };
                 self.phase = MatchPhase::Ended(outcome);
             }
-            SnitchEvent::OutOfTries => self.phase = MatchPhase::Ended(Outcome::Lost),
+            SnitchEvent::OutOfTries => {
+                // The Snitch Harry cannot catch any more goes to the other Seeker, and so do its points: the
+                // result is then the score's, like any other (`Lost 30 - 20` would be no result at all).
+                self.score.away += Score::SNITCH;
+                let outcome =
+                    if self.score.home > self.score.away { Outcome::Won } else { Outcome::Lost };
+                self.phase = MatchPhase::Ended(outcome);
+            }
             SnitchEvent::ClosingIn | SnitchEvent::Lost => {}
         }
     }
@@ -152,7 +160,29 @@ mod tests {
         r.on_snitch(SnitchEvent::Missed);
         r.on_snitch(SnitchEvent::OutOfTries);
         assert_eq!(r.phase(), MatchPhase::Ended(Outcome::Lost));
-        assert_eq!(r.score(), Score { home: 0, away: 0 });
+        // The Snitch Harry could not catch is the other Seeker's: their 150.
+        assert_eq!(r.score(), Score { home: 0, away: 150 });
+    }
+
+    /// The result always agrees with the score: a side that is ahead on goals when the Snitch gets away is
+    /// not told it lost 30 - 20, it lost by the Snitch -- and if it was far enough ahead, it won.
+    #[test]
+    fn out_of_tries_is_decided_by_the_total_score_too() {
+        let mut r = seeking();
+        for _ in 0..3 {
+            r.add_goal(true);
+        }
+        r.add_goal(false);
+        r.on_snitch(SnitchEvent::OutOfTries);
+        assert_eq!(r.score(), Score { home: 30, away: 160 });
+        assert_eq!(r.phase(), MatchPhase::Ended(Outcome::Lost));
+        let mut r = seeking();
+        for _ in 0..16 {
+            r.add_goal(true);
+        }
+        r.on_snitch(SnitchEvent::OutOfTries);
+        assert_eq!(r.score(), Score { home: 160, away: 150 });
+        assert_eq!(r.phase(), MatchPhase::Ended(Outcome::Won));
     }
 
     #[test]

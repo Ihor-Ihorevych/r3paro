@@ -170,7 +170,9 @@ mod tests {
         let b = bounds();
         let (lo, hi) = footprint();
         let pieces = arena_spawn_list();
-        assert!(pieces.len() >= 13, "expected the retail pitch, goals and stairs: {}", pieces.len());
+        assert_eq!(pieces.len(), 13, "the retail pitch (4), goals (2) and stairs (7)");
+        assert_eq!(pieces.iter().filter(|p| p.mesh == PITCH).count(), 4);
+        assert_eq!(pieces.iter().filter(|p| p.mesh == STAIRS).count(), 7);
         for p in &pieces {
             assert!(p.pos.is_finite(), "{}: {:?}", p.mesh, p.pos);
             // Everything belongs to the stadium: inside the footprint the pitch quadrants cover.
@@ -178,6 +180,9 @@ mod tests {
             assert!(p.pos.y >= lo.y && p.pos.y <= hi.y, "{} y {} outside the stadium", p.mesh, p.pos.y);
             // The stairs are stand pieces and may sit outside the playfield; everything else is inside it.
             if p.mesh == STAIRS {
+                // Stand pieces all the same: above the turf, below the stand tops, and not on the pitch.
+                assert!(p.pos.z > GROUND_Z && p.pos.z < CEILING_Z, "{} z {} is not in the stands", p.mesh, p.pos.z);
+                assert!((p.pos.x - b.center.x).abs() > 1500.0 || p.pos.y.abs() > GOAL_Y, "stairs at {:?} stand on the pitch", p.pos);
                 continue;
             }
             assert!((p.pos.x - b.center.x).abs() <= b.half.x, "{} x {} outside the playfield", p.mesh, p.pos.x);

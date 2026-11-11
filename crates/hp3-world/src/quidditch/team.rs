@@ -49,6 +49,21 @@ struct Borrowed {
     rotation: [i32; 3],
     physics: u8,
     hidden: bool,
+    collide_world: bool,
+    ignore_out_of_world: bool,
+}
+
+/// What `actor` is now, to put back when the match ends.
+fn borrow(vm: &mut Vm<'_>, actor: ObjId) -> Borrowed {
+    Borrowed {
+        actor,
+        location: crate::rd_vec(vm, actor, "Location"),
+        rotation: crate::rd_rot(vm, actor, "Rotation"),
+        physics: crate::get(vm, actor, "Physics").as_byte(),
+        hidden: crate::get(vm, actor, "bHidden").as_bool(),
+        collide_world: crate::get(vm, actor, "bCollideWorld").as_bool(),
+        ignore_out_of_world: crate::get(vm, actor, "bIgnoreOutOfWorld").as_bool(),
+    }
 }
 
 /// Both teams: the pure play and the actors that show it.
@@ -171,13 +186,8 @@ pub fn start(vm: &mut Vm<'_>, m: &mut QuidditchMatch) {
         let pool = &mut pools[usize::from(!a.team.is_home())];
         let pawn = match pool.pop() {
             Some(p) => {
-                m.teams.borrowed.push(Borrowed {
-                    actor: p,
-                    location: crate::rd_vec(vm, p, "Location"),
-                    rotation: crate::rd_rot(vm, p, "Rotation"),
-                    physics: crate::get(vm, p, "Physics").as_byte(),
-                    hidden: crate::get(vm, p, "bHidden").as_bool(),
-                });
+                let was = borrow(vm, p);
+                m.teams.borrowed.push(was);
                 borrowed += 1;
                 Some(p)
             }
@@ -203,13 +213,8 @@ pub fn start(vm: &mut Vm<'_>, m: &mut QuidditchMatch) {
     // Whoever is left over on the turf is put out of the way for the match and set back by `stop`.
     let mut benched = 0;
     for p in pools.into_iter().flatten() {
-        m.teams.borrowed.push(Borrowed {
-            actor: p,
-            location: crate::rd_vec(vm, p, "Location"),
-            rotation: crate::rd_rot(vm, p, "Rotation"),
-            physics: crate::get(vm, p, "Physics").as_byte(),
-            hidden: crate::get(vm, p, "bHidden").as_bool(),
-        });
+        let was = borrow(vm, p);
+        m.teams.borrowed.push(was);
         crate::set(vm, p, "bHidden", Value::Bool(true));
         benched += 1;
     }
@@ -300,8 +305,8 @@ pub fn stop(vm: &mut Vm<'_>, m: &QuidditchMatch) {
         crate::set(vm, b.actor, "Velocity", v3(Vec3::ZERO));
         crate::set(vm, b.actor, "Physics", Value::Byte(b.physics));
         crate::set(vm, b.actor, "bHidden", Value::Bool(b.hidden));
-        crate::set(vm, b.actor, "bCollideWorld", Value::Bool(true));
-        crate::set(vm, b.actor, "bIgnoreOutOfWorld", Value::Bool(false));
+        crate::set(vm, b.actor, "bCollideWorld", Value::Bool(b.collide_world));
+        crate::set(vm, b.actor, "bIgnoreOutOfWorld", Value::Bool(b.ignore_out_of_world));
         back += 1;
     }
     if back > 0 {

@@ -52,7 +52,7 @@ pub fn line(id: CommentId) -> &'static str {
         CommentId::Caught => "HE'S GOT THE SNITCH! Potter has caught the Snitch!",
         CommentId::Missed => "Ooh, so close. Through his fingers!",
         CommentId::MissedAgain => "Missed it again! The crowd groans.",
-        CommentId::OutOfTries => "That's it, the Snitch is gone for good.",
+        CommentId::OutOfTries => "That's it -- their Seeker has the Snitch.",
         CommentId::BludgerOut => "A Bludger is loose and it's looking for Potter.",
         CommentId::BludgerIncoming => "Watch out, Harry -- Bludger on your tail!",
         CommentId::BludgerHit => "OOF! That Bludger caught him square.",

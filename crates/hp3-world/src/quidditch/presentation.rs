@@ -379,7 +379,6 @@ fn place_bludgers(vm: &mut Vm<'_>, m: &mut QuidditchMatch) {
             None => break,
         }
     }
-    let loop_sound = crate::find_object_of(vm, SND_BLUDGER_LOOP, Some("Sound"));
     for (i, a) in m.show.bludgers.clone().into_iter().enumerate() {
         if vm.db.objects.get(a).deleted {
             continue;
@@ -394,6 +393,8 @@ fn place_bludgers(vm: &mut Vm<'_>, m: &mut QuidditchMatch) {
                 if super::lod::use_proxy((p - m.cam.pos).length(), &m.budget) {
                     crate::set(vm, a, "AmbientSound", Value::Object(None));
                 } else if crate::get(vm, a, "AmbientSound").as_obj().is_none() {
+                    // Looked up only when a ball needs it, not every frame of the match.
+                    let loop_sound = crate::find_object_of(vm, SND_BLUDGER_LOOP, Some("Sound"));
                     ambient(vm, a, loop_sound, 180.0, 1.0, 4000.0);
                 }
             }

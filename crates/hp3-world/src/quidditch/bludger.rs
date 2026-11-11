@@ -180,6 +180,24 @@ impl Bludgers {
         true
     }
 
+    /// Takes every Bludger that has left `arena` (or is nowhere at all) out of the air, one `Missed` each: a
+    /// ball outside the stadium threatens nobody and nothing can show it.
+    pub fn expire_outside(&mut self, arena: &super::arena::ArenaBounds) -> Vec<BludgerEvent> {
+        let before = self.flying.len();
+        self.flying.retain(|f| f.pos.is_finite() && super::arena::clamp_into(arena, f.pos) == f.pos);
+        vec![BludgerEvent::Missed; before - self.flying.len()]
+    }
+
+    /// One hit that no ball delivered (`HP3_QUID_BUMP`, debugging).
+    pub fn bump(&mut self) {
+        self.bumps = self.bumps.saturating_add(1);
+    }
+
+    /// Harry has his broom back: the count of hits starts again from nothing.
+    pub fn recover(&mut self) {
+        self.bumps = 0;
+    }
+
     pub fn bumps(&self) -> u32 {
         self.bumps
     }
@@ -189,7 +207,7 @@ impl Bludgers {
         self.tuning.bumps_to_lose_control
     }
 
-    /// True once `bumps >= bumps_to_lose_control`; stays true (construct a new `Bludgers` to reset).
+    /// True once `bumps >= bumps_to_lose_control`; stays true until `recover`.
     pub fn control_lost(&self) -> bool {
         self.bumps >= self.tuning.bumps_to_lose_control
     }
@@ -428,5 +446,42 @@ mod tests {
             b.step(&on, 0.05);
         }
         assert!(b.positions().iter().all(|p| p.is_finite()));
+    }
+
+    /// A Bludger that flies out of the stadium is gone, as a miss; one still inside flies on.
+    #[test]
+    fn a_bludger_that_leaves_the_arena_expires_as_a_miss() {
+        let arena = super::super::arena::bounds();
+        let mut t = tuning();
+        t.launch_min = 0.0;
+        t.launch_max = 0.0;
+        t.life = 1000.0;
+        let mut b = Bludgers::with_tuning(4, t);
+        b.set_home(arena.center);
+        // Harry is in range to be shot at, the ball misses him and flies on towards the +x wall.
+        let harry = harry_at(arena.center + Vec3::new(1500.0, 0.0, 0.0));
+        assert!(b.step(&harry, 0.1).contains(&BludgerEvent::Launched));
+        let away = harry_at(arena.center + Vec3::new(0.0, 0.0, 9000.0));
+        b.step(&away, 0.5);
+        assert!(b.expire_outside(&arena).is_empty(), "it is still over the pitch");
+        assert_eq!(b.positions().len(), 1);
+        for _ in 0..20 {
+            b.step(&away, 0.5);
+        }
+        assert!((b.positions()[0].x - arena.center.x).abs() > arena.half.x, "the test never flew it out");
+        assert_eq!(b.expire_outside(&arena), vec![BludgerEvent::Missed]);
+        assert!(b.positions().is_empty());
+        assert_eq!(b.bumps(), 0);
+    }
+
+    /// Control comes back: once the spiral has been flown the count of hits starts again.
+    #[test]
+    fn recover_gives_control_back() {
+        let mut b = Bludgers::with_tuning(1, tuning());
+        b.bumps = 2;
+        assert!(b.control_lost());
+        b.recover();
+        assert!(!b.control_lost());
+        assert_eq!(b.bumps(), 0);
     }
 }

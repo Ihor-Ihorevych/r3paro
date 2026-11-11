@@ -18,7 +18,7 @@ use super::arena::{self, ArenaBounds, ArenaPiece};
 use super::ball::{self, Balls};
 use super::bludger::Bludgers;
 use super::camera::{self, CamState};
-use super::flight::{self, BroomState, BroomTuning};
+use super::flight::{self, BroomInput, BroomState, BroomTuning};
 use super::input::{desktop_input, KeyState};
 use super::presentation::{self, Presentation};
 use super::rules::{MatchEvent, MatchPhase, Rules};
@@ -53,6 +53,17 @@ const BOUNDARY_WEIGHT: f32 = 0.8;
 /// `reachloop`, `lookdown`, `fall`, `falllook` and `stand`; `hover` is the one that sits on a broom, and the
 /// rest are fallbacks in case another mesh is used for the rider. A set with none of them plays nothing.
 const FLY_ANIMS: [&str; 5] = ["Hover", "QuidFly", "Fly", "Idle", "Stand"];
+/// How long the broom spirals out of the player's hands once the Bludgers have hit him often enough
+/// (`BludgerTuning::bumps_to_lose_control`), in seconds. A placeholder, tuned by feel like the rest.
+const SPIN_TIME: f32 = 2.0;
+
+/// Whether Harry reaches for the Snitch by himself while the catch window is open. The phone has no catch
+/// button (the overlay's broom layout is a steering stick and a boost button, `apps/hp3/src/broom.rs`), so
+/// there the reach is automatic and the catch is flying into range in time; `HP3_QUID_AUTOCATCH` turns the
+/// same thing on anywhere, to try it on the desktop.
+fn auto_catch() -> bool {
+    cfg!(target_os = "android") || crate::envc::var_os("HP3_QUID_AUTOCATCH").is_some()
+}
 
 /// A match in progress: the pure systems, the arena they play in, and the actors that show them.
 pub struct QuidditchMatch {
@@ -105,6 +116,8 @@ pub struct QuidditchMatch {
     restart_at: Option<u64>,
     /// Whether the end of the match has been reported.
     reported: bool,
+    /// Seconds left of the spiral the Bludgers knocked the broom into (`SPIN_TIME`); 0 while he has control.
+    spin: f32,
     /// Whether the match was started from the front end (`menu::request`) rather than by hand
     /// (`HP3_MATCH=<opponent>`). Only such a match writes its result into the league and takes the player back
     /// to the menu when it is over; a debug match is left running, as it always was.
@@ -193,6 +206,11 @@ thread_local! {
     /// A seed the headless smoke driver (`hp3-run quid-smoke`) picks per match; the environment is read once per
     /// thread, so it cannot vary the seed between matches. Never set by the game.
     static SEED_OVERRIDE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+thread_local! {
+    /// Whether `HP3_MATCH` has already started its match in this run (`start_from_env`).
+    static ENV_MATCH_DONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Pins (or, with `None`, releases) the seed of the next matches started on this thread. Debug driver only.
@@ -557,6 +575,7 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
         // The restart is a one-shot: the match it starts does not restart itself again.
         restart_at: (!re_entry).then(|| crate::envc::var("HP3_MATCH_RESTART").ok().and_then(|v| v.parse().ok()).filter(|&n| n > 0)).flatten(),
         reported: false,
+        spin: 0.0,
         // Set by `start_from_env` for a match the front end asked for; a `start` from anywhere else is a
         // debug match and changes no league.
         from_menu: false,
@@ -608,7 +627,10 @@ pub fn stop(vm: &mut Vm<'_>) {
         // Scenery is born `bStatic`, which `destroy_actor` refuses to remove: clear the flag first.
         crate::set(vm, *a, "bStatic", Value::Bool(false));
         crate::set(vm, *a, "bNoDelete", Value::Bool(false));
-        if crate::destroy_actor(vm, *a) {
+        // `destroy_actor` also says yes to an actor that was already gone (a level script got there first):
+        // only the ones this stop removed are counted.
+        let was_there = !vm.db.objects.get(*a).deleted;
+        if crate::destroy_actor(vm, *a) && was_there {
             gone += 1;
         }
     }
@@ -631,6 +653,22 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     // open for exactly that window, so a `start` or `stop` made inside it waits for the put-back.
     let Some(mut m) = crate::world(vm).quidditch.take() else { return };
     crate::world(vm).quidditch_gate.begin();
+    // The frame itself is a function of its own, so nothing in it (an early return today or one added
+    // tomorrow) can skip the put-back and the closing of the gate below.
+    tick_match(vm, &mut m, dt);
+    crate::world(vm).quidditch = Some(m);
+    // The match is back in the world, so whatever was asked for meanwhile can run for real.
+    match crate::world(vm).quidditch_gate.end() {
+        Some(Request::Start(opponent)) => {
+            let _ = start(vm, &opponent);
+        }
+        Some(Request::Stop) => stop(vm),
+        None => {}
+    }
+}
+
+/// The frame `tick` runs between taking the match out of the world and putting it back.
+fn tick_match(vm: &mut Vm<'_>, m: &mut QuidditchMatch, dt: f32) {
     m.frames += 1;
     if m.restart_at == Some(m.frames) {
         // Debug only, and deliberately through the public entry points while the match is out of the world:
@@ -654,6 +692,12 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         Some(touched) => touched,
         None => desktop_input(&keys, (mouse.0 * mouse_speed, mouse.1 * mouse_speed), invert_pitch, &mut m.boost),
     };
+    // Knocked off course by the Bludgers, the broom flies itself for a moment: a braked, diving turn, whatever
+    // the player does (his boost toggle is left as he had it).
+    if m.spin > 0.0 {
+        m.spin -= if dt.is_finite() { dt.clamp(0.0, 0.25) } else { 0.0 };
+        i = BroomInput { yaw: 1.0, pitch: -0.12, brake: true, ..BroomInput::default() };
+    }
     let soft = inset(&m.arena, SOFT_MARGIN);
     // The soft boundary steers the rider's *look* (which is what the broom chases now), not the broom's own
     // heading: a correction measured against the heading would keep being undone by the look the player left
@@ -678,39 +722,61 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     // Everything that happened this frame, for the commentary and the sounds.
     let mut events: Vec<MatchEvent> = Vec::new();
     if !ended && m.rules.phase() != MatchPhase::Intro {
-        // The catch key (`Space`/`Enter`), or every frame under `HP3_QUID_EASY`.
-        let wants_catch = m.easy || keys.catch;
+        // The catch key (`Space`/`Enter`), or every frame under `HP3_QUID_EASY` and where there is no catch key
+        // to hold (`auto_catch`).
+        let wants_catch = m.easy || keys.catch || auto_catch();
         for e in m.snitch.step(&m.broom, wants_catch, dt) {
             m.rules.on_snitch(e);
             events.push(MatchEvent::Snitch(e));
         }
-        let hits = m.bludgers.step(&m.broom, dt);
+        let mut hits = m.bludgers.step(&m.broom, dt);
+        // A Bludger that has left the stadium is gone (a miss): its ball would otherwise hang on the wall
+        // where `clamp_into` holds it while the real one flies on outside.
+        hits.extend(m.bludgers.expire_outside(&m.arena));
+        // `HP3_QUID_BUMP=<tick>` (debugging, off by default): from that tick on Harry takes a hit a frame until
+        // the Bludgers have his broom, to see the spiral without waiting for three balls to find him.
+        if crate::envc::var("HP3_QUID_BUMP").ok().and_then(|v| v.trim().parse::<u64>().ok()).is_some_and(|t| m.frames >= t && m.frames < t + m.bludgers.bumps_to_lose() as u64) {
+            m.bludgers.bump();
+        }
         let lost = m.bludgers.control_lost();
         for e in hits {
             m.rules.on_bludger(e, lost);
             events.push(MatchEvent::Bludger(e));
         }
+        // Enough hits and the broom is out of his hands for a moment: it spirals (`SPIN_TIME`, flown at the
+        // top of the next frames), and the count starts again.
+        if lost {
+            m.spin = SPIN_TIME;
+            m.bludgers.recover();
+            let line = format!("quidditch: tick {}: the Bludgers knocked Harry off course, the broom spirals for {SPIN_TIME} s", m.frames);
+            println!("{line}");
+            vm.log.push(line);
+        }
+    }
+    // The catch (or the last miss) ends the match there and then: no goal is scored, logged or commented on
+    // in the frame the Snitch was caught.
+    if !ended && !matches!(m.rules.phase(), MatchPhase::Intro | MatchPhase::Ended(_)) {
         // Both teams: the Chasers take the Quaffle up the pitch and shoot, the Keepers guard their posts and
         // the Beaters swat the Bludgers. It runs before the ball, so a shot taken this frame flies this frame.
-        team::tick(vm, &mut m, dt);
+        team::tick(vm, m, dt);
         // The Quaffle flies, and a hoop it goes through the right way is ten points for that side. The side
         // that conceded takes the restart with it.
-        if let Some(home) = ball::tick(vm, &mut m, dt) {
+        if let Some(home) = ball::tick(vm, m, dt) {
             m.rules.add_goal(home);
-            team::restart(&mut m, home);
+            team::restart(m, home);
             events.push(MatchEvent::Goal { home });
         }
-        if let MatchPhase::Ended(outcome) = m.rules.phase() {
-            events.push(MatchEvent::Ended(outcome));
-        }
+    }
+    if !ended && let MatchPhase::Ended(outcome) = m.rules.phase() {
+        events.push(MatchEvent::Ended(outcome));
     }
     if let Some(s) = m.snitch_actor.filter(|&s| !vm.db.objects.get(s).deleted) {
         let at = arena::clamp_into(&m.arena, m.snitch.pos());
         crate::set(vm, s, "Location", v3(at));
     }
     // The Bludger balls, the sounds that follow the match and the commentary line this frame's events earn.
-    presentation::kickoff(vm, &mut m);
-    presentation::tick(vm, &mut m, dt, &events);
+    presentation::kickoff(vm, m);
+    presentation::tick(vm, m, dt, &events);
     // `HP3_QUID_DEBUG`: a sample of the match state now and then, to see that it is running at all, and where
     // the broom has got to (with the pawn's own `Location`, to see that it followed).
     // `HP3_QUID_DEBUG=<n>` samples every n ticks instead of every 120, which is how a headless run watches the
@@ -729,7 +795,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         );
         // What the HUD is showing at this moment (the headless run has no screen to look at), and where the
         // Bludgers in flight have got to (a headless run has no screen to see the balls on either).
-        println!("{}", presentation::hud_line(&super::hud::hud_items(&presentation::hud_input(&m))));
+        println!("{}", presentation::hud_line(&super::hud::hud_items(&presentation::hud_input(m))));
         let balls: Vec<String> = m.bludgers.positions().iter().map(|p| format!("({:.0}, {:.0}, {:.0})", p.x, p.y, p.z)).collect();
         println!("quidditch: bludgers in flight [{}]", balls.join(" "));
         let h = m.harry.filter(|&h| !vm.db.objects.get(h).deleted).map(|h| crate::rd_vec(vm, h, "Location")).unwrap_or(Vec3::ZERO);
@@ -764,7 +830,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         m.reported = true;
         let score = m.rules.score();
         // The same words the HUD shows, so the log and the screen agree.
-        let result = presentation::result_of(&m).unwrap_or_default();
+        let result = presentation::result_of(m).unwrap_or_default();
         let line = format!("quidditch: match against {} ended {outcome:?}, {}-{} -- {result}", m.opponent, score.home, score.away);
         println!("{line}");
         vm.log.push(line);
@@ -780,15 +846,6 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     if m.leave_at == Some(m.frames) {
         let map = super::menu::leave(vm);
         crate::world(vm).pending_travel = Some(map);
-    }
-    crate::world(vm).quidditch = Some(m);
-    // The match is back in the world, so whatever was asked for meanwhile can run for real.
-    match crate::world(vm).quidditch_gate.end() {
-        Some(Request::Start(opponent)) => {
-            let _ = start(vm, &opponent);
-        }
-        Some(Request::Stop) => stop(vm),
-        None => {}
     }
 }
 
@@ -846,11 +903,23 @@ pub fn start_from_env(vm: &mut Vm<'_>) -> Result<(), VmError> {
     if opponent.is_empty() || opponent.eq_ignore_ascii_case("none") {
         return Ok(());
     }
+    // Once a run: the variable starts a match on the level the run opens with, not again on every level the
+    // player travels to afterwards (leaving the match would otherwise start another one on the front end).
+    if ENV_MATCH_DONE.with(|c| c.replace(true)) {
+        return Ok(());
+    }
+    // A house the league knows, in its own spelling (`sly` is Slytherin); anything else is not played.
+    let Some(house) = super::league::Opponent::parse(opponent) else {
+        let line = format!("quidditch: HP3_MATCH={opponent} is no house (Slytherin, Ravenclaw, Hufflepuff), no match started");
+        println!("{line}");
+        vm.log.push(line);
+        return Ok(());
+    };
     if crate::world(vm).player.is_none() {
         vm.log.push("quidditch: HP3_MATCH set but the level has no player, no match started".into());
         return Ok(());
     }
-    start(vm, opponent)
+    start(vm, house.name())
 }
 
 #[cfg(test)]

@@ -12,6 +12,11 @@
 /// The most team players a match ever steers itself. Nothing steers any yet (Task 13), so this is the cap the
 /// budget is measured against and the number it starts at.
 pub const AI_CAP: usize = 14;
+/// The fewest players slow frames can leave steered: the six Chasers and the two Keepers, who are the ones
+/// `ai::active_agents` keeps first. Below it nobody plays the Quaffle and the match stands still -- and the
+/// team AI costs microseconds a frame, so there is nothing to win down there. A device that never reaches
+/// 60 fps would otherwise sit at a budget of none for the whole match.
+pub const MIN_ACTIVE_AI: usize = 8;
 /// A frame of a 60 fps game, in milliseconds. Over this the budget drops.
 pub const FRAME_MS: f32 = 16.6;
 /// Frames inside the budget before the governor gives one player back.
@@ -51,7 +56,10 @@ pub fn choose_budget(avg_frame_ms: f32, current: Budget) -> Budget {
     if !(avg_frame_ms > FRAME_MS) {
         return current;
     }
-    budget_for(current.max_active_ai.saturating_sub(DROP))
+    // Never below the players the Quaffle is played by, and never a rise: a budget already under that floor
+    // (pinned by hand) stays where it is.
+    let floor = MIN_ACTIVE_AI.min(current.max_active_ai);
+    budget_for(current.max_active_ai.saturating_sub(DROP).max(floor))
 }
 
 /// The budget that steers `max_active_ai` players, with the proxy distance that goes with it (never over the
@@ -121,12 +129,15 @@ mod tests {
         let tight = choose_budget(20.0, whole);
         assert!(tight.max_active_ai < whole.max_active_ai, "{tight:?}");
         assert!(tight.proxy_distance < whole.proxy_distance, "{tight:?}");
-        // However bad it gets the budget never goes below none, and the proxy distance stays positive.
+        // However bad it gets the budget never goes below the players the Quaffle is played by (a phone that
+        // never reaches 60 fps would otherwise have no match at all), and the proxy distance stays positive.
         let mut b = whole;
         for _ in 0..100 {
             b = choose_budget(100.0, b);
         }
-        assert_eq!(b.max_active_ai, 0);
+        assert_eq!(b.max_active_ai, MIN_ACTIVE_AI);
+        // A budget pinned lower by hand is not raised by a slow frame.
+        assert_eq!(choose_budget(100.0, budget_for(2)).max_active_ai, 2);
         assert!(b.proxy_distance > 0.0, "{b:?}");
         // And it never climbs over the cap, whatever it is handed.
         assert_eq!(budget_for(1000).max_active_ai, AI_CAP);
