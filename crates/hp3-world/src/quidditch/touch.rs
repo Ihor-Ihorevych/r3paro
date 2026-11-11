@@ -6,6 +6,10 @@
 //! toggles (one tap keeps it on, so the thumb is free to steer) and a brake that is held. The brake beats the
 //! boost, which is `flight::step`'s rule and not this module's.
 //!
+//! What the stick means is the broom's new steering model (`flight`): a **look rate**. A thumb held over
+//! swings where the rider is looking at `BroomTuning::yaw_rate` / `pitch_rate`, and the broom turns into that
+//! look -- the same thing the desktop's arrow keys do, so the phone needs no mouse.
+//!
 //! The boost toggle lives in the match (`QuidditchMatch::boost`), not here, so a pause that stops the tick
 //! cannot reset it.
 
@@ -30,11 +34,13 @@ pub fn touch_input(stick: Option<Vec2>, boost_tap: bool, brake_held: bool, boost
         if m <= DEADZONE { 0.0 } else { v.signum() * ((m.min(1.0) - DEADZONE) / (1.0 - DEADZONE)) }
     };
     BroomInput {
-        // The stick to the right turns right, which is where yaw falls, exactly as the mouse does on the desktop.
+        // The stick to the right turns right, which is where yaw falls, exactly as the mouse does on the
+        // desktop. These are the look-rate axes, not the broom's own turn rate (`flight::step`).
         yaw: -axis(knob.x),
         pitch: axis(knob.y),
         boost: *boost,
         brake: brake_held,
+        ..BroomInput::default()
     }
 }
 
@@ -100,7 +106,7 @@ mod tests {
         let mut boost = true;
         for _ in 0..10 {
             let i = touch_input(None, false, false, &mut boost);
-            assert_eq!(i, BroomInput { yaw: 0.0, pitch: 0.0, boost: true, brake: false });
+            assert_eq!(i, BroomInput { boost: true, ..BroomInput::default() });
         }
         // And with the boost off it stays off.
         let mut boost = false;
@@ -161,7 +167,7 @@ mod tests {
         let both = touch_input(None, true, true, &mut boost);
         assert_eq!((both.boost, both.brake), (true, true));
         let t = super::super::flight::BroomTuning::default();
-        let s = super::super::flight::BroomState { pos: glam::Vec3::ZERO, vel: glam::Vec3::X * t.speed, yaw: 0.0, pitch: 0.0 };
+        let s = super::super::flight::BroomState::new(glam::Vec3::ZERO, glam::Vec3::X * t.speed, 0.0, 0.0);
         assert!(super::super::flight::step(&s, &both, &t, 1.0 / 60.0).vel.length() < t.speed, "the brake must win over the boost");
     }
 }

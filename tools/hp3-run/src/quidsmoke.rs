@@ -23,7 +23,9 @@ pub struct SmokeResult {
     pub errors: usize,
 }
 
-/// The steering that points `broom` at `target`: yaw and pitch sticks proportional to the heading error.
+/// The steering that points `broom` at `target`: a mouse flick that puts the *look* direction
+/// (`want_yaw`/`want_pitch`, which is what the broom chases now) on the target, bounded per frame so the
+/// pilot shoves the mouse about no harder than a hand could. The broom's own rate caps do the rest.
 pub fn steer(broom: &BroomState, target: Vec3, boost: bool) -> BroomInput {
     let d = target - broom.pos;
     let flat = d.truncate().length();
@@ -31,10 +33,11 @@ pub fn steer(broom: &BroomState, target: Vec3, boost: bool) -> BroomInput {
     let want_pitch = d.z.atan2(flat.max(1e-3));
     let wrap = |a: f32| (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
     BroomInput {
-        yaw: (wrap(want_yaw - broom.yaw) * 3.0).clamp(-1.0, 1.0),
-        pitch: ((want_pitch - broom.pitch) * 3.0).clamp(-1.0, 1.0),
+        look_yaw: wrap(want_yaw - broom.want_yaw).clamp(-0.25, 0.25),
+        look_pitch: (want_pitch - broom.want_pitch).clamp(-0.25, 0.25),
         boost,
         brake: false,
+        ..BroomInput::default()
     }
 }
 
@@ -94,20 +97,23 @@ mod tests {
     use super::*;
 
     fn at(pos: Vec3, yaw: f32) -> BroomState {
-        BroomState { pos, vel: Vec3::ZERO, yaw, pitch: 0.0 }
+        BroomState::new(pos, Vec3::ZERO, yaw, 0.0)
     }
 
     #[test]
     fn steer_turns_toward_the_target_the_short_way() {
         let left = steer(&at(Vec3::ZERO, 0.0), Vec3::new(0.0, 1000.0, 0.0), false);
-        assert!(left.yaw > 0.5, "{left:?}");
+        assert!(left.look_yaw > 0.1, "{left:?}");
         let right = steer(&at(Vec3::ZERO, 0.0), Vec3::new(0.0, -1000.0, 0.0), false);
-        assert!(right.yaw < -0.5, "{right:?}");
+        assert!(right.look_yaw < -0.1, "{right:?}");
         // Across the +-pi seam: heading 3.0, target just past pi (a small left turn, not a long right one).
         let seam = steer(&at(Vec3::ZERO, 3.0), Vec3::new(-1000.0, -140.0, 0.0), false);
-        assert!(seam.yaw > 0.0, "{seam:?}");
+        assert!(seam.look_yaw > 0.0, "{seam:?}");
         let up = steer(&at(Vec3::ZERO, 0.0), Vec3::new(1000.0, 0.0, 800.0), false);
-        assert!(up.pitch > 0.0 && up.yaw.abs() < 1e-3, "{up:?}");
+        assert!(up.look_pitch > 0.0 && up.look_yaw.abs() < 1e-3, "{up:?}");
+        // The look is only ever nudged, never thrown: a target straight behind is a turn over many frames.
+        let behind = steer(&at(Vec3::ZERO, 0.0), Vec3::new(-1000.0, 10.0, 0.0), false);
+        assert!(behind.look_yaw <= 0.25 + 1e-6, "{behind:?}");
     }
 
     #[test]

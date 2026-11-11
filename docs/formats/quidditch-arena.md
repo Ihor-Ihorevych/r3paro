@@ -123,6 +123,49 @@ These are what `quidditch::arena` holds (`bounds()`, and the `pub const`s beside
   invented, so Task 6 leaves them out. Note that three of the seven stairs sit inside the playfield box in x and y:
   they are stand pieces at z 824.8, above the pitch, and `arena_spawn_list`'s test treats them as such.
 
+## Broom steering and the chase camera
+
+Since the broom rework the broom is flown the way AdamJD's HP1 "Movement mod" flies it (the behaviour is
+written up in `docs/formats/hp1-broom-movement-mod.md`, from which this was implemented clean-room). The
+retail scheme -- the stick *is* the turn rate, the camera follows the broom -- is gone.
+
+**Steering is free mouse-look.** `BroomState` carries a look direction (`want_yaw`, `want_pitch`) as well as
+the broom's own heading. The mouse's motion this frame is an angular delta that moves the look
+(`BroomInput::look_yaw` / `look_pitch`, radians, `input::MOUSE_GAIN` = 0.003 rad per pixel, **never scaled by
+`dt`** -- pixels are already per-frame; the mod's own `dt` factor makes its sensitivity depend on the frame
+rate and is deliberately not reproduced). The arrow keys and the phone's stick move the same look at a
+constant rate instead (`BroomTuning::yaw_rate` 2.0 rad/s, `pitch_rate` 1.5 rad/s), so keyboard-only and
+thumb-only flying still work. The look's pitch is clamped to `max_look_pitch` = 1.342 rad (76.9 deg, the mod's
+camera limit).
+
+**The broom then turns into the look**, closing `chase_tightness` = 8/s of the gap each frame (a 1/8 s time
+constant) and never faster than `yaw_rate_max` = 4.80 rad/s (274.7 deg/s) or `pitch_rate_max` = 2.30 rad/s
+(131.8 deg/s) -- the mod's effective `RotationRate`. Its own pitch is clamped to `max_pitch` = 1.4 rad as a
+backstop. A mouse flick of half a turn is therefore a turn the broom takes about a third of a second to fly,
+which is what traces the long arcs the mod is liked for. There is no pitch auto-levelling and no hard 60 deg
+limit on the steering input, and -- unlike the mod -- a turn never brakes: the brake is the brake button.
+
+**Speed is untouched**: cruise 600, boost 1200, brake 150, brake beats boost (the mod changes no speed either;
+our halved numbers are the playtest's).
+
+The soft boundary (`flight::boundary_turn`) now steers the *look* back over the pitch, not the broom's
+heading, and `flight::confine` levels the look with the broom when it slides along the floor or the ceiling.
+
+**The camera is an orbit camera, and the broom follows it.** `camera::chase_camera` aims along the rider's
+look direction, not along the broom's heading (so steering is camera-relative, as in the mod), with its own
+lagged rotation in both axes: 8/s towards the look, at most 1.917 rad of yaw and 0.959 rad of pitch in one
+step, pitch clamped to +-1.342 rad. It sits on a 128 uu arm (`ARM`) from a point 55 uu over the rider
+(`LOOK_UP`) -- the mod's numbers, and much closer than the 420/140 rig it replaces -- with no positional lag
+at all. Looking up from below pulls the arm in by `1 - pitch/0.9587`, immediately, and it eases back out at
+2.5/s. The arm is also shortened so the camera stops 5 uu short of the arena wall instead of hanging in the
+stands (the mod traces the world; the flight volume is all the collision a match has).
+
+Two deliberate differences from the mod, both because its numbers put the rider out of the picture at our
+scale: the pull-in scales the **whole rig** (the 55 uu look-at offset shrinks with the arm), so the rider
+keeps his place in the frame however far the camera is pulled in, and the pull-in floor is **0.3**, not the
+mod's 0.15, which would end with the camera inside him. The field of view still widens with speed (90 -> 100
+deg); that is ours, neither HP1 package has it.
+
 ## The level's own scripts during a match
 
 `HP3_Quidditch` is not a playable pitch in the retail game: it is the stage of the Dementor cutscene
@@ -149,7 +192,8 @@ either: both are gated on a running match.
 - `HP3_MATCH_RESTART=<tick>` — stop and start the match again at that tick (to exercise the hand-over).
 - `HP3_QUID_DEBUG=1` — every 120 ticks, a sample of the match: phase, the Snitch's pure and actor positions,
   the catch progress, the Bludger bumps, the HUD item list, the Bludgers in flight, and the broom's position,
-  speed, heading and camera.
+  speed, heading, look direction and camera (with its arm). Set it to a number (`HP3_QUID_DEBUG=5`) to sample
+  every that many ticks instead, which is how a headless run watches the steering turn frame by frame.
 - `HP3_QUID_SHOOT=<tick>` — **off by default.** At that tick of the match the Quaffle is shot from the middle
   of the pitch at a hoop, which is the only thing that throws it until the Chasers arrive (Task 13). It is how
   a headless run proves that goals are detected and counted: every goal also prints a

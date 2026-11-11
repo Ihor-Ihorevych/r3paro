@@ -520,7 +520,7 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
     rules.start();
     // He starts facing up the pitch (`yaw` of a quarter turn is +y, the far goal), as his pawn's spawn
     // rotation of 16384 does.
-    let broom_state = BroomState { pos: start_at, vel: Vec3::ZERO, yaw: std::f32::consts::FRAC_PI_2, pitch: 0.0 };
+    let broom_state = BroomState::new(start_at, Vec3::ZERO, std::f32::consts::FRAC_PI_2, 0.0);
     let mut m = QuidditchMatch {
         opponent: opponent.to_string(),
         arena: bounds,
@@ -635,7 +635,10 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         None => desktop_input(&keys, (mouse.0 * mouse_speed, mouse.1 * mouse_speed), invert_pitch, &mut m.boost),
     };
     let soft = inset(&m.arena, SOFT_MARGIN);
-    let turn = flight::boundary_turn(m.broom.pos, m.broom.yaw, &soft);
+    // The soft boundary steers the rider's *look* (which is what the broom chases now), not the broom's own
+    // heading: a correction measured against the heading would keep being undone by the look the player left
+    // pointing at the wall.
+    let turn = flight::boundary_turn(m.broom.pos, m.broom.want_yaw, &soft);
     i.yaw = (i.yaw + turn * BOUNDARY_WEIGHT).clamp(-1.0, 1.0);
     let flown = flight::step(&m.broom, &i, &m.tuning, dt);
     m.broom = flight::confine(&flown, &m.arena);
@@ -686,7 +689,10 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     presentation::tick(vm, &mut m, dt, &events);
     // `HP3_QUID_DEBUG`: a sample of the match state now and then, to see that it is running at all, and where
     // the broom has got to (with the pawn's own `Location`, to see that it followed).
-    if m.frames % 120 == 0 && crate::envc::var_os("HP3_QUID_DEBUG").is_some() {
+    // `HP3_QUID_DEBUG=<n>` samples every n ticks instead of every 120, which is how a headless run watches the
+    // steering frame by frame.
+    let every = crate::envc::var("HP3_QUID_DEBUG").ok().and_then(|v| v.trim().parse::<u64>().ok()).filter(|&n| n > 0).unwrap_or(120);
+    if m.frames % every == 0 && crate::envc::var_os("HP3_QUID_DEBUG").is_some() {
         let a = m.snitch_actor.map(|s| crate::rd_vec(vm, s, "Location")).unwrap_or(Vec3::ZERO);
         println!(
             "quidditch: tick {} phase {:?} snitch ({:.0}, {:.0}, {:.0}) actor ({:.0}, {:.0}, {:.0}) progress {:.2} bumps {}",
@@ -712,15 +718,18 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
             (m.arena.ceiling - flown.pos.z).min(flown.pos.z - (m.arena.center.z - m.arena.half.z)),
         );
         println!(
-            "quidditch: tick {} broom ({:.0}, {:.0}, {:.0}) pawn ({:.0}, {:.0}, {:.0}) speed {:.0} yaw {:.2} pitch {:.2} boost {} camera ({:.0}, {:.0}, {:.0}) flown ({:.0}, {:.0}, {:.0}) room ({:.0}, {:.0}, {:.0})",
+            "quidditch: tick {} broom ({:.0}, {:.0}, {:.0}) pawn ({:.0}, {:.0}, {:.0}) speed {:.0} yaw {:.2} pitch {:.2} look ({:.2}, {:.2}) boost {} camera ({:.0}, {:.0}, {:.0}) arm {:.0} flown ({:.0}, {:.0}, {:.0}) room ({:.0}, {:.0}, {:.0})",
             m.frames,
             m.broom.pos.x, m.broom.pos.y, m.broom.pos.z,
             h.x, h.y, h.z,
             m.broom.vel.length(),
             m.broom.yaw,
             m.broom.pitch,
+            m.broom.want_yaw,
+            m.broom.want_pitch,
             m.boost,
             m.cam.pos.x, m.cam.pos.y, m.cam.pos.z,
+            m.cam.arm,
             flown.pos.x, flown.pos.y, flown.pos.z,
             room.x, room.y, room.z,
         );

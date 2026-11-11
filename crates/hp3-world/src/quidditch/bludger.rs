@@ -182,7 +182,7 @@ mod tests {
     use super::*;
 
     fn harry_at(pos: Vec3) -> BroomState {
-        BroomState { pos, vel: Vec3::ZERO, yaw: 0.0, pitch: 0.0 }
+        BroomState::new(pos, Vec3::ZERO, 0.0, 0.0)
     }
 
     fn tuning() -> BludgerTuning {
@@ -254,7 +254,7 @@ mod tests {
         t.launch_min = 0.0;
         t.launch_max = 0.0;
         let mut b = Bludgers::with_tuning(3, t);
-        let harry = BroomState { pos: Vec3::new(1000.0, 0.0, 0.0), vel: Vec3::new(0.0, 800.0, 0.0), yaw: 0.0, pitch: 0.0 };
+        let harry = BroomState::new(Vec3::new(1000.0, 0.0, 0.0), Vec3::new(0.0, 800.0, 0.0), 0.0, 0.0);
         assert!(b.step(&harry, 0.1).contains(&BludgerEvent::Launched));
         // Aim point is (1000, 400, 0); move Harry away so nothing hits, then check the heading after 0.5 s.
         let _ = b.step(&harry_at(Vec3::new(0.0, 0.0, 9000.0)), 0.5);

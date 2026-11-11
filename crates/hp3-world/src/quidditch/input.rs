@@ -3,8 +3,11 @@
 //!
 //! The app's own key state is not pure (it lives in the VM's world, with every binding the ini names), so
 //! `crate::input::apply` reads the few keys the broom cares about into a `KeyState` and `quidditch::glue`
-//! turns it into steering here. The scheme is HP1's: the mouse or the arrow keys steer, boost is a toggle (a
-//! tap turns it on, the next turns it off) and the brake is held and beats the boost.
+//! turns it into steering here. The scheme is HP1's with AdamJD's movement mod on top: the mouse is free
+//! look (its motion is an angular delta that moves where the rider looks, and the broom turns into it), the
+//! arrow keys swing the same look at a constant rate, boost is a toggle (a tap turns it on, the next turns it
+//! off) and the brake is held and beats the boost. The mod's "every turn brakes" is **not** reproduced: the
+//! brake is the brake button and nothing else.
 
 use super::flight::BroomInput;
 
@@ -28,8 +31,11 @@ pub struct KeyState {
     pub catch: bool,
 }
 
-/// Mouse pixels in one frame that make a full stick deflection.
-const MOUSE_FULL: f32 = 12.0;
+/// How far the look swings per mouse pixel (radians). It is a constant of ours, not the mod's: the mod's gain
+/// is the player's own `MouseSensitivity`, which is in nobody's `.ini` here. 0.003 rad/px (0.17 deg) is what
+/// the stick model it replaces felt like -- its 12 pixels for a full 2.0 rad/s deflection is 0.0028 rad per
+/// pixel at 60 fps -- and it is **not** multiplied by `dt`: mouse pixels are already a per-frame quantity.
+const MOUSE_GAIN: f32 = 0.003;
 
 /// This frame's steering. `mouse` is the frame's motion in pixels as the app reports it (x to the right, y
 /// downwards), `invert_pitch` is the game's own mouse-invert setting, and `boost_toggle` is the boost the
@@ -38,17 +44,22 @@ pub fn desktop_input(keys: &KeyState, mouse: (f32, f32), invert_pitch: bool, boo
     if keys.boost {
         *boost_toggle = !*boost_toggle;
     }
-    let held = |on: bool| if on { 1.0 } else { 0.0 };
-    let pixels = |v: f32| if v.is_finite() { v / MOUSE_FULL } else { 0.0 };
+    let held = |on: bool| -> f32 { if on { 1.0 } else { 0.0 } };
+    let pixels = |v: f32| if v.is_finite() { v * MOUSE_GAIN } else { 0.0 };
     // The mouse to the right turns right, which is where yaw falls; moving it up (a negative y, as the app
-    // reports it) pulls the nose up, as the game's own mouse look does until the player inverts it.
-    let yaw = (held(keys.left) - held(keys.right) - pixels(mouse.0)).clamp(-1.0, 1.0);
-    let pitch = (held(keys.up) - held(keys.down) - pixels(mouse.1)).clamp(-1.0, 1.0);
+    // reports it) pulls the nose up, as the game's own mouse look does until the player inverts it. The keys
+    // are the same two axes as a rate, so flying with the keyboard alone still works.
+    let yaw = (held(keys.left) - held(keys.right)).clamp(-1.0, 1.0);
+    let pitch = (held(keys.up) - held(keys.down)).clamp(-1.0, 1.0);
+    let look_yaw = -pixels(mouse.0);
+    let look_pitch = -pixels(mouse.1);
     BroomInput {
         yaw,
         pitch: if invert_pitch { -pitch } else { pitch },
         boost: *boost_toggle,
         brake: keys.brake,
+        look_yaw,
+        look_pitch: if invert_pitch { -look_pitch } else { look_pitch },
     }
 }
 
@@ -81,7 +92,7 @@ mod tests {
         assert!(i.brake, "the brake is held, so it is reported");
         // `flight::step` is what rules that the brake beats the boost, and it does.
         let t = super::super::flight::BroomTuning::default();
-        let s = super::super::flight::BroomState { pos: glam::Vec3::ZERO, vel: glam::Vec3::X * t.speed, yaw: 0.0, pitch: 0.0 };
+        let s = super::super::flight::BroomState::new(glam::Vec3::ZERO, glam::Vec3::X * t.speed, 0.0, 0.0);
         let braked = super::super::flight::step(&s, &i, &t, 1.0 / 60.0);
         assert!(braked.vel.length() < t.speed, "the brake must win over the boost: {:?}", braked.vel);
     }
@@ -92,16 +103,25 @@ mod tests {
         let keys = KeyState { up: true, ..KeyState::default() };
         let plain = desktop_input(&keys, (0.0, -6.0), false, &mut boost);
         let inverted = desktop_input(&keys, (0.0, -6.0), true, &mut boost);
-        assert!(plain.pitch > 0.0, "{}", plain.pitch);
+        assert!(plain.pitch > 0.0 && plain.look_pitch > 0.0, "{plain:?}");
         assert_eq!(inverted.pitch, -plain.pitch);
+        assert_eq!(inverted.look_pitch, -plain.look_pitch);
         // The mouse alone, both ways round: pushed forward (a negative y) the nose goes up unless inverted.
         let none = KeyState::default();
-        let up = desktop_input(&none, (0.0, -12.0), false, &mut boost);
-        let down = desktop_input(&none, (0.0, -12.0), true, &mut boost);
-        assert_eq!((up.pitch, down.pitch), (1.0, -1.0));
-        // Steering: the keys and the mouse both turn the broom the same way round.
+        let up = desktop_input(&none, (0.0, -10.0), false, &mut boost);
+        let down = desktop_input(&none, (0.0, -10.0), true, &mut boost);
+        assert!((up.look_pitch - 10.0 * MOUSE_GAIN).abs() < 1e-6, "{up:?}");
+        assert_eq!(down.look_pitch, -up.look_pitch);
+        assert_eq!((up.pitch, down.pitch), (0.0, 0.0), "the mouse is a look, not a stick");
+        // Steering: the keys and the mouse both turn the broom the same way round, the keys as a rate and the
+        // mouse as this frame's angle.
         assert!(desktop_input(&KeyState { left: true, ..none }, (0.0, 0.0), false, &mut boost).yaw > 0.0);
-        assert!(desktop_input(&none, (6.0, 0.0), false, &mut boost).yaw < 0.0, "the mouse to the right turns right");
-        assert_eq!(desktop_input(&none, (f32::NAN, f32::INFINITY), false, &mut boost), BroomInput { yaw: 0.0, pitch: 0.0, boost: false, brake: false });
+        let right = desktop_input(&none, (10.0, 0.0), false, &mut boost);
+        assert!(right.look_yaw < 0.0 && right.yaw == 0.0, "the mouse to the right turns right: {right:?}");
+        assert!((right.look_yaw + 10.0 * MOUSE_GAIN).abs() < 1e-6, "{right:?}");
+        // Twice the motion is twice the angle: nothing saturates, and a flick is a flick.
+        let far = desktop_input(&none, (20.0, 0.0), false, &mut boost);
+        assert!((far.look_yaw - 2.0 * right.look_yaw).abs() < 1e-6, "{far:?}");
+        assert_eq!(desktop_input(&none, (f32::NAN, f32::INFINITY), false, &mut boost), BroomInput::default());
     }
 }

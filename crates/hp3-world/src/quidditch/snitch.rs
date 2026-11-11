@@ -221,7 +221,7 @@ mod tests {
     }
 
     fn harry_at(pos: Vec3) -> BroomState {
-        BroomState { pos, vel: Vec3::ZERO, yaw: 0.0, pitch: 0.0 }
+        BroomState::new(pos, Vec3::ZERO, 0.0, 0.0)
     }
 
     /// Harry glued to the snitch, offset along +x by `d`.
