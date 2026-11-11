@@ -24,7 +24,10 @@ pub struct BroomState {
     pub pitch: f32,
 }
 
-/// Placeholder tuning, to be adjusted by feel in a later task.
+/// How the broom flies, as the playtest asked for it: half the speed the first pass flew at (the pitch is
+/// 12000 uu long, which at 600 uu/s is a flight the eye can follow), with `accel` halved with it so a boost
+/// still takes the same second to come up to speed. The turn rates are the ones of the faster broom, so at
+/// half the speed the same stick turns twice as tightly, which is what makes the snitch catchable.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BroomTuning {
     /// Cruise speed (uu/s).
@@ -46,10 +49,10 @@ pub struct BroomTuning {
 impl Default for BroomTuning {
     fn default() -> Self {
         BroomTuning {
-            speed: 1200.0,
-            boost_speed: 2400.0,
-            accel: 1500.0,
-            decel: 300.0,
+            speed: 600.0,
+            boost_speed: 1200.0,
+            accel: 750.0,
+            decel: 150.0,
             yaw_rate: 2.0,
             pitch_rate: 1.5,
             max_pitch: 1.2,

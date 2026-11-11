@@ -108,6 +108,24 @@ These are what `quidditch::arena` holds (`bounds()`, and the `pub const`s beside
   invented, so Task 6 leaves them out. Note that three of the seven stairs sit inside the playfield box in x and y:
   they are stand pieces at z 824.8, above the pitch, and `arena_spawn_list`'s test treats them as such.
 
+## The level's own scripts during a match
+
+`HP3_Quidditch` is not a playable pitch in the retail game: it is the stage of the Dementor cutscene
+`7010QuidDem_ALL`. Left running, that cutscene takes the camera (`HPCam` goes to `StateCutSceneCam`), flies
+four `Dementor`s and two `BlackDog`s over the pitch, and finishes by switching the level to
+`HP3_GroundsDada?GameState=GState070` -- about 160 seconds in, which is what used to end a match.
+
+So `quidditch::stage::clear` (from `glue::start`, and from nowhere else) destroys the level's cutscene
+machinery -- `KWCutScene`, `KWCutController*`, `KWCutTextController`, `CutFactory`, `CutSceneTrigger` -- and
+its cutscene-only cast -- `Dementor`, `BlackDog`, `DementorsConverging` -- with the controller of each pawn it
+removes. The factory is gone before its state code ever builds the scenes, so no cutscene starts at all. The
+crowd in the stands (`HPGenericStudent`) and the two teams' placed players stay: they stand still and are the
+only audience the pitch has.
+
+As a backstop, `count_down_travel` refuses `Level.NextURL` for as long as `World::quidditch` is `Some`, clears
+it and logs `quidditch: level travel blocked (<url>)` once per level. A level with no match is untouched by
+either: both are gated on a running match.
+
 ## Environment variables (debugging only; nothing in the game sets them)
 
 - `HP3_MATCH=<house>` — start a Quidditch match against that house as soon as the level is up.

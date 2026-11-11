@@ -33,8 +33,8 @@ pub struct BludgerTuning {
 }
 
 impl Default for BludgerTuning {
-    /// PLACEHOLDER values in Unreal units (a walking human is ~440 uu/s, a broom cruises ~1200 uu/s); to be tuned
-    /// by playtest.
+    /// Values in Unreal units (a walking human is ~440 uu/s, a broom cruises ~600 uu/s). The speed was halved
+    /// with the broom's; the radii and the intervals are distances and times, so they stayed as they were.
     fn default() -> Self {
         BludgerTuning {
             launch_inner: 800.0,
@@ -42,7 +42,7 @@ impl Default for BludgerTuning {
             launch_min: 3.0,
             launch_max: 6.0,
             // A little faster than the broom, so it can be outrun only by boosting.
-            speed: 1500.0,
+            speed: 750.0,
             velocity_compensation: 0.5,
             hit_radius: 150.0,
             life: 6.0,

@@ -448,6 +448,11 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
     if re_entry {
         stop(vm);
     }
+    // The level's own gameplay first: the retail Quidditch map is the Dementor cutscene's stage, and that
+    // cutscene would take the camera and end the match by switching the level (`stage`).
+    let cleared = super::stage::clear(vm);
+    println!("{cleared}");
+    vm.log.push(cleared);
     let bounds = arena::bounds();
     let seed = seed_for(opponent);
     let mut actors: Vec<ObjId> = Vec::new();

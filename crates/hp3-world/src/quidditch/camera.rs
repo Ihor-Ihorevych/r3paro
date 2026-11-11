@@ -37,7 +37,7 @@ const MAX_TURN: f32 = 3.2;
 /// Field of view at rest (horizontal degrees), and how much wider it opens at `FAST` (so speed reads).
 const FOV: f32 = 90.0;
 const FOV_SPEED: f32 = 10.0;
-const FAST: f32 = 2400.0;
+const FAST: f32 = 1200.0;
 
 /// Radians to Unreal's rotation units.
 const UU: f32 = 65536.0 / std::f32::consts::TAU;

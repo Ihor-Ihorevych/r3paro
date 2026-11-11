@@ -151,6 +151,9 @@ pub struct World {
     /// Holds a `quidditch::glue::start` or `stop` asked for while the match is being ticked until the tick is
     /// over (see `quidditch::glue::Gate`).
     pub quidditch_gate: quidditch::glue::Gate,
+    /// Whether a level switch has already been refused for the running match, so it is logged once
+    /// (`count_down_travel`). Never set on a level with no match.
+    pub quidditch_travel_blocked: bool,
 }
 
 /// The world stored in the VM. Panics if no level is loaded.
@@ -695,6 +698,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         actor_slots: Default::default(),
         quidditch: None,
         quidditch_gate: Default::default(),
+        quidditch_travel_blocked: false,
         config,
     }));
     memprobe("world made");
@@ -1098,6 +1102,19 @@ pub fn fill_level_enter_text(vm: &mut Vm<'_>) {
 fn count_down_travel(vm: &mut Vm<'_>, li: ObjId, dt: f32) {
     let next = get(vm, li, "NextURL").as_str().to_string();
     if !next.is_empty() {
+        // A Quidditch match is played on a map whose own scripts switch the level when they are done
+        // (`quidditch::stage` clears the cutscene that does it, this is the backstop): while a match runs the
+        // switch is refused, so the pitch cannot be taken away from under the player. Said once per level.
+        if world(vm).quidditch.is_some() {
+            set(vm, li, "NextURL", Value::Str(String::new()));
+            if !world(vm).quidditch_travel_blocked {
+                world(vm).quidditch_travel_blocked = true;
+                let line = format!("quidditch: level travel blocked ({next})");
+                println!("{line}");
+                vm.log.push(line);
+            }
+            return;
+        }
         let countdown = get(vm, li, "NextSwitchCountdown").as_float() - dt;
         set(vm, li, "NextSwitchCountdown", Value::Float(countdown));
         if countdown <= 0.0 {
