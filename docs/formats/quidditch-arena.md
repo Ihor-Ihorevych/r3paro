@@ -107,3 +107,29 @@ These are what `quidditch::arena` holds (`bounds()`, and the `pub const`s beside
   centre) could go at the four pitch corners (+-4400, +-6000) relative to the centre, but those positions would be
   invented, so Task 6 leaves them out. Note that three of the seven stairs sit inside the playfield box in x and y:
   they are stand pieces at z 824.8, above the pitch, and `arena_spawn_list`'s test treats them as such.
+
+## Environment variables (debugging only; nothing in the game sets them)
+
+- `HP3_MATCH=<house>` — start a Quidditch match against that house as soon as the level is up.
+- `HP3_MATCH_SEED=<n>` — the match's randomness. Without it the seed comes from the opponent's name, so a
+  given opponent always plays the same match.
+- `HP3_MATCH_RESTART=<tick>` — stop and start the match again at that tick (to exercise the hand-over).
+- `HP3_QUID_DEBUG=1` — every 120 ticks, a sample of the match: phase, the Snitch's pure and actor positions,
+  the catch progress, the Bludger bumps, the HUD item list, the Bludgers in flight, and the broom's position,
+  speed, heading and camera.
+- `HP3_QUID_EASY=1` — **off by default.** The Snitch's catch bar fills from anywhere on the pitch, the catch
+  window is wide open and the catch key is held for Harry, so a headless run reaches a caught Snitch (and the
+  result line) in about 12 seconds with nobody at the keyboard. Only for tests; it makes the game trivial.
+
+## The match's sounds and music
+
+All in `soundeffects.Quidditch` (verified present in the retail packages, Task 8): `flying_broom_loop` (on
+Harry, its volume and pitch following his speed), `Q_snitch_loop` (on the Snitch), `AMB_crowd_loop1` (on a
+silent actor at the pitch centre), `bludger_loop` (on each Bludger ball in flight), the one-shots
+`snitch_flyby01` and `bludger_flyby01`, and the crowd reactions under the commentary lines
+(`SS_QUID_Bigcheers_0001`, `SS_QUID_Crowd_roar_01`, `SS_QUID_Big_cheer_01`, `SS_QUID_boo_long_01`). The music
+is `SM_QUD_SnitchOrch_01`. HP3 ships no commentary speech we could confirm, so the commentary is on-screen
+text with those crowd reactions under it.
+
+HP3 has no Bludger (or Quaffle) mesh, so a Bludger is `HP3_InteriorAccents_SM.miscDetails.MagicalOrb_SM`
+scaled by its own bounds to a 110 uu radius and skinned with the retail `HP_FX.General.Bludger_Halo` glow.

@@ -19,8 +19,9 @@ use super::bludger::Bludgers;
 use super::camera::{self, CamState};
 use super::flight::{self, BroomState, BroomTuning};
 use super::input::{desktop_input, KeyState};
-use super::rules::{MatchPhase, Rules};
-use super::snitch::Snitch;
+use super::presentation::{self, Presentation};
+use super::rules::{MatchEvent, MatchPhase, Rules};
+use super::snitch::{Snitch, SnitchTuning};
 
 /// Harry's broom pawn (`HGame.HarryQuid`) and the Golden Snitch (`HGame.Snitch`): both classes exist in the
 /// retail scripts with empty bodies, which is why the engine drives them.
@@ -69,6 +70,9 @@ pub struct QuidditchMatch {
     pub actors: Vec<ObjId>,
     pub harry: Option<ObjId>,
     pub snitch_actor: Option<ObjId>,
+    /// What the match looks, sounds and reads like (`quidditch::presentation`): the Bludger balls, the
+    /// sounds, the commentary subtitle and the HUD.
+    pub show: Presentation,
     /// This frame's broom keys and mouse motion, as `crate::input::apply` read them (`feed_input`). Taken by
     /// the tick, so a frame whose input never arrived steers nothing instead of repeating the last one.
     pending_input: Option<(KeyState, (f32, f32))>,
@@ -83,6 +87,25 @@ pub struct QuidditchMatch {
     restart_at: Option<u64>,
     /// Whether the end of the match has been reported.
     reported: bool,
+    /// `HP3_QUID_EASY=1` (debugging, off by default): the snitch is caught the moment Harry is anywhere near
+    /// it and the catch key is held for him, so a headless smoke run reaches a result in a few hundred ticks.
+    /// Nothing in the game sets it.
+    easy: bool,
+}
+
+/// The snitch of an `HP3_QUID_EASY` run: the bar fills from anywhere on the pitch and the catch window is
+/// wide open, so the match ends on its own without anyone at the keyboard. The gain rate is deliberately slow
+/// enough (about 12 seconds) that the Bludgers, the commentary and the HUD all get a turn first. Only
+/// reachable through the environment variable.
+fn easy_snitch_tuning() -> SnitchTuning {
+    SnitchTuning {
+        max_gain_radius: 20000.0,
+        neutral_radius: 20000.0,
+        max_loss_radius: 40000.0,
+        gain_rate: 0.08,
+        catch_radius: 20000.0,
+        ..SnitchTuning::default()
+    }
 }
 
 /// A `start` or `stop` that was asked for while a tick was in progress.
@@ -422,8 +445,10 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
         was_playing = possess(vm, h);
         play_flying(vm, h);
     }
-    // The Snitch actor is only a marker the pure snitch drives; `tick` writes its `Location` every frame.
-    let snitch = Snitch::new(seed, &bounds);
+    // The Snitch actor is driven by the pure snitch; `tick` writes its `Location` every frame and
+    // `presentation::start` gives it its mesh and its loop.
+    let easy = crate::envc::var_os("HP3_QUID_EASY").is_some();
+    let snitch = if easy { Snitch::with_tuning(seed, &bounds, easy_snitch_tuning()) } else { Snitch::new(seed, &bounds) };
     let snitch_actor = spawn_class(vm, SNITCH_CLASS, arena::clamp_into(&bounds, snitch.pos()), 0);
     if let Some(s) = snitch_actor {
         crate::set(vm, s, "Physics", Value::Byte(crate::physics::PHYS_NONE));
@@ -437,7 +462,7 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
     // He starts facing up the pitch (`yaw` of a quarter turn is +y, the far goal), as his pawn's spawn
     // rotation of 16384 does.
     let broom_state = BroomState { pos: start_at, vel: Vec3::ZERO, yaw: std::f32::consts::FRAC_PI_2, pitch: 0.0 };
-    let m = QuidditchMatch {
+    let mut m = QuidditchMatch {
         opponent: opponent.to_string(),
         arena: bounds,
         broom: broom_state,
@@ -449,6 +474,7 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
         actors,
         harry,
         snitch_actor,
+        show: Presentation::default(),
         pending_input: None,
         boost: false,
         was_playing,
@@ -456,10 +482,13 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
         // The restart is a one-shot: the match it starts does not restart itself again.
         restart_at: (!re_entry).then(|| crate::envc::var("HP3_MATCH_RESTART").ok().and_then(|v| v.parse().ok()).filter(|&n| n > 0)).flatten(),
         reported: false,
+        easy,
     };
+    // Meshes, sounds and music. It may add actors of its own, so it runs before the count below is printed.
+    presentation::start(vm, &mut m, seed);
     let yes_no = |o: Option<ObjId>| if o.is_some() { "yes" } else { "MISSING" };
     let line = format!(
-        "quidditch: match against {} started, phase {:?}, {} actors spawned ({} stadium pieces, Harry {}, broom {}, Snitch {})",
+        "quidditch: match against {} started, phase {:?}, {} actors spawned ({} stadium pieces, Harry {}, broom {}, Snitch {}){}",
         m.opponent,
         m.rules.phase(),
         m.actors.len(),
@@ -467,6 +496,7 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
         yes_no(m.harry),
         yes_no(broom),
         yes_no(m.snitch_actor),
+        if m.easy { ", HP3_QUID_EASY: the snitch catches itself" } else { "" },
     );
     println!("{line}");
     vm.log.push(line);
@@ -482,6 +512,8 @@ pub fn stop(vm: &mut Vm<'_>) {
         return;
     }
     let Some(m) = crate::world(vm).quidditch.take() else { return };
+    // The music stops with the match; the ambient loops go with the actors that carry them.
+    presentation::stop(vm, &m);
     // The pawn goes back to the player before the broom pawn is destroyed: a controller must never be left
     // holding a deleted pawn.
     unpossess(vm, m.was_playing, m.harry);
@@ -550,20 +582,32 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         crate::set(vm, h, "Physics", Value::Byte(crate::physics::PHYS_FLYING));
     }
     let ended = matches!(m.rules.phase(), MatchPhase::Ended(_));
+    // Everything that happened this frame, for the commentary and the sounds.
+    let mut events: Vec<MatchEvent> = Vec::new();
     if !ended && m.rules.phase() != MatchPhase::Intro {
-        for e in m.snitch.step(&m.broom, false, dt) {
+        // The catch key (`Space`/`Enter`), or every frame under `HP3_QUID_EASY`.
+        let wants_catch = m.easy || keys.catch;
+        for e in m.snitch.step(&m.broom, wants_catch, dt) {
             m.rules.on_snitch(e);
+            events.push(MatchEvent::Snitch(e));
         }
         let hits = m.bludgers.step(&m.broom, dt);
         let lost = m.bludgers.control_lost();
         for e in hits {
             m.rules.on_bludger(e, lost);
+            events.push(MatchEvent::Bludger(e));
+        }
+        if let MatchPhase::Ended(outcome) = m.rules.phase() {
+            events.push(MatchEvent::Ended(outcome));
         }
     }
     if let Some(s) = m.snitch_actor.filter(|&s| !vm.db.objects.get(s).deleted) {
         let at = arena::clamp_into(&m.arena, m.snitch.pos());
         crate::set(vm, s, "Location", v3(at));
     }
+    // The Bludger balls, the sounds that follow the match and the commentary line this frame's events earn.
+    presentation::kickoff(vm, &mut m);
+    presentation::tick(vm, &mut m, dt, &events);
     // `HP3_QUID_DEBUG`: a sample of the match state now and then, to see that it is running at all, and where
     // the broom has got to (with the pawn's own `Location`, to see that it followed).
     if m.frames % 120 == 0 && crate::envc::var_os("HP3_QUID_DEBUG").is_some() {
@@ -577,6 +621,11 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
             m.snitch.progress(),
             m.bludgers.bumps()
         );
+        // What the HUD is showing at this moment (the headless run has no screen to look at), and where the
+        // Bludgers in flight have got to (a headless run has no screen to see the balls on either).
+        println!("{}", presentation::hud_line(&super::hud::hud_items(&presentation::hud_input(&m))));
+        let balls: Vec<String> = m.bludgers.positions().iter().map(|p| format!("({:.0}, {:.0}, {:.0})", p.x, p.y, p.z)).collect();
+        println!("quidditch: bludgers in flight [{}]", balls.join(" "));
         let h = m.harry.filter(|&h| !vm.db.objects.get(h).deleted).map(|h| crate::rd_vec(vm, h, "Location")).unwrap_or(Vec3::ZERO);
         // `flown` is where the flight model wanted to be before `confine` had its say, and `room` is how far
         // that was from each face of the volume: negative on an axis means the broom pushed through it there
@@ -605,7 +654,9 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     {
         m.reported = true;
         let score = m.rules.score();
-        let line = format!("quidditch: match against {} ended {outcome:?}, {}-{}", m.opponent, score.home, score.away);
+        // The same words the HUD shows, so the log and the screen agree.
+        let result = presentation::result_of(&m).unwrap_or_default();
+        let line = format!("quidditch: match against {} ended {outcome:?}, {}-{} -- {result}", m.opponent, score.home, score.away);
         println!("{line}");
         vm.log.push(line);
     }

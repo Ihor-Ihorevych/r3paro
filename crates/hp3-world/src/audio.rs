@@ -156,6 +156,24 @@ fn play(vm: &mut Vm<'_>, this: Option<ObjId>, a: &[Value], attenuate_by_default:
     }
 }
 
+/// Starts a song from the engine's own side (`Actor.PlayMusic` is the script's way in); the handle stops it
+/// again. Used by the Quidditch match, which has no script to ask for its music.
+pub fn play_music(vm: &mut Vm<'_>, song: &str, fade_in: f32, looping: bool) -> i32 {
+    let w = world(vm);
+    w.audio.next_handle += 1;
+    let handle = w.audio.next_handle;
+    w.audio.current_music = song.to_string();
+    w.audio.events.push(Event::Music { song: song.to_string(), handle, fade_in, looping, stab: false });
+    handle
+}
+
+/// Stops a song started by `play_music`.
+pub fn stop_music(vm: &mut Vm<'_>, handle: i32, fade_out: f32) {
+    let w = world(vm);
+    w.audio.current_music.clear();
+    w.audio.events.push(Event::StopMusic { handle, fade_out });
+}
+
 pub fn register(vm: &mut Vm<'_>) {
     // PlaySound / PlayOwnedSound(Sound, slot, Volume, bNoOverride, Radius, Pitch, Attenuate, No3D)
     vm.register("Actor.PlaySound", |vm, this, a| {

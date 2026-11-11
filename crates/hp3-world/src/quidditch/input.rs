@@ -24,6 +24,8 @@ pub struct KeyState {
     pub boost: bool,
     /// `LeftMouse` or `Z` held.
     pub brake: bool,
+    /// `Space` or `Enter` held: reach out for the snitch while the catch window is open.
+    pub catch: bool,
 }
 
 /// Mouse pixels in one frame that make a full stick deflection.

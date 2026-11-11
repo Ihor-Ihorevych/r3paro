@@ -195,6 +195,16 @@ impl Snitch {
     pub fn progress(&self) -> f32 {
         self.progress
     }
+
+    /// Catch attempts still to come, for the HUD's pips.
+    pub fn tries_left(&self) -> u32 {
+        self.tuning.max_tries.saturating_sub(self.tries)
+    }
+
+    /// True while the catch window is open (the bar is full and Harry has `max_catch_time` to grab it).
+    pub fn in_catch_window(&self) -> bool {
+        matches!(self.phase, Phase::Catching { .. })
+    }
 }
 
 #[cfg(test)]

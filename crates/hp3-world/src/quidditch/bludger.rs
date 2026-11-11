@@ -165,6 +165,11 @@ impl Bludgers {
         self.bumps
     }
 
+    /// How many hits cost Harry the broom, for the HUD's control bar.
+    pub fn bumps_to_lose(&self) -> u32 {
+        self.tuning.bumps_to_lose_control
+    }
+
     /// True once `bumps >= bumps_to_lose_control`; stays true (construct a new `Bludgers` to reset).
     pub fn control_lost(&self) -> bool {
         self.bumps >= self.tuning.bumps_to_lose_control
