@@ -30,22 +30,10 @@ pub struct SmokeResult {
     pub errors: usize,
 }
 
-/// The steering that points `broom` at `target`: a mouse flick that puts the *look* direction
-/// (`want_yaw`/`want_pitch`, which is what the broom chases now) on the target, bounded per frame so the
-/// pilot shoves the mouse about no harder than a hand could. The broom's own rate caps do the rest.
+/// The steering that points `broom` at `target`: the engine's own scripted pilot (`flight::look_at`), which is
+/// also what the `HP3_QUID_RING_AUTOFLY` chase of the ring trail flies.
 pub fn steer(broom: &BroomState, target: Vec3, boost: bool) -> BroomInput {
-    let d = target - broom.pos;
-    let flat = d.truncate().length();
-    let want_yaw = d.y.atan2(d.x);
-    let want_pitch = d.z.atan2(flat.max(1e-3));
-    let wrap = |a: f32| (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
-    BroomInput {
-        look_yaw: wrap(want_yaw - broom.want_yaw).clamp(-0.25, 0.25),
-        look_pitch: (want_pitch - broom.want_pitch).clamp(-0.25, 0.25),
-        boost,
-        brake: false,
-        ..BroomInput::default()
-    }
+    hp3_world::quidditch::flight::look_at(broom, target, boost)
 }
 
 /// Whether the scripted pilot reaches for the snitch: inside twice the catch radius.
@@ -70,7 +58,13 @@ pub fn play(root: &Path, seed: u64) -> Result<SmokeResult, Box<dyn std::error::E
     let mut was = (0u32, 0u32);
     while ticks < TICK_CAP {
         // Steer from the state the last tick left; boost is a toggle in the real controls, so it is not used.
-        let plan = hp3_world::world(&mut vm).quidditch.as_ref().map(|m| (steer(&m.broom, m.snitch.pos(), false), wants_catch(&m.broom, m.snitch.pos())));
+        // The Snitch is only caught after a run of its flight rings (`quidditch::trail`), so the pilot flies
+        // the next ring while there is one and the Snitch itself when there is not -- which is how a player
+        // plays it, and the only way a scripted match can end in a catch at all.
+        let plan = hp3_world::world(&mut vm).quidditch.as_ref().map(|m| {
+            let target = m.rings.trail.next_ring().map(|r| r.center).unwrap_or_else(|| m.snitch.pos());
+            (steer(&m.broom, target, false), wants_catch(&m.broom, m.snitch.pos()))
+        });
         if let Some((input, catch)) = plan {
             glue::feed_scripted(&mut vm, input, catch);
         }

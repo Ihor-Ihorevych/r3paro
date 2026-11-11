@@ -37,6 +37,10 @@ pub enum MatchEvent {
     Snitch(SnitchEvent),
     Bludger(BludgerEvent),
     Goal { home: bool },
+    /// Harry flew through one of the Snitch's flight rings (`quidditch::trail`): the run he is on, and whether
+    /// that run is now long enough for the catch (`TrailTuning::catch_rings`). Nothing in the rules changes --
+    /// the rings add to the catch bar and gate the catch window, both inside `Snitch`.
+    Rings { streak: u32, ready: bool },
     Started,
     Ended(Outcome),
 }

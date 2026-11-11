@@ -147,7 +147,7 @@ fn ambient(vm: &mut Vm<'_>, actor: ObjId, s: Option<ObjId>, volume: f32, pitch: 
 
 /// Queues one sound at `at`, straight into the audio events the platform's mixer drains (the match has no
 /// script to call `PlaySound` for it).
-fn play_once(vm: &mut Vm<'_>, s: ObjId, at: Vec3, volume: f32, pitch: f32, radius: f32) {
+pub(super) fn play_once(vm: &mut Vm<'_>, s: ObjId, at: Vec3, volume: f32, pitch: f32, radius: f32) {
     let Some(key) = vm.db.objects.get(s).key.as_ref().map(|(p, i)| (p.to_string(), *i)) else { return };
     crate::world(vm).audio.events.push(crate::audio::Event::Play {
         sound: key,
@@ -460,6 +460,8 @@ pub fn hud_input(m: &QuidditchMatch) -> HudInput {
         top_speed: m.tuning.boost_speed,
         bumps: m.bludgers.bumps(),
         bumps_to_lose: m.bludgers.bumps_to_lose(),
+        ring_streak: m.rings.trail.streak(),
+        rings_needed: m.rings.trail.tuning().catch_rings,
     }
 }
 
@@ -502,6 +504,15 @@ pub fn draw_hud(vm: &mut Vm<'_>, width: u32, height: u32) {
     bar(vm, white, [bx, by, bw * fill, bh], gold);
     if let Some(f) = font {
         canvas::text(vm, f, "SNITCH", bx, by - 20.0 * s, bx + bw, white_c);
+        // The run of the Snitch's flight rings, at the other end of the catch bar: without it the catch window
+        // never opens, so it belongs where the player is already looking.
+        if let Some(line) = hud::ring_line(
+            value_of(&items, HudKind::RingStreak).unwrap_or(0.0) as u32,
+            value_of(&items, HudKind::RingsNeeded).unwrap_or(0.0) as u32,
+        ) {
+            let tw = canvas::measure(vm, f, &line).0;
+            canvas::text(vm, f, &line, bx + bw - tw, by - 20.0 * s, bx + bw, gold);
+        }
     }
     // One pip per catch attempt left, under the bar.
     let pips = value_of(&items, HudKind::CatchPips).unwrap_or(0.0) as i32;

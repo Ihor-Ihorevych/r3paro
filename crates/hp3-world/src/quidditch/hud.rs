@@ -18,6 +18,11 @@ pub enum HudKind {
     Speed,
     /// How much control a Bludger has left him: 1 untouched, 0 knocked off.
     Control,
+    /// How many of the Snitch's flight rings Harry has taken in a row (`quidditch::trail`). Shown next to the
+    /// catch bar as `RINGS n/N`, where N is what the catch needs (`RingsNeeded`).
+    RingStreak,
+    /// Rings in a row the catch needs (`TrailTuning::catch_rings`); 0 means they are not required.
+    RingsNeeded,
     /// The control hints; the value is how many lines there are (`HINTS`).
     Hints,
     /// Shown once the match is over: 1 won, 0 lost.
@@ -48,10 +53,23 @@ pub struct HudInput {
     /// Bludger hits taken, and how many cost him the broom.
     pub bumps: u32,
     pub bumps_to_lose: u32,
+    /// Flight rings of the Snitch's trail taken in a row, and how many in a row the catch needs.
+    pub ring_streak: u32,
+    pub rings_needed: u32,
 }
 
 /// The control hints, in the order they are shown.
-pub const HINTS: [&str; 4] = ["Arrows/Mouse: fly", "A: boost", "Z: brake", "Space: catch"];
+pub const HINTS: [&str; 5] = ["Arrows/Mouse: fly", "A: boost", "Z: brake", "Space: catch", "Fly the Snitch's rings to catch it"];
+
+/// The ring counter's words, or `None` when there is nothing to say (no rings are wanted and none have been
+/// taken). `n` is the run Harry is on, `needed` how many in a row the catch wants.
+pub fn ring_line(n: u32, needed: u32) -> Option<String> {
+    match (n, needed) {
+        (0, 0) => None,
+        (_, 0) => Some(format!("RINGS x{n}")),
+        _ => Some(format!("RINGS {}/{needed}", n.min(needed))),
+    }
+}
 
 impl Default for HudInput {
     fn default() -> HudInput {
@@ -65,6 +83,8 @@ impl Default for HudInput {
             top_speed: 1.0,
             bumps: 0,
             bumps_to_lose: 1,
+            ring_streak: 0,
+            rings_needed: 0,
         }
     }
 }
@@ -90,6 +110,11 @@ pub fn hud_items(m: &HudInput) -> Vec<HudItem> {
         // Hits left before the Bludgers take the broom off him, as a fraction.
         item(HudKind::Control, unit(1.0 - m.bumps as f32 / (m.bumps_to_lose.max(1)) as f32)),
     ];
+    // The ring run, while the match is on: a finished match has no rings to fly through.
+    if !ended {
+        out.push(item(HudKind::RingStreak, m.ring_streak as f32));
+        out.push(item(HudKind::RingsNeeded, m.rings_needed as f32));
+    }
     if ended {
         out.push(item(HudKind::Result, if m.phase == MatchPhase::Ended(Outcome::Won) { 1.0 } else { 0.0 }));
     } else {
@@ -169,6 +194,26 @@ mod tests {
         for i in hud_items(&m) {
             assert!(i.value.is_finite(), "{i:?}");
         }
+    }
+
+    /// The ring run: on screen while the match is on, gone with it, and its words say how many of the run the
+    /// catch still wants.
+    #[test]
+    fn hud_shows_the_ring_streak_while_the_match_is_on() {
+        let m = HudInput { ring_streak: 2, rings_needed: 3, ..seeking() };
+        let items = hud_items(&m);
+        assert_eq!(value_of(&items, HudKind::RingStreak), Some(2.0));
+        assert_eq!(value_of(&items, HudKind::RingsNeeded), Some(3.0));
+        assert_eq!(ring_line(2, 3).as_deref(), Some("RINGS 2/3"));
+        // A run longer than the catch needs is not shown as more than it needs.
+        assert_eq!(ring_line(5, 3).as_deref(), Some("RINGS 3/3"));
+        // No rule, but a run: a plain count. Nothing either way: nothing on screen.
+        assert_eq!(ring_line(4, 0).as_deref(), Some("RINGS x4"));
+        assert_eq!(ring_line(0, 0), None);
+        // The match ends and the rings go with it.
+        let over = HudInput { phase: MatchPhase::Ended(Outcome::Won), ..m };
+        assert_eq!(value_of(&hud_items(&over), HudKind::RingStreak), None);
+        assert_eq!(value_of(&hud_items(&over), HudKind::RingsNeeded), None);
     }
 
     /// A match that is over has no catch attempts to show, however many were left when it ended.

@@ -96,6 +96,11 @@ pub struct Snitch {
     progress: f32,
     tries: u32,
     phase: Phase,
+    /// Whether Harry has the run of flight rings the catch needs (HP1's `PM_Hoops` rule, which the owner asked
+    /// for): the bar may fill without it, but the catch window will not open. Set every frame from the ring
+    /// trail's streak (`quidditch::rings`); true for a Snitch nobody tells, which is every unit test and any
+    /// caller with no trail, so the rule costs nothing where there are no rings.
+    rings_ready: bool,
 }
 
 impl Snitch {
@@ -125,6 +130,7 @@ impl Snitch {
             progress: 0.0,
             tries: 0,
             phase: Phase::Chasing,
+            rings_ready: true,
         };
         // The loop starts somewhere of its own, so two Snitches of different seeds are not in step.
         s.angle = s.rng.unit() * std::f32::consts::TAU;
@@ -222,7 +228,9 @@ impl Snitch {
         if before <= 0.0 && self.progress > 0.0 {
             events.push(SnitchEvent::ClosingIn);
         }
-        if self.progress >= 1.0 {
+        // A full bar opens the catch window -- but only with the rings in (`rings_ready`). Without them the
+        // bar simply sits full and nothing is lost; the HUD's ring counter says what is still wanted.
+        if self.progress >= 1.0 && self.rings_ready {
             self.phase = Phase::Catching { elapsed: 0.0 };
             events.push(SnitchEvent::CatchStart);
         }
@@ -259,8 +267,26 @@ impl Snitch {
         self.path
     }
 
+    /// Where the Snitch is heading along its path, as a unit vector (zero only in the frame it has arrived at
+    /// a waypoint). It is the normal of the rings its trail drops (`quidditch::trail`): the path's direction,
+    /// not the loop's, so a ring faces the chase rather than the corkscrew.
+    pub fn travel_dir(&self) -> Vec3 {
+        (self.waypoint - self.path).normalize_or_zero()
+    }
+
     pub fn progress(&self) -> f32 {
         self.progress
+    }
+
+    /// Adds `amount` to the catch bar outright, for something Harry did other than closing in -- today, a
+    /// flight ring of the Snitch's trail flown through (`quidditch::trail`). Capped at 1.0 like the proximity
+    /// gain, and only while the chase is on: a bonus during the catch window (or after the match) would move
+    /// a bar that is already full and is not what decides a catch. Rubbish in does nothing.
+    pub fn bonus_progress(&mut self, amount: f32) {
+        if self.phase != Phase::Chasing || !amount.is_finite() || amount <= 0.0 {
+            return;
+        }
+        self.progress = (self.progress + amount).clamp(0.0, 1.0);
     }
 
     /// Catch attempts still to come, for the HUD's pips.
@@ -271,6 +297,17 @@ impl Snitch {
     /// True while the catch window is open (the bar is full and Harry has `max_catch_time` to grab it).
     pub fn in_catch_window(&self) -> bool {
         matches!(self.phase, Phase::Catching { .. })
+    }
+
+    /// Says whether Harry has the run of flight rings the catch needs (`quidditch::trail`'s
+    /// `TrailTuning::catch_rings`). While this is false a full bar waits instead of opening the catch window.
+    pub fn set_rings_ready(&mut self, ready: bool) {
+        self.rings_ready = ready;
+    }
+
+    /// Whether the rings let the catch happen at all (for the HUD and the logs).
+    pub fn rings_ready(&self) -> bool {
+        self.rings_ready
     }
 }
 
@@ -535,6 +572,80 @@ mod tests {
         assert!(s.in_catch_window(), "the bar never filled with Harry on the path");
         let h = harry_at(s.path);
         assert!(s.step(&h, true, 0.01).contains(&SnitchEvent::Caught), "a looping Snitch could not be caught");
+    }
+
+    /// The ring trail's bonus: it fills the bar and never overfills it, it is ignored once the catch window is
+    /// open or the match is over, and the catch still works exactly as it did (a full bar opens the window on
+    /// the next step near the Snitch, and the catch key then takes it).
+    #[test]
+    fn a_ring_bonus_fills_the_bar_without_breaking_the_catch() {
+        let mut s = Snitch::new(6, &arena());
+        s.bonus_progress(0.3);
+        assert!((s.progress() - 0.3).abs() < 1e-6, "{}", s.progress());
+        // Rubbish and nothing are both nothing.
+        for bad in [f32::NAN, f32::INFINITY, 0.0, -1.0] {
+            s.bonus_progress(bad);
+            assert!((s.progress() - 0.3).abs() < 1e-6, "{bad} moved the bar to {}", s.progress());
+        }
+        // Never past the top of the bar.
+        s.bonus_progress(5.0);
+        assert_eq!(s.progress(), 1.0);
+        assert!(!s.in_catch_window(), "the bonus must not open the catch window by itself");
+        // A full bar opens the window next step, and the catch is unchanged.
+        let h = near(&s, 0.0);
+        assert!(s.step(&h, false, 1.0 / 60.0).contains(&SnitchEvent::CatchStart));
+        // The window is no place for a bonus.
+        s.bonus_progress(1.0);
+        assert_eq!(s.progress(), 1.0);
+        let h = near(&s, 0.0);
+        assert!(s.step(&h, true, 0.01).contains(&SnitchEvent::Caught));
+        // And neither is a finished match.
+        s.bonus_progress(1.0);
+        assert_eq!(s.progress(), 1.0);
+    }
+
+    /// The owner's rule: without the run of flight rings the catch window never opens, however full the bar
+    /// is, and nothing is lost by the wait -- the moment the rings are in, it opens.
+    #[test]
+    fn without_the_rings_the_catch_window_stays_shut() {
+        let mut s = Snitch::new(12, &arena());
+        s.set_rings_ready(false);
+        for _ in 0..400 {
+            let h = near(&s, 0.0);
+            let ev = s.step(&h, true, 0.25);
+            assert!(!ev.contains(&SnitchEvent::CatchStart), "the window opened with no rings");
+            assert!(!ev.contains(&SnitchEvent::Caught), "the Snitch was caught with no rings");
+        }
+        // The bar is full and waiting, and no try has been spent.
+        assert_eq!(s.progress(), 1.0);
+        assert_eq!(s.tries_left(), SnitchTuning::default().max_tries);
+        assert!(!s.in_catch_window());
+        // The rings come in: the window opens on the next step and the catch is the usual one.
+        s.set_rings_ready(true);
+        let h = near(&s, 0.0);
+        assert!(s.step(&h, false, 1.0 / 60.0).contains(&SnitchEvent::CatchStart));
+        let h = near(&s, 0.0);
+        assert!(s.step(&h, true, 0.01).contains(&SnitchEvent::Caught));
+    }
+
+    /// The travel direction the ring trail takes its normals from: a unit vector down the path, towards the
+    /// waypoint the Snitch is flying at.
+    #[test]
+    fn travel_dir_points_down_the_path() {
+        let mut s = Snitch::new(8, &arena());
+        let h = harry_at(Vec3::new(40_000.0, 0.0, 2000.0));
+        let mut agreed = 0;
+        for _ in 0..300 {
+            let (was, d) = (s.path_pos(), s.travel_dir());
+            assert!((d.length() - 1.0).abs() < 1e-3, "{d:?} is not a unit vector");
+            s.step(&h, false, 1.0 / 60.0);
+            // The step really went that way, bar the frame the path turned at its waypoint.
+            let moved = s.path_pos() - was;
+            if moved.length() > 1.0 {
+                agreed += u32::from(moved.normalize().dot(d) > 0.999);
+            }
+        }
+        assert!(agreed > 290, "the travel direction matched the step in only {agreed} of 300 frames");
     }
 
     #[test]

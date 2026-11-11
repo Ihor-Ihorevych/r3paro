@@ -23,7 +23,7 @@ use hp3_script::{ObjId, Value, Vm};
 
 use super::arena::{self, ArenaBounds};
 use super::glue::QuidditchMatch;
-use super::goals::Hoop;
+use super::goals::{self, Hoop};
 use super::presentation;
 use super::quaffle::{self, Quaffle};
 
@@ -80,30 +80,10 @@ fn note(vm: &mut Vm<'_>, line: String) {
     vm.log.push(line);
 }
 
-/// Two unit vectors that span the disc of a hoop whose axis is `n`.
-fn disc_axes(n: Vec3) -> (Vec3, Vec3) {
-    let n = n.normalize_or_zero();
-    if n == Vec3::ZERO {
-        return (Vec3::X, Vec3::Z);
-    }
-    // Anything not along the axis will do to start from; the hoops' axes lie along y, so z is the one.
-    let seed = if n.z.abs() < 0.9 { Vec3::Z } else { Vec3::X };
-    let u = n.cross(seed).normalize_or_zero();
-    if u == Vec3::ZERO {
-        return (Vec3::X, Vec3::Z);
-    }
-    (u, n.cross(u))
-}
-
-/// Where the beads of `h`'s ring go: `RING_BEADS` points evenly around its rim, in its own plane.
+/// Where the beads of `h`'s ring go: `RING_BEADS` points evenly around its rim, in its own plane (the shared
+/// rim of `goals`, which the Snitch's flight rings are drawn with too).
 fn ring_points(h: &Hoop) -> Vec<Vec3> {
-    let (u, v) = disc_axes(h.normal);
-    (0..RING_BEADS)
-        .map(|i| {
-            let a = std::f32::consts::TAU * i as f32 / RING_BEADS as f32;
-            h.center + (u * a.cos() + v * a.sin()) * h.radius
-        })
-        .collect()
+    goals::ring_points(h.center, h.normal, h.radius, RING_BEADS)
 }
 
 /// Spawns the Quaffle's ball and a bead ring at every hoop. Called at the end of `glue::start`; every actor

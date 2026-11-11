@@ -100,7 +100,7 @@ was searched for one (Task 17), and this is everything that turned up:
 
 | candidate | what it really is |
 |---|---|
-| `HGame.HippoRing` (the Buckbeak flight rings, `HP3_COMC` places ~110 of them) | a `Keypoint` with **no mesh at all**: its visual is `ringFXClass = HGame.HippoRingEmitter`, a particle emitter of `HP_FX.Particles.Ring` sprites. Its size is only a collision box, `CollisionWidth`/`Height` 192 at `DrawScale` 5. Nothing to spawn. |
+| `HGame.HippoRing` (the Buckbeak flight rings, `HP3_COMC` places ~110 of them) | a `Keypoint` with **no mesh at all**: its visual is `ringFXClass = HGame.HippoRingEmitter`, a particle emitter whose three emitters are `HP3_FX.Bats` flappers (not `Particles.Ring`), 12 sprites each in a polar circle of about 200 uu. Its size is only a collision box, `CollisionWidth`/`Height` 192 at `DrawScale` 5. Nothing to spawn -- and spawning the emitter itself was tried for the Snitch's ring trail and dropped; see "The Snitch's ring trail" below. |
 | `HP3_Particles_SM.Character_Shapes.DementorSpawnRing_SM` | the only mesh in the game with a hole through it, but a **capless cylinder band**: 50 vertices, all at radius 1500, at z 0 or 64, outward normals, one section, 48 faces. Bounding box 3000 x 3000 x 64, axis +z. Looked at down its own axis -- which is how a goal hoop is seen -- it projects to nothing, and in a render only two thin arcs of it survive. |
 | `HP3_ArchiExterior.Quid_Stadium.Quid_GoldHoop` | a **texture**, not a mesh: the gold ring the retail goal-post quad wears. It draws correctly (masked, the sky shows through the middle), but the level's own lighting leaves the goal posts near black for the whole match, so in play the retail ring reads as a thin black outline. |
 | `post_ring_SM`, `FogRing`, `WaterRing`, `WispyRing` | a hitching post (bounds 72 x 40 x 126) and three textures. |
@@ -288,6 +288,57 @@ one thing that moved with the circling is `catch_radius`, from 350 to **500 uu**
 Snitch looping 150 uu away from where it would otherwise be is exactly as hard to catch as before. Nothing else
 was widened: the progress radii are 600/1500/4000 uu and 150 uu of wobble in them is noise.
 
+### The Snitch's ring trail (HP1's hoop trail)
+
+HP1's Snitch optionally leaves a trail of flight hoops behind it (`BroomHoopTrail`, with `HoopTrailLen` and
+`fHoopSpacing`, the hoops visible or invisible by stage). Its Seeker game has three modes: plain proximity;
+proximity with the hoops shown as guides; and `PM_Hoops`, in which the Snitch is caught only by flying
+through N hoops **in a row**. Ours is the guide mode **plus the `PM_Hoops` rule**, which the owner asked for:
+the rings pay into the catch bar *and* the catch window will not open without a run of them.
+
+`quidditch::trail` is the pure half (no VM) and `quidditch::rings` the actors' half.
+
+| number (`TrailTuning`, all placeholders) | value | why |
+|---|---|---|
+| `spacing` | 900 uu | twice a ring's width, so rings stand clear of each other instead of overlapping |
+| `max_rings` | 6 | about 12 s of the Snitch's flying; enough for a run of three, few enough not to fill the sky (or the phone's frame) |
+| `radius` | 220 uu | nearly twice a goal hoop's 120: it has to be fair to fly through at 600 (1200 boosted) uu/s |
+| `life` | 7 s | a ring that nobody went for fades away without a word |
+| `miss_behind` / `miss_near` | 300 / 900 uu | a ring counts as gone past only when Harry is behind its plane **and** was near it; one on the far side of the pitch is one he never went for |
+| `ring_bonus` | +0.06 of the bar | about four rings' worth of the proximity gain (`gain_rate` 0.25/s) |
+| `streak_len` / `streak_bonus` | 3 / +0.15 | the bigger bonus on every third ring in a row, on top of the ring's own |
+| `catch_rings` | 3 | **the rule**: no catch window until three rings in a row. 0 is the old behaviour |
+
+A ring is dropped **on the Snitch's flight path** (`Snitch::path_pos`), not where the Snitch is really seen.
+Dropping them at the circling position was tried and rendered: the loop is 150 uu wide, so consecutive rings
+sit on alternate sides of the path and the trail reads as a cloud of beads instead of a row of hoops. The
+ring's normal is the Snitch's travel direction there (`Snitch::travel_dir`), so it faces the chase. Every
+centre comes out of the Snitch, which flies inside the flight volume, so the trail is bounded by it.
+
+A ring is flown through **either way round** -- `goals::disc_crossing`, the same disc test a goal uses without
+the direction -- and counts once. A run is reset by going past a ring, and costs nothing else. A full bar with
+no run waits instead of opening the catch window, so a missing run never spends one of the three tries; the
+HUD's `RINGS n/3` next to the catch bar says what is still wanted, and the commentary says so when the run is
+in. A pass-through plays one of seven broom swishes (`Q_BRM_Swish_04`/`_06`, `broomwhoosh01..05`): HP3 ships no
+hoop sound at all, where HP1 picks one of fifteen `Q_Through_Hoop` samples.
+
+**How a ring is drawn: the bead route, not the Buckbeak emitter.** The Buckbeak ring was tried first, as the
+owner asked. `HGame.HippoRing` has no mesh; the visual is the particle emitter `HGame.HippoRingEmitter`, and
+this engine **does** run it (`HP3_COMC`'s 110 rings come out as 36 live sprites each, standing in a circle of
+about 200 uu by `StartLocationPolarRange`, which the actor's rotation turns -- so it can even be aimed, and
+its radius can be rewritten per actor after `particles::own_emitters`). Ten of them were spawned as the trail
+and rendered: it does not work. The sprites are `HP3_FX.Bats` flappers that fly outward from the circle, so a
+ring reads as a loose cloud rather than a hoop, and they live in world coordinates, so a pooled actor moved on
+to its next ring leaves its whole swarm behind (a hidden emitter freezes instead of clearing). So a trail ring
+is drawn the way the goal hoops are: **eight round static meshes of radius 32 around the rim** (shared with
+the hoops through `goals::ring_points`), gold-skinned and `bUnlit`, eight and not twelve because six rings are
+on screen at once and the phone has 60 fps to keep. The pool is fixed -- `max_rings * 8` = 48 actors, moved
+and hidden rather than spawned and destroyed -- so a match of hundreds of rings spawns 48 and `glue::stop`
+destroys 48.
+
+Still open, if the rule is ever wanted in its HP1 form: `PM_Hoops` proper, where the rings are the *only* way
+to the Snitch and the proximity bar goes away.
+
 As a backstop, `count_down_travel` refuses `Level.NextURL` for as long as `World::quidditch` is `Some`, clears
 it and logs `quidditch: level travel blocked (<url>)` once per level. A level with no match is untouched by
 either: both are gated on a running match.
@@ -316,6 +367,10 @@ either: both are gated on a running match.
 - `HP3_QUID_START=<x,y,z>` — **off by default.** Where Harry's broom starts instead of his own goal line,
   brought inside the flight volume. It exists so a headless frame can be rendered from somewhere other than
   the kickoff -- `HP3_QUID_START=256,2300,760` puts the chase camera in front of the north goal's three hoops.
+- `HP3_QUID_RING_AUTOFLY=1` — **off by default.** The broom flies itself from flight ring to flight ring of
+  the Snitch's trail (`flight::look_at`, the same scripted pilot `quid-smoke` uses), so a headless run proves
+  a pass-through, its streak and its bonus with nobody at the keyboard. It chases rings and not the Snitch, so
+  such a run ends by running out of catch tries, not by a catch.
 - `HP3_QUID_EASY=1` — **off by default.** The Snitch's catch bar fills from anywhere on the pitch, the catch
   window is wide open and the catch key is held for Harry, so a headless run reaches a caught Snitch (and the
   result line) in about 12 seconds with nobody at the keyboard. Only for tests; it makes the game trivial.

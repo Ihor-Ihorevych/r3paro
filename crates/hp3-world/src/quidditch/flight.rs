@@ -191,6 +191,30 @@ pub fn boundary_turn(pos: Vec3, yaw: f32, b: &ArenaBounds) -> f32 {
     (wrap_pi(back.y.atan2(back.x) - yaw) / std::f32::consts::PI).clamp(-1.0, 1.0)
 }
 
+/// How far a scripted pilot's "mouse" may flick the look in one frame (rad): a hand's worth, so the broom is
+/// steered and never snapped round.
+const FLICK: f32 = 0.25;
+
+/// The steering that points `broom` at `target`: the mouse flick that puts the rider's *look*
+/// (`want_yaw` / `want_pitch`, which is what the broom chases) on it, bounded per frame by `FLICK`. The
+/// broom's own rate caps do the rest, so this is a turn flown over several frames, not a snap.
+///
+/// It is the pilot of everything that flies the broom without a player: the headless smoke match
+/// (`hp3-run quid-smoke`) and the `HP3_QUID_RING_AUTOFLY` chase of the Snitch's ring trail.
+pub fn look_at(broom: &BroomState, target: Vec3, boost: bool) -> BroomInput {
+    let d = target - broom.pos;
+    let flat = d.truncate().length();
+    let want_yaw = d.y.atan2(d.x);
+    let want_pitch = d.z.atan2(flat.max(1e-3));
+    BroomInput {
+        look_yaw: wrap_pi(want_yaw - broom.want_yaw).clamp(-FLICK, FLICK),
+        look_pitch: (want_pitch - broom.want_pitch).clamp(-FLICK, FLICK),
+        boost,
+        brake: false,
+        ..BroomInput::default()
+    }
+}
+
 /// Keeps the broom in the flight volume, which is all the collision a Quidditch match has (the stadium is
 /// spawned after the level's collision was baked, so it has none of its own): the position is clamped into the
 /// volume and the velocity loses what pushed through the face it crossed, so the broom skims the wall instead

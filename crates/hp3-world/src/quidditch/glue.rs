@@ -21,6 +21,7 @@ use super::camera::{self, CamState};
 use super::flight::{self, BroomInput, BroomState, BroomTuning};
 use super::input::{desktop_input, KeyState};
 use super::presentation::{self, Presentation};
+use super::rings::{self, TrailRings};
 use super::rules::{MatchEvent, MatchPhase, Rules};
 use super::snitch::{Snitch, SnitchTuning};
 use super::team::{self, Teams};
@@ -76,6 +77,9 @@ pub struct QuidditchMatch {
     /// The Quaffle and the six scoring hoops (`quidditch::ball`). The Chasers of `teams` throw it; the debug
     /// `HP3_QUID_SHOOT` still does too.
     pub balls: Balls,
+    /// The flight rings the Snitch leaves behind it and the actors that show them (`quidditch::trail`,
+    /// `quidditch::rings`): Harry's road to the Snitch, and the run of rings his catch needs.
+    pub rings: TrailRings,
     /// Both sides' AI flyers and the Quaffle play between them (`quidditch::ai`, `quidditch::team`).
     pub teams: Teams,
     pub rules: Rules,
@@ -481,6 +485,7 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
         snitch,
         bludgers,
         balls: Balls::new(&bounds),
+        rings: TrailRings::default(),
         // A third stream off the same match seed, so a given fixture always plays the same way.
         teams: Teams::new(seed ^ 0x2e11_a1be_9c04_77d1),
         rules,
@@ -505,11 +510,12 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
         leave_at: None,
         easy,
     };
-    // Meshes, sounds and music, then the Quaffle and the hoop rings, then the teams (whose kickoff hands the
-    // Quaffle to a Chaser, so it has to exist first). All three add actors of their own, so they run before
-    // the count below is printed.
+    // Meshes, sounds and music, then the Quaffle and the hoop rings, then the Snitch's ring trail, then the
+    // teams (whose kickoff hands the Quaffle to a Chaser, so it has to exist first). All of them add actors of
+    // their own, so they run before the count below is printed.
     presentation::start(vm, &mut m, seed);
     ball::start(vm, &mut m);
+    rings::start(vm, &mut m);
     team::start(vm, &mut m);
     let yes_no = |o: Option<ObjId>| if o.is_some() { "yes" } else { "MISSING" };
     let line = format!(
@@ -620,6 +626,11 @@ fn tick_match(vm: &mut Vm<'_>, m: &mut QuidditchMatch, dt: f32) {
         m.spin -= if dt.is_finite() { dt.clamp(0.0, 0.25) } else { 0.0 };
         i = BroomInput { yaw: 1.0, pitch: -0.12, brake: true, ..BroomInput::default() };
     }
+    // `HP3_QUID_RING_AUTOFLY` (debugging): the broom flies the Snitch's ring trail by itself, which is how a
+    // headless run shows a ring being flown through. It is off unless the variable is set.
+    if let Some(target) = rings::autofly_target(m) {
+        i = flight::look_at(&m.broom, target, false);
+    }
     let soft = inset(&m.arena, SOFT_MARGIN);
     // The soft boundary steers the rider's *look* (which is what the broom chases now), not the broom's own
     // heading: a correction measured against the heading would keep being undone by the look the player left
@@ -651,6 +662,10 @@ fn tick_match(vm: &mut Vm<'_>, m: &mut QuidditchMatch, dt: f32) {
             m.rules.on_snitch(e);
             events.push(MatchEvent::Snitch(e));
         }
+        // The Snitch's ring trail: a ring is dropped behind it, Harry's step is tested against the rings he is
+        // among, and a ring flown through pays into the catch bar. It also tells the Snitch whether the run of
+        // rings the catch needs is in (`trail::TrailTuning::catch_rings`), so it runs right after its step.
+        rings::tick(vm, m, dt, &mut events);
         let mut hits = m.bludgers.step(&m.broom, dt);
         // A Bludger that has left the stadium is gone (a miss): its ball would otherwise hang on the wall
         // where `clamp_into` holds it while the real one flies on outside.
@@ -723,6 +738,7 @@ fn tick_match(vm: &mut Vm<'_>, m: &mut QuidditchMatch, dt: f32) {
         // What the HUD is showing at this moment (the headless run has no screen to look at), and where the
         // Bludgers in flight have got to (a headless run has no screen to see the balls on either).
         println!("{}", presentation::hud_line(&super::hud::hud_items(&presentation::hud_input(m))));
+        println!("{}", rings::debug_line(m));
         let balls: Vec<String> = m.bludgers.positions().iter().map(|p| format!("({:.0}, {:.0}, {:.0})", p.x, p.y, p.z)).collect();
         println!("quidditch: bludgers in flight [{}]", balls.join(" "));
         let h = m.harry.filter(|&h| !vm.db.objects.get(h).deleted).map(|h| crate::rd_vec(vm, h, "Location")).unwrap_or(Vec3::ZERO);

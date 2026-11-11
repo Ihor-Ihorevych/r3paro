@@ -28,6 +28,9 @@ pub enum CommentId {
     BludgerHit,
     BludgerStung,
     BludgerWide,
+    ThroughRings,
+    RingRun,
+    RingsReady,
     GoalHome,
     GoalHomeAgain,
     GoalAway,
@@ -58,6 +61,9 @@ pub fn line(id: CommentId) -> &'static str {
         CommentId::BludgerHit => "OOF! That Bludger caught him square.",
         CommentId::BludgerStung => "He's taken another one. He's hanging on by his knees!",
         CommentId::BludgerWide => "And the Bludger sails harmlessly by.",
+        CommentId::ThroughRings => "Through the rings! He's on the Snitch's tail!",
+        CommentId::RingRun => "Another one! Potter is flying the Snitch's own trail!",
+        CommentId::RingsReady => "That's his run of rings -- the Snitch is his to take!",
         CommentId::GoalHome => "Gryffindor score! Ten points!",
         CommentId::GoalHomeAgain => "Another one through the hoop for Gryffindor!",
         CommentId::GoalAway => "They've scored. Ten points to the other lot.",
@@ -73,7 +79,7 @@ pub fn sound_for(id: CommentId) -> Option<&'static str> {
     Some(match id {
         CommentId::Kickoff => "SS_QUID_Bigcheers_0001",
         CommentId::Caught | CommentId::Won => "SS_QUID_Crowd_roar_01",
-        CommentId::GoalHome | CommentId::GoalHomeAgain => "SS_QUID_Big_cheer_01",
+        CommentId::GoalHome | CommentId::GoalHomeAgain | CommentId::RingsReady => "SS_QUID_Big_cheer_01",
         CommentId::GoalAway | CommentId::GoalAwayAgain | CommentId::Lost => "SS_QUID_boo_long_01",
         CommentId::OutOfTries => "SS_QUID_boo_long_01",
         _ => return None,
@@ -93,6 +99,10 @@ fn choices(e: &MatchEvent) -> &'static [CommentId] {
         MatchEvent::Bludger(BludgerEvent::Launched) => &[CommentId::BludgerOut, CommentId::BludgerIncoming],
         MatchEvent::Bludger(BludgerEvent::Hit) => &[CommentId::BludgerHit, CommentId::BludgerStung],
         MatchEvent::Bludger(BludgerEvent::Missed) => &[CommentId::BludgerWide],
+        // The ring that completes the run the catch needs has a line of its own, so the player is told the
+        // Snitch is now his to take; every other ring shares two.
+        MatchEvent::Rings { ready: true, .. } => &[CommentId::RingsReady],
+        MatchEvent::Rings { .. } => &[CommentId::ThroughRings, CommentId::RingRun],
         MatchEvent::Goal { home: true } => &[CommentId::GoalHome, CommentId::GoalHomeAgain],
         MatchEvent::Goal { home: false } => &[CommentId::GoalAway, CommentId::GoalAwayAgain],
         MatchEvent::Ended(Outcome::Won) => &[CommentId::Won],
@@ -153,6 +163,8 @@ mod tests {
         for e in [BludgerEvent::Launched, BludgerEvent::Hit, BludgerEvent::Missed] {
             v.push(MatchEvent::Bludger(e));
         }
+        v.push(MatchEvent::Rings { streak: 1, ready: false });
+        v.push(MatchEvent::Rings { streak: 3, ready: true });
         v.push(MatchEvent::Ended(Outcome::Won));
         v.push(MatchEvent::Ended(Outcome::Lost));
         v
