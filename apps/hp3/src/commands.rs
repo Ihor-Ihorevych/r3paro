@@ -22,8 +22,9 @@ pub fn take() -> Vec<String> {
     QUEUE.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
 }
 
-/// Runs one command: `quicksave`, `quickload`, `level <map>` (sets `level`, which the loop opens), or
-/// `cheat <god|ghost|fly|walk|giveall|beans|cakes|pasties|beatboss|defeatpeeves|heal>`.
+/// Runs one command: `quicksave`, `quickload`, `level <map>` (sets `level`, which the loop opens),
+/// `cheat <god|ghost|fly|walk|giveall|beans|cakes|pasties|beatboss|defeatpeeves|heal>`, or
+/// `quidditch [next|<house>|stop|league]` (see `quidditch`).
 pub fn run(vm: &mut Vm<'_>, command: &str, level: &mut Option<String>) {
     let mut words = command.split_whitespace();
     let (Some(verb), arg) = (words.next(), words.next()) else { return };
@@ -49,6 +50,7 @@ pub fn run(vm: &mut Vm<'_>, command: &str, level: &mut Option<String>) {
         "dumpnear" => dump_near(vm, arg.and_then(|a| a.parse().ok()).unwrap_or(400.0)),
         "level" => *level = arg.map(str::to_string),
         "cheat" => cheat(vm, arg.unwrap_or("")),
+        "quidditch" => quidditch(vm, arg.unwrap_or(""), level),
         _ => eprintln!("command: unknown '{command}'"),
     }
 }
@@ -114,6 +116,43 @@ fn dump_near(vm: &mut Vm<'_>, radius: f32) {
                 vm.log.push(text);
             }
         }
+    }
+}
+
+/// `quidditch [next]` starts a match against the house the league says is next and sends the game to the
+/// Quidditch map; `quidditch <house>` picks the house by hand (Slytherin, Ravenclaw or Hufflepuff, or the
+/// start of one); `quidditch stop` leaves a running match and goes back to the front end; `quidditch league`
+/// prints the table. This is the in-game entry: the F12 debug list has both an entry for the next fixture and
+/// one for leaving, so no environment variable is needed to play a match.
+fn quidditch(vm: &mut Vm<'_>, what: &str, level: &mut Option<String>) {
+    use hp3_world::quidditch::league::Opponent;
+    use hp3_world::quidditch::menu;
+    match what {
+        "" | "next" => match menu::request_next(vm) {
+            Some(o) => {
+                eprintln!("quidditch: next match against {}", o.name());
+                *level = Some(menu::MATCH_MAP.to_string());
+            }
+            None => eprintln!("quidditch: the season is over, nothing left to play (see 'quidditch league')"),
+        },
+        "stop" | "leave" | "exit" => {
+            let map = menu::leave(vm);
+            eprintln!("quidditch: back to {map}");
+            *level = Some(map);
+        }
+        "league" | "table" => {
+            for line in menu::report(vm) {
+                eprintln!("quidditch: {line}");
+            }
+        }
+        house => match Opponent::parse(house) {
+            Some(o) => {
+                menu::request(vm, o);
+                eprintln!("quidditch: match against {}", o.name());
+                *level = Some(menu::MATCH_MAP.to_string());
+            }
+            None => eprintln!("quidditch: unknown '{house}' (next, Slytherin, Ravenclaw, Hufflepuff, stop, league)"),
+        },
     }
 }
 

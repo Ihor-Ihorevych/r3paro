@@ -23,8 +23,9 @@ const MAGIC: &[u8; 8] = b"HP3SAVE2";
 /// The first format: no objects made while running.
 const MAGIC_V1: &[u8; 8] = b"HP3SAVE1";
 
-/// Where slots live: the `Save` folder next to the game's data.
-fn save_dir(vm: &Vm<'_>) -> PathBuf {
+/// Where slots live: the `Save` folder next to the game's data. Public because the Quidditch league saves
+/// itself in the same folder (`quidditch::menu`), by the same rule: a scratch data root keeps its own saves.
+pub fn save_dir(vm: &Vm<'_>) -> PathBuf {
     vm.db.set.root().join("Save")
 }
 

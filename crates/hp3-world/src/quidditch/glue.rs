@@ -105,6 +105,13 @@ pub struct QuidditchMatch {
     restart_at: Option<u64>,
     /// Whether the end of the match has been reported.
     reported: bool,
+    /// Whether the match was started from the front end (`menu::request`) rather than by hand
+    /// (`HP3_MATCH=<opponent>`). Only such a match writes its result into the league and takes the player back
+    /// to the menu when it is over; a debug match is left running, as it always was.
+    pub(super) from_menu: bool,
+    /// The tick a finished match hands the player back to the front end on: the result line stays up until
+    /// then (`menu::LINGER_TICKS`). Only ever set for a `from_menu` match.
+    leave_at: Option<u64>,
     /// `HP3_QUID_EASY=1` (debugging, off by default): the snitch is caught the moment Harry is anywhere near
     /// it and the catch key is held for him, so a headless smoke run reaches a result in a few hundred ticks.
     /// Nothing in the game sets it.
@@ -550,6 +557,10 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
         // The restart is a one-shot: the match it starts does not restart itself again.
         restart_at: (!re_entry).then(|| crate::envc::var("HP3_MATCH_RESTART").ok().and_then(|v| v.parse().ok()).filter(|&n| n > 0)).flatten(),
         reported: false,
+        // Set by `start_from_env` for a match the front end asked for; a `start` from anywhere else is a
+        // debug match and changes no league.
+        from_menu: false,
+        leave_at: None,
         easy,
     };
     // Meshes, sounds and music, then the Quaffle and the hoop rings, then the teams (whose kickoff hands the
@@ -757,6 +768,18 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         let line = format!("quidditch: match against {} ended {outcome:?}, {}-{} -- {result}", m.opponent, score.home, score.away);
         println!("{line}");
         vm.log.push(line);
+        // A match the front end started goes into the league and then hands the player back to the menu; the
+        // result line stays up in between. A debug match (`HP3_MATCH`) does neither.
+        if m.from_menu {
+            super::menu::record_result(vm, &m.opponent, outcome, score);
+            m.leave_at = Some(m.frames + super::menu::LINGER_TICKS);
+        }
+    }
+    // The result has been read: the match is stopped (at the end of this tick, through the gate) and the
+    // player travels back to the front end, which is only allowed once no match is running.
+    if m.leave_at == Some(m.frames) {
+        let map = super::menu::leave(vm);
+        crate::world(vm).pending_travel = Some(map);
     }
     crate::world(vm).quidditch = Some(m);
     // The match is back in the world, so whatever was asked for meanwhile can run for real.
@@ -796,9 +819,28 @@ pub fn view(vm: &mut Vm<'_>) -> Option<(Vec3, [i32; 3], f32)> {
     Some((m.cam.pos, m.cam.rot, m.cam.fov))
 }
 
-/// `HP3_MATCH=<opponent>` (debugging): starts a match as soon as a level has finished loading. Called by
-/// `load_with` once the player exists.
+/// Starts the match this level was loaded for, as soon as it has finished loading: the one the front end asked
+/// for (`menu::request`, the `quidditch` command) or `HP3_MATCH=<opponent>` (debugging). Called by `load_with`
+/// once the player exists; every other level leaves the match state empty.
 pub fn start_from_env(vm: &mut Vm<'_>) -> Result<(), VmError> {
+    // The front end's request first: it is a real match, it goes into the league, and it ends by taking the
+    // player back to the menu.
+    if let Some(opponent) = super::menu::take_request() {
+        let here = crate::world(vm).map.name.clone();
+        if !here.eq_ignore_ascii_case(super::menu::MATCH_MAP) {
+            let line = format!("quidditch: a match against {opponent} was asked for but {here} is not {}, dropped", super::menu::MATCH_MAP);
+            println!("{line}");
+            vm.log.push(line);
+        } else if crate::world(vm).player.is_none() {
+            vm.log.push(format!("quidditch: a match against {opponent} was asked for but the level has no player, no match started"));
+        } else {
+            start(vm, &opponent)?;
+            if let Some(m) = crate::world(vm).quidditch.as_mut() {
+                m.from_menu = true;
+            }
+            return Ok(());
+        }
+    }
     let Ok(opponent) = crate::envc::var("HP3_MATCH") else { return Ok(()) };
     let opponent = opponent.trim();
     if opponent.is_empty() || opponent.eq_ignore_ascii_case("none") {

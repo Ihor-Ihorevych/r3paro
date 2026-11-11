@@ -14,8 +14,12 @@ pub enum Pick {
 }
 
 /// The entries, in the phone menu's order. The font has no comma, so the labels avoid it.
-const ENTRIES: [(&str, Option<&str>); 12] = [
+const ENTRIES: [(&str, Option<&str>); 15] = [
     ("GO TO LEVEL...", None),
+    // The Quidditch cup: the next fixture of the league, and the way out of a match again.
+    ("QUIDDITCH: PLAY THE NEXT MATCH", Some("quidditch")),
+    ("QUIDDITCH: LEAVE THE MATCH", Some("quidditch stop")),
+    ("QUIDDITCH: LEAGUE TABLE (LOG)", Some("quidditch league")),
     ("GOD MODE (ON/OFF)", Some("cheat god")),
     ("FLY", Some("cheat fly")),
     ("GHOST (THROUGH WALLS)", Some("cheat ghost")),
@@ -57,12 +61,16 @@ impl CheatMenu {
         self.selected = ENTRIES.len() - 1;
     }
 
-    /// The chosen entry. The list stays open after a cheat (several can be given in a row); the level list closes it.
+    /// The chosen entry. The list stays open after a cheat (several can be given in a row); the level list and the Quidditch
+    /// entries close it, because they leave the level that is being played.
     pub fn choose(&mut self) -> Pick {
         let (label, command) = ENTRIES[self.selected];
         match command {
             Some(c) => {
                 self.done = Some((std::time::Instant::now(), label));
+                if c.starts_with("quidditch") && c != "quidditch league" {
+                    self.open = false;
+                }
                 Pick::Command(c)
             }
             None => {

@@ -24,6 +24,12 @@ use super::glue::QuidditchMatch;
 
 /// The pawn classes each side's riders are, best first: the class a short side's extra rider is spawned as,
 /// and the classes a placed player is recognised by.
+///
+/// The retail data has riders for Gryffindor and Slytherin only (`QuidPlayer*Griff*`, `QuidPlayer*Sly*`),
+/// which is all the game's one Quidditch match ever needed. A league round against Ravenclaw or Hufflepuff
+/// therefore **flies the Slytherin riders**: the house is named in the HUD and the commentary, but the kit on
+/// the brooms is green. Recolouring them would mean new textures or a material override on the skeletal mesh,
+/// which is a job of its own and not done here.
 const HOME_CLASSES: [&str; 2] = ["HGame.QuidPlayerGriffMale", "HGame.QuidPlayerGriffFem"];
 const AWAY_CLASSES: [&str; 2] = ["HGame.QuidPlayerSlyMale", "HGame.QuidPlayerSlyFem"];
 
