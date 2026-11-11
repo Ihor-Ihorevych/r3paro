@@ -70,9 +70,9 @@ pub struct TrailTuning {
     pub streak_len: u32,
     pub streak_bonus: f32,
     /// How many rings Harry must take **in a row** before the Snitch may be caught at all: HP1's `PM_Hoops`
-    /// rule, which the owner asked for. The bar still fills by closing in, but the catch window stays shut
-    /// until the run is in (`Snitch::set_rings_ready`), so nobody loses a try waiting for it. 0 is the old
-    /// behaviour, a catch with no rings at all.
+    /// rule. Off by default (0): the rings are a guide and a bonus, and the catch works by proximity as before.
+    /// When set, the bar still fills by closing in, but the catch window stays shut until the run is in
+    /// (`Snitch::set_rings_ready`), so nobody loses a try waiting for it.
     pub catch_rings: u32,
 }
 
@@ -90,7 +90,7 @@ impl Default for TrailTuning {
             ring_bonus: 0.06,
             streak_len: 3,
             streak_bonus: 0.15,
-            catch_rings: 3,
+            catch_rings: 0,
         }
     }
 }
