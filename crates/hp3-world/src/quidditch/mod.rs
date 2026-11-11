@@ -3,8 +3,10 @@
 
 pub mod arena;
 pub mod bludger;
+pub mod camera;
 pub mod flight;
 pub mod glue;
+pub mod input;
 mod rng;
 pub mod rules;
 pub mod snitch;

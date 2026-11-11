@@ -6,8 +6,9 @@
 //! goes away with the level and a map that never starts a match pays nothing but one `take()` of a `None` a
 //! frame. `World::quidditch_gate` keeps `start` and `stop` honest when they are called from inside `tick`.
 //!
-//! Flight control, the camera and the input are Task 7; the HUD, sound and the hoop rings come later. What is
-//! here is the arena layout and start / stop / tick.
+//! The HUD, sound and the hoop rings come later. What is here is the arena layout, start / stop / tick, the
+//! flight of Harry's broom (steered by `flight` from the keys `crate::input::apply` hands over) and the chase
+//! camera `crate::player_view` shows it from.
 
 use glam::Vec3;
 
@@ -15,7 +16,9 @@ use hp3_script::{ObjId, Value, Vm, VmError};
 
 use super::arena::{self, ArenaBounds, ArenaPiece};
 use super::bludger::Bludgers;
-use super::flight::BroomState;
+use super::camera::{self, CamState};
+use super::flight::{self, BroomState, BroomTuning};
+use super::input::{desktop_input, KeyState};
 use super::rules::{MatchPhase, Rules};
 use super::snitch::Snitch;
 
@@ -36,14 +39,29 @@ const BROOM_MESHES: [&str; 2] = ["QuidBroom_SM", "QuiddichBroom_SM"];
 /// `body_broom` is the real one: the retail `HarryQuid` skeleton carries a bone for exactly this (its last,
 /// after the hand and finger bones). The rest are fallbacks in case another mesh is used for the rider.
 const BROOM_BONES: [&str; 5] = ["body_broom", "broom", "body_rhand", "body_lhand", "body_root"];
+/// How far inside the arena walls the broom starts steering itself back in (uu): the soft boundary. The hard
+/// one is `flight::confine`, which the broom reaches only by flying at a wall through this band.
+const SOFT_MARGIN: f32 = 900.0;
+/// How much of the player's full stick deflection the soft boundary may add (it is added to his own input, so
+/// he can still fight it, but not win while he faces the wall).
+const BOUNDARY_WEIGHT: f32 = 0.8;
+/// Animations the rider is put in while he flies, best first: the first one his animation set has wins. The
+/// retail `HarryQuid` set holds `broommount`, `hover`, `idle`, `flytostop`, `lookaround`, `reach`,
+/// `reachloop`, `lookdown`, `fall`, `falllook` and `stand`; `hover` is the one that sits on a broom, and the
+/// rest are fallbacks in case another mesh is used for the rider. A set with none of them plays nothing.
+const FLY_ANIMS: [&str; 5] = ["Hover", "QuidFly", "Fly", "Idle", "Stand"];
 
 /// A match in progress: the pure systems, the arena they play in, and the actors that show them.
 pub struct QuidditchMatch {
     /// Whom Gryffindor is playing (`HP3_MATCH=<opponent>`).
     pub opponent: String,
     pub arena: ArenaBounds,
-    /// Harry's flight state. Task 7 steers it; until then it follows his pawn's `Location`.
+    /// Harry's flight state: what the player steers, and what his pawn's `Location` is written from.
     pub broom: BroomState,
+    /// How the broom flies (tuned by feel in a later task).
+    pub tuning: BroomTuning,
+    /// The chase camera `crate::player_view` hands the renderer while the match runs.
+    pub cam: CamState,
     pub snitch: Snitch,
     pub bludgers: Bludgers,
     pub rules: Rules,
@@ -51,6 +69,13 @@ pub struct QuidditchMatch {
     pub actors: Vec<ObjId>,
     pub harry: Option<ObjId>,
     pub snitch_actor: Option<ObjId>,
+    /// This frame's broom keys and mouse motion, as `crate::input::apply` read them (`feed_input`). Taken by
+    /// the tick, so a frame whose input never arrived steers nothing instead of repeating the last one.
+    pending_input: Option<(KeyState, (f32, f32))>,
+    /// The boost toggle: a tap of the boost key flips it (HP1's broom works that way).
+    boost: bool,
+    /// The pawn the player controller had before the match, given back by `stop`.
+    was_playing: Option<ObjId>,
     /// Ticks this match has had.
     frames: u64,
     /// `HP3_MATCH_RESTART=<ticks>` (debugging): start the match over after that many ticks, which takes the
@@ -215,6 +240,62 @@ fn attach_broom(vm: &mut Vm<'_>, harry: ObjId) -> Option<ObjId> {
     Some(broom)
 }
 
+/// Hands the player controller the broom pawn, so the player is Harry on his broom and the pawn that walked
+/// into the level stops answering to him. Returns the pawn the controller had, which `stop` gives back.
+///
+/// This is the engine's own half of a possession (the two pointers that make a controller and a pawn a pair);
+/// the game's `SwitchControlToPawn` is not used because it trades the controllers of two pawns that are both
+/// in the level's cast, and the broom pawn is one the match spawned, with no controller of its own.
+fn possess(vm: &mut Vm<'_>, harry: ObjId) -> Option<ObjId> {
+    let pc = crate::world(vm).player?;
+    let had = crate::get(vm, pc, "Pawn").as_obj();
+    if had == Some(harry) {
+        return had;
+    }
+    // The broom is flown by the match, not by the pawn physics: it collides with nothing (the stadium is
+    // spawned after the level's collision was baked anyway) and `flight::confine` keeps it in the arena, so
+    // no fall and no out-of-world check can ever reach it.
+    crate::set(vm, harry, "bCollideWorld", Value::Bool(false));
+    crate::set(vm, harry, "bIgnoreOutOfWorld", Value::Bool(true));
+    crate::set(vm, harry, "bHidden", Value::Bool(false));
+    crate::set(vm, harry, "Controller", Value::Object(Some(pc)));
+    crate::set(vm, pc, "Pawn", Value::Object(Some(harry)));
+    had
+}
+
+/// Gives the controller back the pawn it was playing before the match.
+fn unpossess(vm: &mut Vm<'_>, had: Option<ObjId>) {
+    let Some(pc) = crate::world(vm).player else { return };
+    if let Some(p) = had.filter(|&p| !vm.db.objects.get(p).deleted) {
+        crate::set(vm, p, "Controller", Value::Object(Some(pc)));
+        crate::set(vm, pc, "Pawn", Value::Object(Some(p)));
+    }
+}
+
+/// Puts the rider in a flying pose, if his animation set has one of `FLY_ANIMS`. Looping and on the main
+/// channel, so the engine's own movement animations (made for running) do not fight it.
+fn play_flying(vm: &mut Vm<'_>, harry: ObjId) {
+    let Some(set) = crate::anim::set_of(vm, harry) else {
+        vm.log.push("quidditch: Harry has no animation set, he rides in his rest pose".into());
+        return;
+    };
+    let found = FLY_ANIMS.iter().find(|a| set.find(a).is_some()).copied();
+    if crate::envc::var_os("HP3_QUID_DEBUG").is_some() {
+        // Which of the rider's animations might be a better flying pose than the one picked, to add to
+        // `FLY_ANIMS`. It exists to read the retail set, not for the game.
+        let names: Vec<&str> = set.sequences.iter().map(|s| s.name.as_str()).take(40).collect();
+        println!("quidditch: Harry rides in {found:?}; his animation set holds {names:?}");
+    }
+    match found {
+        Some(a) => {
+            let name = vm.db.names.intern(a);
+            crate::anim::play(vm, harry, name, 1.0, 0.2, 0, true);
+            vm.log.push(format!("quidditch: Harry flies in {a}"));
+        }
+        None => vm.log.push(format!("quidditch: no animation of {FLY_ANIMS:?} for the rider")),
+    }
+}
+
 /// Spawns an actor of `path`'s class at `pos` facing `yaw`.
 fn spawn_class(vm: &mut Vm<'_>, path: &str, pos: Vec3, yaw: i32) -> Option<ObjId> {
     let class = crate::find_object(vm, path);
@@ -273,11 +354,12 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
         }
         None => vm.log.push(format!("quidditch: class {MESH_ACTOR_CLASS} not found, no stadium")),
     }
-    // Harry's broom pawn starts over his own goal line. It flies (nothing holds a broom up), but nothing
-    // steers it yet: Task 7 gives it the flight model and the camera, and possesses it.
+    // Harry's broom pawn starts over his own goal line, flying (nothing holds a broom up), steered by
+    // `flight` from this frame's input, and played by the player: the controller possesses it.
     let start_at = arena::harry_start(&bounds);
     let harry = spawn_class(vm, HARRY_CLASS, start_at, 16384);
     let mut broom = None;
+    let mut was_playing = None;
     if let Some(h) = harry {
         crate::set(vm, h, "Physics", Value::Byte(crate::physics::PHYS_FLYING));
         actors.push(h);
@@ -285,6 +367,8 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
         if let Some(b) = broom {
             actors.push(b);
         }
+        was_playing = possess(vm, h);
+        play_flying(vm, h);
     }
     // The Snitch actor is only a marker the pure snitch drives; `tick` writes its `Location` every frame.
     let snitch = Snitch::new(seed, &bounds);
@@ -298,16 +382,24 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
     bludgers.set_home(arena::bludger_home(&bounds));
     let mut rules = Rules::new();
     rules.start();
+    // He starts facing up the pitch (`yaw` of a quarter turn is +y, the far goal), as his pawn's spawn
+    // rotation of 16384 does.
+    let broom_state = BroomState { pos: start_at, vel: Vec3::ZERO, yaw: std::f32::consts::FRAC_PI_2, pitch: 0.0 };
     let m = QuidditchMatch {
         opponent: opponent.to_string(),
         arena: bounds,
-        broom: BroomState { pos: start_at, vel: Vec3::ZERO, yaw: std::f32::consts::FRAC_PI_2, pitch: 0.0 },
+        broom: broom_state,
+        tuning: BroomTuning::default(),
+        cam: camera::behind(&broom_state),
         snitch,
         bludgers,
         rules,
         actors,
         harry,
         snitch_actor,
+        pending_input: None,
+        boost: false,
+        was_playing,
         frames: 0,
         // The restart is a one-shot: the match it starts does not restart itself again.
         restart_at: (!re_entry).then(|| crate::envc::var("HP3_MATCH_RESTART").ok().and_then(|v| v.parse().ok()).filter(|&n| n > 0)).flatten(),
@@ -338,6 +430,9 @@ pub fn stop(vm: &mut Vm<'_>) {
         return;
     }
     let Some(m) = crate::world(vm).quidditch.take() else { return };
+    // The pawn goes back to the player before the broom pawn is destroyed: a controller must never be left
+    // holding a deleted pawn.
+    unpossess(vm, m.was_playing);
     let mut gone = 0;
     // Backwards, so a child goes before what it rides on (the broom before Harry).
     for a in m.actors.iter().rev() {
@@ -376,13 +471,29 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         let _ = start(vm, &opponent);
         debug_assert!(crate::world(vm).quidditch.is_none(), "the match must still be held by this tick");
     }
-    // Until Task 7 steers the broom, Harry's flight state follows his pawn.
+    // The broom: this frame's keys and mouse, the soft boundary that turns it back from the walls, the flight
+    // model, and the hard boundary that keeps it in the volume whatever it was told to do.
+    let (keys, mouse) = m.pending_input.take().unwrap_or_default();
+    let (mouse_speed, invert_pitch) = match crate::world(vm).player {
+        Some(pc) => crate::settings::mouse_look(vm, pc),
+        None => (1.0, false),
+    };
+    let mut i = desktop_input(&keys, (mouse.0 * mouse_speed, mouse.1 * mouse_speed), invert_pitch, &mut m.boost);
+    let soft = inset(&m.arena, SOFT_MARGIN);
+    let turn = flight::boundary_turn(m.broom.pos, m.broom.yaw, &soft);
+    i.yaw = (i.yaw + turn * BOUNDARY_WEIGHT).clamp(-1.0, 1.0);
+    m.broom = flight::confine(&flight::step(&m.broom, &i, &m.tuning, dt), &m.arena);
+    m.cam = camera::chase_camera(&m.broom, &m.cam, dt);
+    // Harry's pawn shows where the broom is. Its `Location` is the clamped one, so nothing the match does can
+    // put the player outside the arena, let alone out of the world.
     if let Some(h) = m.harry.filter(|&h| !vm.db.objects.get(h).deleted) {
-        let was = m.broom.pos;
-        m.broom.pos = crate::rd_vec(vm, h, "Location");
-        if dt > 0.0 {
-            m.broom.vel = (m.broom.pos - was) / dt;
-        }
+        crate::set(vm, h, "Location", v3(arena::actor_location(&m.arena, m.broom.pos)));
+        crate::set(vm, h, "Rotation", rot(camera::rotator(m.broom.pitch, m.broom.yaw)));
+        crate::set(vm, h, "Velocity", v3(m.broom.vel));
+        crate::set(vm, h, "Acceleration", v3(Vec3::ZERO));
+        // A broom never walks and never falls, which is also what keeps the out-of-world check (raised only
+        // by walking and falling pawns) away from the player for the whole match.
+        crate::set(vm, h, "Physics", Value::Byte(crate::physics::PHYS_FLYING));
     }
     let ended = matches!(m.rules.phase(), MatchPhase::Ended(_));
     if !ended && m.rules.phase() != MatchPhase::Intro {
@@ -399,7 +510,8 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         let at = arena::actor_location(&m.arena, m.snitch.pos());
         crate::set(vm, s, "Location", v3(at));
     }
-    // `HP3_QUID_DEBUG`: a sample of the match state now and then, to see that it is running at all.
+    // `HP3_QUID_DEBUG`: a sample of the match state now and then, to see that it is running at all, and where
+    // the broom has got to (with the pawn's own `Location`, to see that it followed).
     if m.frames % 120 == 0 && crate::envc::var_os("HP3_QUID_DEBUG").is_some() {
         let a = m.snitch_actor.map(|s| crate::rd_vec(vm, s, "Location")).unwrap_or(Vec3::ZERO);
         println!(
@@ -410,6 +522,19 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
             a.x, a.y, a.z,
             m.snitch.progress(),
             m.bludgers.bumps()
+        );
+        let h = m.harry.filter(|&h| !vm.db.objects.get(h).deleted).map(|h| crate::rd_vec(vm, h, "Location")).unwrap_or(Vec3::ZERO);
+        let inside = m.broom.pos == arena::actor_location(&m.arena, m.broom.pos);
+        println!(
+            "quidditch: tick {} broom ({:.0}, {:.0}, {:.0}) pawn ({:.0}, {:.0}, {:.0}) speed {:.0} yaw {:.2} pitch {:.2} boost {} inside {inside} camera ({:.0}, {:.0}, {:.0})",
+            m.frames,
+            m.broom.pos.x, m.broom.pos.y, m.broom.pos.z,
+            h.x, h.y, h.z,
+            m.broom.vel.length(),
+            m.broom.yaw,
+            m.broom.pitch,
+            m.boost,
+            m.cam.pos.x, m.cam.pos.y, m.cam.pos.z,
         );
     }
     if !m.reported
@@ -430,6 +555,33 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         Some(Request::Stop) => stop(vm),
         None => {}
     }
+}
+
+/// `b` with its walls brought in by `margin` (never past its own centre): the band in which the broom steers
+/// itself back in.
+fn inset(b: &ArenaBounds, margin: f32) -> ArenaBounds {
+    let half = Vec3::new(
+        (b.half.x - margin).max(1.0),
+        (b.half.y - margin).max(1.0),
+        (b.half.z - margin).max(1.0),
+    );
+    ArenaBounds { center: b.center, half, ceiling: (b.ceiling - margin).max(b.center.z - half.z + 1.0) }
+}
+
+/// This frame's broom keys and mouse motion, from `crate::input::apply` (the only place that has them: the
+/// world's input is cleared at the end of every frame). Nothing happens when no match is running, which is
+/// why the normal input path is untouched on every other level.
+pub fn feed_input(vm: &mut Vm<'_>, keys: KeyState, mouse: (f32, f32)) {
+    if let Some(m) = crate::world(vm).quidditch.as_mut() {
+        m.pending_input = Some((keys, mouse));
+    }
+}
+
+/// The view a match shows, for `crate::player_view`: the chase camera behind Harry's broom. `None` when no
+/// match is running, and the game's own `PlayerCalcView` is then used as before.
+pub fn view(vm: &mut Vm<'_>) -> Option<(Vec3, [i32; 3], f32)> {
+    let m = crate::world(vm).quidditch.as_ref()?;
+    Some((m.cam.pos, m.cam.rot, m.cam.fov))
 }
 
 /// `HP3_MATCH=<opponent>` (debugging): starts a match as soon as a level has finished loading. Called by
@@ -490,6 +642,25 @@ mod tests {
         assert!(g.defer(Request::Start("Slytherin".into())));
         assert!(g.defer(Request::Stop));
         assert_eq!(g.end(), Some(Request::Stop));
+    }
+
+    /// The soft boundary's band lies inside the arena, is never inverted, and leaves the arena centre where
+    /// it is (so `boundary_turn` steers towards the pitch and not somewhere else).
+    #[test]
+    fn inset_stays_inside_the_arena_and_never_turns_inside_out() {
+        let b = arena::bounds();
+        for margin in [0.0, SOFT_MARGIN, 1e6] {
+            let s = inset(&b, margin);
+            assert_eq!(s.center, b.center);
+            assert!(s.half.x > 0.0 && s.half.y > 0.0 && s.half.z > 0.0, "{s:?}");
+            assert!(s.half.x <= b.half.x && s.half.y <= b.half.y && s.half.z <= b.half.z, "{s:?}");
+            assert!(s.ceiling <= b.ceiling && s.ceiling > s.center.z - s.half.z, "{s:?}");
+        }
+        // The band really is a band: a point just inside the real wall is outside the soft one.
+        let s = inset(&b, SOFT_MARGIN);
+        let near_wall = Vec3::new(b.center.x + b.half.x - 100.0, b.center.y, b.center.z);
+        assert_ne!(super::flight::boundary_turn(near_wall, 0.0, &s), 0.0, "the soft boundary must bite before the wall");
+        assert_eq!(super::flight::boundary_turn(near_wall, 0.0, &b), 0.0, "and the hard one only at it");
     }
 
     /// A tick nobody asked anything of leaves no request, and the window really closes.

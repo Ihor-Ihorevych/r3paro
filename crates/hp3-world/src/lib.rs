@@ -929,6 +929,11 @@ fn arrive_from(vm: &mut Vm<'_>, pawn: ObjId) {
 /// The player's view this frame from the game's `PlayerCalcView`: location, rotation (pitch, yaw, roll) and
 /// horizontal field of view. `None` when the game gives no view (location at the origin).
 pub fn player_view(vm: &mut Vm<'_>) -> Option<(glam::Vec3, [i32; 3], f32)> {
+    // A Quidditch match is watched from its own chase camera, not from the game's camera actor (which knows
+    // nothing about brooms). Every other level takes the view from the script, as before.
+    if let Some(view) = quidditch::glue::view(vm) {
+        return Some(view);
+    }
     let pc = world(vm).player?;
     // The view is asked for once per drawn frame, with the controller as the view actor and its own location and
     // rotation as the starting values. HP3's script computes a new view only when `bTicked` differs from

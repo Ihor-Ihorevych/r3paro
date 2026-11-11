@@ -119,6 +119,22 @@ impl Input {
     }
 }
 
+/// The broom keys of this frame, for a Quidditch match: the arrow keys steer, `RightMouse` or `A` taps the
+/// boost and `LeftMouse` or `Z` holds the brake. Keys are named as the ini names them, in lower case (as
+/// `key_down` keeps them); the boost is a press of this frame, because it is a toggle.
+fn broom_keys(input: &Input) -> crate::quidditch::input::KeyState {
+    let held = |k: &str| input.held.contains(k);
+    let pressed = |k: &str| input.pressed.iter().any(|p| p == k);
+    crate::quidditch::input::KeyState {
+        left: held("left"),
+        right: held("right"),
+        up: held("up"),
+        down: held("down"),
+        boost: pressed("rightmouse") || pressed("a"),
+        brake: held("leftmouse") || held("z"),
+    }
+}
+
 fn param(words: &[&str], name: &str) -> Option<f32> {
     words.iter().find_map(|w| {
         let (k, v) = w.split_once('=')?;
@@ -143,6 +159,12 @@ pub fn apply(vm: &mut Vm<'_>, pc: ObjId, dt: f32) {
         if !input.held.contains(k) {
             keys.push((k.clone(), 1.0));
         }
+    }
+    // A Quidditch match flies the broom from the same keys and mouse motion, before the axes below are made:
+    // it reads them, nothing more, so a level with no match (every level but a match) is untouched.
+    if world(vm).quidditch.is_some() {
+        let broom = broom_keys(&input);
+        crate::quidditch::glue::feed_input(vm, broom, input.mouse);
     }
     // The options menu's mouse speed and invert (`PlayerInput`); the engine's own default of 3 is the speed the axes were tuned for.
     let (speed, invert_y) = crate::settings::mouse_look(vm, pc);
