@@ -225,7 +225,9 @@ pub(super) fn spawn_ball(vm: &mut Vm<'_>, what: Option<&str>, radius: f32, skin:
     let a = crate::natives::spawn(vm, None, &args).ok()?.as_obj()?;
     crate::set(vm, a, "StaticMesh", Value::Object(Some(mesh)));
     crate::set(vm, a, "DrawType", Value::Byte(DT_STATIC_MESH));
-    // Scenery is born `bStatic`, which would freeze it where it was spawned and refuse to destroy it.
+    // Scenery is born `bStatic`, which would freeze it where it was spawned and refuse to destroy it -- and
+    // would also make it invisible: `hp3_engine::actor_instances` draws no `bStatic` static mesh, because
+    // the map's own are baked into the level scene instead, and nothing bakes one that was spawned.
     crate::set(vm, a, "bStatic", Value::Bool(false));
     crate::set(vm, a, "bNoDelete", Value::Bool(false));
     // A Bludger is lit by the stadium (an iron ball is dark, and the halo skin alone is a lamp); a hoop ring

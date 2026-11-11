@@ -93,10 +93,35 @@ attacks the north, so a ball through a north hoop is a home goal and one through
 opponent's. Nothing in the retail map says so; it is this engine's choice, and `harry_start` is the only
 thing that has to agree with it.
 
-Because there is no ring mesh at all (and the retail game's own rings are flat black outlines over the pole
-quads), `quidditch::ball` draws each ring as **twelve small round static meshes of radius 32 around the hoop's
-rim** -- 72 in all, spawned `bStatic` so they are never ticked, and destroyed with the rest of the match's
-actors. The retail quads are left exactly where they are. The Quaffle is the same stand-in mesh at radius 60.
+### Hoop rings: what there is to draw them with
+
+**There is no ring mesh anywhere in the retail data.** The whole of `StaticMeshes/`, `Animations/` and the maps
+was searched for one (Task 17), and this is everything that turned up:
+
+| candidate | what it really is |
+|---|---|
+| `HGame.HippoRing` (the Buckbeak flight rings, `HP3_COMC` places ~110 of them) | a `Keypoint` with **no mesh at all**: its visual is `ringFXClass = HGame.HippoRingEmitter`, a particle emitter of `HP_FX.Particles.Ring` sprites. Its size is only a collision box, `CollisionWidth`/`Height` 192 at `DrawScale` 5. Nothing to spawn. |
+| `HP3_Particles_SM.Character_Shapes.DementorSpawnRing_SM` | the only mesh in the game with a hole through it, but a **capless cylinder band**: 50 vertices, all at radius 1500, at z 0 or 64, outward normals, one section, 48 faces. Bounding box 3000 x 3000 x 64, axis +z. Looked at down its own axis -- which is how a goal hoop is seen -- it projects to nothing, and in a render only two thin arcs of it survive. |
+| `HP3_ArchiExterior.Quid_Stadium.Quid_GoldHoop` | a **texture**, not a mesh: the gold ring the retail goal-post quad wears. It draws correctly (masked, the sky shows through the middle), but the level's own lighting leaves the goal posts near black for the whole match, so in play the retail ring reads as a thin black outline. |
+| `post_ring_SM`, `FogRing`, `WaterRing`, `WispyRing` | a hitching post (bounds 72 x 40 x 126) and three textures. |
+
+So a ring is **generated**: `quidditch::ball` draws each one as **twelve round static meshes of radius 32
+evenly around the hoop's rim** (`120 * sin(180/12) = 31`, so the beads touch), 72 in all, skinned with
+`HP3_ArchiExterior.Quid_Stadium.Quid_GoalPost` -- the goal posts' own gold -- and `bUnlit`, so a hoop is a
+gold ring from across the pitch whatever the level's lighting does. A ball is round from every side, so
+unlike a flat ring it never vanishes when the hoop is flown at head on. The beads are spawned
+`bCollideActors = false` (a hoop is scored through; `goals::goal_scored` is the only test that matters) and
+are destroyed with the rest of the match's actors.
+
+Two traps, both found the hard way:
+
+- **A spawned static mesh must not be `bStatic`.** `hp3_engine::actor_instances` skips `bStatic` static-mesh
+  actors because the map's own are baked into the level scene instead -- and nothing bakes a spawned one, so
+  it is drawn by nobody. The beads were `bStatic` until Task 17 and had never once been on screen.
+- **`HP_FX.General.Bludger_Halo` is a `Fire.IceTexture`**, a procedural material nothing in this engine
+  generates, so anything skinned with it comes out black.
+
+The retail quads are left exactly where they are. The Quaffle is the same stand-in mesh at `quaffle::RADIUS`.
 A free Quaffle falls at 980 uu/s^2 and comes to rest on the turf (`GROUND_Z` + its radius), not on the flight
 volume's floor, which is 150 uu of broom clearance over the grass.
 

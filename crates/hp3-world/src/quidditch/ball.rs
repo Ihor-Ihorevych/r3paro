@@ -4,11 +4,15 @@
 //! logic stays in one file and the Quaffle's in this one. What it decides comes out of the pure `quaffle` and
 //! `goals` modules; what is here is the spawning, the `Location` writes and the log lines.
 //!
-//! Missing art: HP3 has no Quaffle mesh and **no hoop mesh at all** (`docs/formats/quidditch-arena.md`: the
-//! retail `Quid_GoalPosts_SM` carries only a flat quad on top of each pole, and the in-game rings are a flat
-//! black outline). So the Quaffle is the same round stand-in mesh a Bludger is made of, and each ring is a
-//! circle of twelve small bright ones around the hoop's own centre -- the renderer draws no lines and no
-//! tori, and a ring of beads needs nothing it cannot already do. The retail quads stay where they are.
+//! Missing art: HP3 has no Quaffle mesh, so the Quaffle is the same round stand-in mesh a Bludger is made of.
+//! It has **no ring mesh at all**, and the retail data was searched for one (`docs/formats/quidditch-arena.md`):
+//! the Buckbeak flight rings, the obvious thing to borrow, are a particle emitter and no geometry
+//! (`HGame.HippoRing` carries no mesh; its `ringFXClass` is `HGame.HippoRingEmitter`, sprites of the
+//! `HP_FX.Particles.Ring` texture), and the only mesh in the game with a hole through it, the Dementor's
+//! spawn ring, is a capless cylinder band that all but vanishes when it is looked at down its own axis --
+//! which is exactly how a goal hoop is seen. So a ring is drawn the way the old games' rings were: a circle
+//! of twelve small balls around the hoop's rim, wrapped in the goal posts' own gold and lit by themselves,
+//! so a hoop is a gold ring from across the pitch. The retail quads stay where they are.
 //!
 //! Nothing throws the Quaffle yet: the Chasers are Task 13. Until then it lies on the pitch, and the debug
 //! `HP3_QUID_SHOOT=<tick>` shoots it through a hoop to show that a goal is scored and counted.
@@ -24,12 +28,15 @@ use super::presentation;
 use super::quaffle::{self, Quaffle};
 
 /// How many beads a hoop's ring is drawn with, and how big each one is (uu). Twelve beads of 32 around a
-/// radius of 120 touch each other, so the ring reads as a ring from the chase camera.
+/// radius of 120 touch each other (`120 * sin(180/12) = 31`), so the ring reads as a ring, and a bead is a
+/// ball from every side -- unlike a flat ring, it never vanishes when the hoop is looked at head on.
 const RING_BEADS: usize = 12;
 const BEAD_RADIUS: f32 = 32.0;
-/// What a ring bead is wrapped in: the same retail glow the Bludgers use, so a ring is a bright gold circle
-/// rather than a dozen grey balls.
-const RING_SKIN: &str = "HP_FX.General.Bludger_Halo";
+/// What a ring bead is wrapped in: the gold of the retail goal posts under it
+/// (`HP3_ArchiExterior.Quid_Stadium.Quid_GoalPost`), which is a plain texture the renderer draws. The glow
+/// the Bludgers wear is no use here -- `HP_FX.General.Bludger_Halo` is a `Fire.IceTexture`, a procedural
+/// material nothing generates, so a bead skinned with it comes out black.
+const RING_SKIN: &str = "HP3_ArchiExterior.Quid_Stadium.Quid_GoalPost";
 
 /// The Quaffle and the hoops, with the actors that show them.
 pub struct Balls {
@@ -109,8 +116,9 @@ pub fn start(vm: &mut Vm<'_>, m: &mut QuidditchMatch) {
         m.actors.push(a);
         m.balls.actor = Some(a);
     }
-    // The rings. They never move, so each bead is left `bStatic` (never ticked); `glue::stop` clears the
-    // flag to destroy them again, as it does for the stadium pieces.
+    // The rings. A bead never moves and nothing may bounce off it -- a hoop is scored through, and the disc
+    // test in `goals` is the only thing that cares where the ball goes. It is left off `bStatic` all the
+    // same: a spawned `bStatic` static mesh is drawn by nobody (`presentation::spawn_ball`).
     let mut beads = 0;
     for h in m.balls.hoops.clone() {
         for p in ring_points(&h) {
@@ -120,8 +128,10 @@ pub fn start(vm: &mut Vm<'_>, m: &mut QuidditchMatch) {
                 break;
             };
             crate::set(vm, a, "Location", v3(p));
+            crate::set(vm, a, "bCollideActors", Value::Bool(false));
+            crate::set(vm, a, "bBlockActors", Value::Bool(false));
+            crate::set(vm, a, "bBlockPlayers", Value::Bool(false));
             crate::set(vm, a, "bHidden", Value::Bool(false));
-            crate::set(vm, a, "bStatic", Value::Bool(true));
             m.actors.push(a);
             beads += 1;
         }
@@ -191,6 +201,16 @@ mod tests {
             // The beads are spread around the rim, not bunched on one side.
             let mid = pts.iter().copied().fold(Vec3::ZERO, |a, b| a + b) / RING_BEADS as f32;
             assert!((mid - h.center).length() < 1e-2, "the ring of {h:?} is lopsided: {mid:?}");
+        }
+    }
+
+    #[test]
+    fn the_beads_of_a_ring_touch_each_other() {
+        // The gap between two neighbours must be no wider than a bead, or the ring reads as loose dots.
+        for h in arena::hoops() {
+            let pts = ring_points(&h);
+            let gap = (pts[1] - pts[0]).length();
+            assert!(gap <= 2.0 * BEAD_RADIUS, "the beads of {h:?} are {gap:.1} apart, wider than {BEAD_RADIUS}");
         }
     }
 }
