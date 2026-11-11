@@ -546,6 +546,8 @@ pub fn stop(vm: &mut Vm<'_>) {
     // players go back on the turf before anything is destroyed: they are the level's, not the match's.
     presentation::stop(vm, &m);
     team::stop(vm, &m);
+    // The flight rings' emitters are spawned by the rings' own script and are not in `actors`.
+    rings::stop(vm, &m);
     // The pawn goes back to the player before the broom pawn is destroyed: a controller must never be left
     // holding a deleted pawn.
     unpossess(vm, m.was_playing, m.harry);

@@ -174,8 +174,9 @@ backstop. A mouse flick of half a turn is therefore a turn the broom takes about
 which is what traces the long arcs the mod is liked for. There is no pitch auto-levelling and no hard 60 deg
 limit on the steering input, and -- unlike the mod -- a turn never brakes: the brake is the brake button.
 
-**Speed is untouched**: cruise 600, boost 1200, brake 150, brake beats boost (the mod changes no speed either;
-our halved numbers are the playtest's).
+**Speed**: cruise **450**, boost **900**, brake **112.5**, `accel` **562.5**, brake beats boost. The mod
+changes no speed; the halving was the playtest's, and the further x0.75 is the owner's after playing ("make
+Harry slower"). The turn rates were left alone both times, so the slower broom turns the more tightly.
 
 The soft boundary (`flight::boundary_turn`) now steers the *look* back over the pitch, not the broom's
 heading, and `flight::confine` levels the look with the broom when it slides along the floor or the ceiling.
@@ -211,8 +212,8 @@ view mechanism a match has -- the slide's `dynamic_fov` in `apps/hp3` adds nothi
 two never stack. The rule, all of it in `camera::chase_camera` so it is unit-tested with the rest of the rig:
 
 * target = **90** deg (`FOV`) + **15** deg (`FOV_BOOST`) x `smoothstep` of the speed between the broom's own
-  cruise and boost speeds, **600 and 1200 uu/s**, read from `BroomTuning::default()` rather than written down
-  a second time;
+  cruise and boost speeds, **450 and 900 uu/s**, read from `BroomTuning::default()` rather than written down
+  a second time (so retuning the broom retunes the field of view with it);
 * the field of view carried in `CamState.fov` is low-passed towards that target every frame,
   `fov += (target - fov) * (1 - exp(-dt / 0.35))` -- a time constant of **0.35 s** (`FOV_TAU`), frame-rate
   independent, so boost on, boost off and braking all ease in and out and nothing ever jumps;
@@ -275,7 +276,8 @@ writes cost **0.007 ms a tick** (`HP3_QUID_DEBUG` prints the running mean every 
 ## The Golden Snitch
 
 `quidditch::snitch` is pure and deterministic from the match seed. The Snitch walks random waypoints inside the
-flight volume at 300 uu/s, 700 uu/s when Harry is right on it, and **corkscrews as it goes**, the way HP1's
+flight volume at 375 uu/s, 875 uu/s when Harry is right on it (the owner asked for "snitch a little bit
+faster", x1.25 on both, against a broom that lost a quarter), and **corkscrews as it goes**, the way HP1's
 Snitch does so the player can pick it out of the sky: a circle of `SnitchTuning::circle_radius` = 150 uu around
 the path point, in the plane across the direction of travel, turning at `circle_rate` = 4.5 rad/s (about 0.7 of
 a loop a second). The path speed is untouched -- the loop is an offset around the path, not extra ground
@@ -293,21 +295,22 @@ was widened: the progress radii are 600/1500/4000 uu and 150 uu of wobble in the
 HP1's Snitch optionally leaves a trail of flight hoops behind it (`BroomHoopTrail`, with `HoopTrailLen` and
 `fHoopSpacing`, the hoops visible or invisible by stage). Its Seeker game has three modes: plain proximity;
 proximity with the hoops shown as guides; and `PM_Hoops`, in which the Snitch is caught only by flying
-through N hoops **in a row**. Ours is the guide mode **plus the `PM_Hoops` rule**, which the owner asked for:
-the rings pay into the catch bar *and* the catch window will not open without a run of them.
+through N hoops **in a row**. Ours is the guide mode: the rings pay into the catch bar and are never a
+requirement (`catch_rings` = 0, the owner's word after playing). The `PM_Hoops` rule is still in the code and
+is one number away -- set `catch_rings` and the catch window waits for the run.
 
 `quidditch::trail` is the pure half (no VM) and `quidditch::rings` the actors' half.
 
 | number (`TrailTuning`, all placeholders) | value | why |
 |---|---|---|
 | `spacing` | 900 uu | twice a ring's width, so rings stand clear of each other instead of overlapping |
-| `max_rings` | 6 | about 12 s of the Snitch's flying; enough for a run of three, few enough not to fill the sky (or the phone's frame) |
-| `radius` | 220 uu | nearly twice a goal hoop's 120: it has to be fair to fly through at 600 (1200 boosted) uu/s |
-| `life` | 7 s | a ring that nobody went for fades away without a word |
+| `max_rings` | 6 | about 7 s of the Snitch's flying with Harry on it; enough for a run of three, few enough not to fill the sky (or the phone's frame) |
+| `radius` | 220 uu | nearly twice a goal hoop's 120: it has to be fair to fly through at 450 (900 boosted) uu/s |
+| `life` | 7 s | a ring that nobody went for fades away without a word. 7 s x the chased Snitch's 875 uu/s over a 900 uu `spacing` is 6.8 rings, so the full six really are up; a Snitch left alone (375 uu/s) shows about three |
 | `miss_behind` / `miss_near` | 300 / 900 uu | a ring counts as gone past only when Harry is behind its plane **and** was near it; one on the far side of the pitch is one he never went for |
 | `ring_bonus` | +0.06 of the bar | about four rings' worth of the proximity gain (`gain_rate` 0.25/s) |
 | `streak_len` / `streak_bonus` | 3 / +0.15 | the bigger bonus on every third ring in a row, on top of the ring's own |
-| `catch_rings` | 3 | **the rule**: no catch window until three rings in a row. 0 is the old behaviour |
+| `catch_rings` | 0 | the rings are a guide and a bonus by default (the owner's word); set it to 3 for HP1's `PM_Hoops` rule, no catch window until three in a row |
 
 A ring is dropped **on the Snitch's flight path** (`Snitch::path_pos`), not where the Snitch is really seen.
 Dropping them at the circling position was tried and rendered: the loop is 150 uu wide, so consecutive rings
@@ -322,19 +325,44 @@ HUD's `RINGS n/3` next to the catch bar says what is still wanted, and the comme
 in. A pass-through plays one of seven broom swishes (`Q_BRM_Swish_04`/`_06`, `broomwhoosh01..05`): HP3 ships no
 hoop sound at all, where HP1 picks one of fifteen `Q_Through_Hoop` samples.
 
-**How a ring is drawn: the bead route, not the Buckbeak emitter.** The Buckbeak ring was tried first, as the
-owner asked. `HGame.HippoRing` has no mesh; the visual is the particle emitter `HGame.HippoRingEmitter`, and
-this engine **does** run it (`HP3_COMC`'s 110 rings come out as 36 live sprites each, standing in a circle of
-about 200 uu by `StartLocationPolarRange`, which the actor's rotation turns -- so it can even be aimed, and
-its radius can be rewritten per actor after `particles::own_emitters`). Ten of them were spawned as the trail
-and rendered: it does not work. The sprites are `HP3_FX.Bats` flappers that fly outward from the circle, so a
-ring reads as a loose cloud rather than a hoop, and they live in world coordinates, so a pooled actor moved on
-to its next ring leaves its whole swarm behind (a hidden emitter freezes instead of clearing). So a trail ring
-is drawn the way the goal hoops are: **eight round static meshes of radius 32 around the rim** (shared with
-the hoops through `goals::ring_points`), gold-skinned and `bUnlit`, eight and not twelve because six rings are
-on screen at once and the phone has 60 fps to keep. The pool is fixed -- `max_rings * 8` = 48 actors, moved
-and hidden rather than spawned and destroyed -- so a match of hundreds of rings spawns 48 and `glue::stop`
-destroys 48.
+**How a ring is drawn: the real Buckbeak flight ring.** A trail ring is a real `HGame.HippoRing`, the ring the
+hippogriff ride is flown through (about 110 of them in `HP3_COMC`, more in `HP3_Adv6Paddock`).
+
+What the retail ring actually is, read out of the packages (`hp3-pkg dump`/`disasm`), off a live level
+(`HP3_PARTICLE_DEBUG=1 HP3_PARTICLE_DEBUG_NAME=HippoRingEmitter hp3-run level ... HP3_COMC`) and off a render
+of `HP3_COMC` (`hp3-view play` with `HP3_VIEW_CAM` parked in front of `HippoRing87`):
+
+* the actor **carries no mesh**. `HippoRing.TurnOn(path)` spawns its `ringFXClass` -- which is
+  `HGame.HippoRingEmitter` -- at its own `Location`, then calls `SetRadius(CollisionWidth)` and
+  `SetColor(ringColorStart, ringColorEnd)` on it and goes to `StateActive`. **Nothing is drawn before
+  `TurnOn`**; the map's rings are turned on by their `HippoPathManager`.
+* `HippoRingEmitter` is three `SpriteEmitter`s of 32 particles each, 96 in all, textured
+  `HP3_FX.Bats.BatFlap1_A00` / `2` / `3` -- the three flap frames of the bat sprite, which is what makes a ring
+  shimmer instead of sitting still. Alpha-blended, 18..28 uu a sprite, 2 s each and respawned, drifting only
+  +-8 uu/s, opacity 0.9, `CoordinateSystem` **relative**, so the sprites ride the actor.
+* the circle itself is `StartLocationShape` = polar with `StartLocationPolarRange`, whose **radius is 0 in the
+  defaults**: `SetRadius` is the thing that opens it out, and the actor's rotation turns the circle so it
+  stands across the flight. Retail rings are 192 uu (`CollisionWidth` = `CollisionHeight`) and white
+  (255, 255, 255); `fRingLength` is 0, so the ring is flat and not a tube.
+
+**Why the first attempt came out as a swarm of bats**: it spawned a bare `HGame.HippoRingEmitter` and left it
+alone. With no `HippoRing` to call `SetRadius`, the polar radius stays 0, so all 96 sprites are born on top of
+each other at the actor and only the +-8 uu/s drift moves them -- a cloud, not a ring. The bats were never the
+mistake; the retail ring really is made of bat flappers. The missing `SetRadius` (and a rotation) was.
+
+So `quidditch::rings` spawns one `HGame.HippoRing` per ring slot (six), hidden and off, with
+`CollisionWidth` = `CollisionHeight` = `TrailTuning::radius` (220 uu, a little wider than retail's 192 so it
+stays fair to fly through) and `fRingLength` 0. Re-aiming a slot is a `Location` write, a `Rotation` whose
+forward axis is the ring's normal, `Setup` (the ring re-reads its own axes) and another `TurnOn`, which
+destroys the slot's old emitter and spawns a fresh one in the new place -- about one spawn a second over the
+whole trail, which is what the retail ride itself does when a path is switched. Collision is switched off
+after every `TurnOn` (`TurnOn` turns it on, and the retail `Touch` wants a hippogriff rider to hand a speed
+boost to); the disc test in `trail` is the only thing that decides a pass-through. `rings::stop`, called from
+`glue::stop`, `TurnOff`s each ring and destroys the emitter it is holding -- the emitter is spawned by the
+ring's own script and is not in the match's `actors`, so nothing else would.
+
+**What it costs**: six rings x 96 sprites = **576 particles** at most, all single quads. That is the number to
+cut first if the phone's frame goes over (fewer rings, or a smaller `max_rings`).
 
 Still open, if the rule is ever wanted in its HP1 form: `PM_Hoops` proper, where the rings are the *only* way
 to the Snitch and the proximity bar goes away.
