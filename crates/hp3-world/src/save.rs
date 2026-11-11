@@ -516,6 +516,12 @@ fn capture(vm: &mut Vm<'_>) -> (Vec<u8>, usize, usize) {
 
 /// Writes the level to a slot.
 pub fn write(vm: &mut Vm<'_>, slot: i32) -> bool {
+    // A Quidditch match is not in a save (its state is the engine's, not the level's), so a save taken during
+    // one would load as a stadium of orphaned actors with the player on a broom nothing flies. Refused.
+    if world(vm).quidditch.is_some() {
+        vm.log.push(format!("engine: slot {slot} not saved, a Quidditch match is being played"));
+        return false;
+    }
     let (bytes, actor_count, object_count) = capture(vm);
     let dir = save_dir(vm);
     if std::fs::create_dir_all(&dir).is_err() {

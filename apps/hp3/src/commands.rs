@@ -135,6 +135,9 @@ fn quidditch(vm: &mut Vm<'_>, what: &str, level: &mut Option<String>) {
             }
             None => eprintln!("quidditch: the season is over, nothing left to play (see 'quidditch league')"),
         },
+        "stop" | "leave" | "exit" if hp3_world::world(vm).quidditch.is_none() => {
+            eprintln!("quidditch: no match is being played, nothing to leave");
+        }
         "stop" | "leave" | "exit" => {
             let map = menu::leave(vm);
             eprintln!("quidditch: back to {map}");

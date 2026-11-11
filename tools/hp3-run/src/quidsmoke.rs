@@ -171,4 +171,67 @@ mod tests {
         assert!(scored_in.0 >= 3, "Gryffindor scored in only {} of 5 matches", scored_in.0);
         assert!(scored_in.1 >= 3, "Slytherin scored in only {} of 5 matches", scored_in.1);
     }
+
+    /// The ways out of a match that are not its own end (named `quid_...` so `cargo test quid` runs it): no
+    /// save is taken while one runs, a level switch asked for from the pause menu ends it instead of being
+    /// refused, and leaving the level by any other road stops it first, with the player back on the pawn he
+    /// walked in as. Nothing is written anywhere: the save is refused before it touches the disk.
+    #[test]
+    fn quid_match_is_left_cleanly_by_menu_and_by_travel() {
+        use hp3_script::Value;
+        let root = std::env::var("HP3_DATA").unwrap_or_else(|_| r"C:\Users\Ihor\hpdroid\spike-hp3".into());
+        if !Path::new(&root).is_dir() {
+            eprintln!("skipping: retail data not found at {root} (set HP3_DATA)");
+            return;
+        }
+        let set = PackageSet::open(Path::new(&root)).expect("data opens");
+        let mut db = ClassDb::new(&set);
+        db.load_all_classes();
+        let mut vm = hp3_script::Vm::new(db);
+        let pkg = set.get(MAP).expect("the Quidditch map");
+        hp3_world::load(&mut vm, &pkg, hp3_core::Config::load(Path::new(&root))).expect("the map loads");
+        let pc = hp3_world::world(&mut vm).player.expect("a player");
+        let walked_in_as = hp3_world::get(&mut vm, pc, "Pawn").as_obj();
+        let playing = |vm: &mut hp3_script::Vm<'_>| hp3_world::world(vm).quidditch.is_some();
+
+        // 1. No save while a match runs.
+        glue::start(&mut vm, "Slytherin").expect("a match starts");
+        for _ in 0..30 {
+            hp3_world::tick(&mut vm, 1.0 / 60.0);
+        }
+        assert!(playing(&mut vm));
+        assert_ne!(hp3_world::get(&mut vm, pc, "Pawn").as_obj(), walked_in_as, "the player flies the broom pawn");
+        assert!(!hp3_world::save::write(&mut vm, 9999), "a save was taken in the middle of a match");
+
+        // 2. The level's own scripts cannot switch the level under a match...
+        let li = hp3_world::world(&mut vm).level_info.expect("a LevelInfo");
+        hp3_world::set(&mut vm, li, "NextURL", Value::Str("HP3_GroundsDada".into()));
+        hp3_world::tick(&mut vm, 1.0 / 60.0);
+        assert!(playing(&mut vm), "a level script ended the match");
+        assert!(hp3_world::take_travel(&mut vm).is_none());
+        // ...but the player's own "leave" from the pause menu ends the match and goes.
+        hp3_world::set(&mut vm, li, "Pauser", Value::Object(Some(pc)));
+        hp3_world::set(&mut vm, li, "NextURL", Value::Str("HP_Preamble".into()));
+        hp3_world::set(&mut vm, li, "NextSwitchCountdown", Value::Float(0.0));
+        hp3_world::tick(&mut vm, 1.0 / 60.0);
+        assert!(!playing(&mut vm), "the pause menu's leave was refused: the player is stuck in the match");
+        assert_eq!(hp3_world::get(&mut vm, pc, "Pawn").as_obj(), walked_in_as, "the player did not get his pawn back");
+        assert_eq!(hp3_world::take_travel(&mut vm).as_deref(), Some("HP_Preamble"));
+        hp3_world::set(&mut vm, li, "Pauser", Value::Object(None));
+
+        // 3. Any other road out of the level (the level list, a quick load) stops the match first.
+        glue::start(&mut vm, "Slytherin").expect("a second match starts");
+        for _ in 0..30 {
+            hp3_world::tick(&mut vm, 1.0 / 60.0);
+        }
+        assert!(playing(&mut vm));
+        hp3_world::travel(&mut vm, MAP).expect("the level is loaded again");
+        assert!(!playing(&mut vm), "a match survived leaving its level");
+        let pc = hp3_world::world(&mut vm).player.expect("a player after the travel");
+        let pawn = hp3_world::get(&mut vm, pc, "Pawn").as_obj().expect("a pawn after the travel");
+        let class = hp3_script::natives::object_path(&mut vm, pawn);
+        assert!(!class.contains("HarryQuid"), "the player arrived as the broom pawn: {class}");
+        assert!(!vm.db.objects.get(pawn).deleted, "the player holds a deleted pawn");
+        assert_eq!(hp3_world::world(&mut vm).errors.len(), 0, "{:?}", hp3_world::world(&mut vm).errors);
+    }
 }

@@ -499,6 +499,10 @@ pub fn url_map(url: &str) -> String {
 pub fn travel(vm: &mut Vm<'_>, url: &str) -> Result<Rc<Package>, VmError> {
     let map_name = url_map(url);
     let map = vm.db.set.get(&map_name).map_err(|e| VmError::Runtime(format!("travel to {map_name}: {e}")))?;
+    // A Quidditch match does not outlive its level, however the level is left (the level list, a quick load):
+    // it is stopped first, so the player travels as the pawn he walked in as and not as the broom pawn, and
+    // the match's music stops. A no-op on every level with no match.
+    quidditch::glue::stop(vm);
     // What goes with the player: a restart keeps what came in with the level; otherwise, when the level asked
     // for items to travel (`bNextItems`), the player's pawn and its inventory are described.
     let restart = url.trim_start().to_ascii_uppercase().starts_with("?RESTART");
@@ -1105,6 +1109,14 @@ fn count_down_travel(vm: &mut Vm<'_>, li: ObjId, dt: f32) {
         // A Quidditch match is played on a map whose own scripts switch the level when they are done
         // (`quidditch::stage` clears the cutscene that does it, this is the backstop): while a match runs the
         // switch is refused, so the pitch cannot be taken away from under the player. Said once per level.
+        // A switch asked for while the game is paused is the player's own (a pause page's "leave"), not the
+        // level's: the match is ended for it instead, or there would be no way out of a match by the menu.
+        if world(vm).quidditch.is_some() && get(vm, li, "Pauser").as_obj().is_some() {
+            let line = format!("quidditch: the player left by the menu ({next}), the match is stopped");
+            println!("{line}");
+            vm.log.push(line);
+            quidditch::glue::stop(vm);
+        }
         if world(vm).quidditch.is_some() {
             set(vm, li, "NextURL", Value::Str(String::new()));
             if !world(vm).quidditch_travel_blocked {
