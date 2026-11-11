@@ -62,9 +62,9 @@ const MESH_ACTOR_CLASS: &str = "Engine.StaticMeshActor";
 /// A plain white tile the HUD's bars and panels are drawn from (a canvas tile with no material draws nothing).
 const WHITE: &str = "Engine.WhiteSquareTexture";
 
-/// How big a Bludger is drawn (uu). The pure `BludgerTuning::hit_radius` is 150, so the ball is a little
-/// smaller than the contact distance.
-const BLUDGER_RADIUS: f32 = 110.0;
+/// How big a Bludger is drawn (uu, radius): a 30 uu iron ball next to Harry's 76 uu tall box. The pure
+/// `BludgerTuning::hit_radius` is 55, this plus Harry's body.
+const BLUDGER_RADIUS: f32 = 15.0;
 /// How big the Snitch is drawn (uu): a walnut would be invisible from the chase camera.
 const SNITCH_RADIUS: f32 = 55.0;
 /// `DrawType`: 2 is a skeletal mesh, 8 a static one.

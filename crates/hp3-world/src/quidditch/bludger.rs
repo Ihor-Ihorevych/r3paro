@@ -44,7 +44,8 @@ impl Default for BludgerTuning {
             // A little faster than the broom, so it can be outrun only by boosting.
             speed: 750.0,
             velocity_compensation: 0.5,
-            hit_radius: 150.0,
+            // The 30 uu ball (radius 15) plus Harry's body (about 40 uu).
+            hit_radius: 55.0,
             life: 6.0,
             bumps_to_lose_control: 3,
         }

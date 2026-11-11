@@ -175,4 +175,4 @@ is `SM_QUD_SnitchOrch_01`. HP3 ships no commentary speech we could confirm, so t
 text with those crowd reactions under it.
 
 HP3 has no Bludger (or Quaffle) mesh, so a Bludger is `HP3_InteriorAccents_SM.miscDetails.MagicalOrb_SM`
-scaled by its own bounds to a 110 uu radius and skinned with the retail `HP_FX.General.Bludger_Halo` glow.
+scaled by its own bounds to a 15 uu radius (30 uu across, hit radius 55 with Harry's body; the Quaffle is the same size) and skinned with the retail `HP_FX.General.Bludger_Halo` glow.

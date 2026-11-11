@@ -25,8 +25,8 @@ pub const SHOOT_SPEED: f32 = 2200.0;
 /// How long after a goal the same ball may score again (s). The latch that keeps a ball sitting in the ring
 /// from scoring every frame; in play the ball is put back to the centre anyway.
 pub const GOAL_COOLDOWN: f32 = 1.5;
-/// How big the ball is drawn and how far from a hoop's plane it still counts (uu).
-pub const RADIUS: f32 = 60.0;
+/// How big the ball is drawn (uu, radius: a 30 uu ball) and how high its centre rests over the turf.
+pub const RADIUS: f32 = 15.0;
 
 /// The Quaffle, free or carried.
 #[derive(Debug, Clone, Copy, PartialEq)]
