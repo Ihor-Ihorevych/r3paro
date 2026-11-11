@@ -6,15 +6,16 @@
 //! goes away with the level and a map that never starts a match pays nothing but one `take()` of a `None` a
 //! frame. `World::quidditch_gate` keeps `start` and `stop` honest when they are called from inside `tick`.
 //!
-//! The HUD, sound and the hoop rings come later. What is here is the arena layout, start / stop / tick, the
-//! flight of Harry's broom (steered by `flight` from the keys `crate::input::apply` hands over) and the chase
-//! camera `crate::player_view` shows it from.
+//! What is here is the arena layout, start / stop / tick, the flight of Harry's broom (steered by `flight`
+//! from the keys `crate::input::apply` hands over) and the chase camera `crate::player_view` shows it from.
+//! The HUD and the sounds are `presentation`'s, the Quaffle and the hoops `ball`'s.
 
 use glam::Vec3;
 
 use hp3_script::{ObjId, Value, Vm, VmError};
 
 use super::arena::{self, ArenaBounds, ArenaPiece};
+use super::ball::{self, Balls};
 use super::bludger::Bludgers;
 use super::camera::{self, CamState};
 use super::flight::{self, BroomState, BroomTuning};
@@ -65,6 +66,9 @@ pub struct QuidditchMatch {
     pub cam: CamState,
     pub snitch: Snitch,
     pub bludgers: Bludgers,
+    /// The Quaffle and the six scoring hoops (`quidditch::ball`). Nothing throws the ball until the Chasers
+    /// arrive (Task 13); today only the debug `HP3_QUID_SHOOT` does.
+    pub balls: Balls,
     pub rules: Rules,
     /// Every actor `start` made, in the order it made them. `stop` destroys all of them.
     pub actors: Vec<ObjId>,
@@ -92,7 +96,7 @@ pub struct QuidditchMatch {
     /// The pawn the player controller had before the match, given back by `stop`.
     was_playing: Option<ObjId>,
     /// Ticks this match has had.
-    frames: u64,
+    pub(super) frames: u64,
     /// `HP3_MATCH_RESTART=<ticks>` (debugging): start the match over after that many ticks, which takes the
     /// stop-then-start path. Nothing in the game sets it.
     restart_at: Option<u64>,
@@ -436,6 +440,16 @@ fn log_hoops(pieces: &[ArenaPiece]) {
     }
 }
 
+/// `HP3_QUID_START=x,y,z` (debugging, off by default): where Harry's broom starts instead of his own goal
+/// line, brought inside the flight volume. It is how a headless frame is taken from somewhere other than the
+/// kickoff -- in front of a goal, say. Nothing in the game sets it.
+fn start_override(b: &ArenaBounds) -> Option<Vec3> {
+    let v = crate::envc::var("HP3_QUID_START").ok()?;
+    let n: Vec<f32> = v.split(',').filter_map(|p| p.trim().parse::<f32>().ok()).filter(|f| f.is_finite()).collect();
+    let p = (n.len() == 3).then(|| Vec3::new(n[0], n[1], n[2]))?;
+    Some(arena::clamp_into(b, p))
+}
+
 /// Builds the arena in the loaded level and starts a match against `opponent`. Called again while a match is
 /// running, it stops that one first, so it is safe to re-enter. Called from inside `tick` (where the match is
 /// out of the world) it is recorded and run at the end of that tick instead.
@@ -470,7 +484,13 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
     }
     // Harry's broom pawn starts over his own goal line, flying (nothing holds a broom up), steered by
     // `flight` from this frame's input, and played by the player: the controller possesses it.
-    let start_at = arena::harry_start(&bounds);
+    let start_at = match start_override(&bounds) {
+        Some(p) => {
+            vm.log.push(format!("quidditch: HP3_QUID_START: Harry starts at ({:.0}, {:.0}, {:.0})", p.x, p.y, p.z));
+            p
+        }
+        None => arena::harry_start(&bounds),
+    };
     let harry = spawn_class(vm, HARRY_CLASS, start_at, 16384);
     let mut broom = None;
     let mut was_playing = None;
@@ -509,6 +529,7 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
         cam: camera::behind(&broom_state),
         snitch,
         bludgers,
+        balls: Balls::new(&bounds),
         rules,
         actors,
         harry,
@@ -526,8 +547,10 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
         reported: false,
         easy,
     };
-    // Meshes, sounds and music. It may add actors of its own, so it runs before the count below is printed.
+    // Meshes, sounds and music, then the Quaffle and the hoop rings. Both add actors of their own, so they
+    // run before the count below is printed.
     presentation::start(vm, &mut m, seed);
+    ball::start(vm, &mut m);
     let yes_no = |o: Option<ObjId>| if o.is_some() { "yes" } else { "MISSING" };
     let line = format!(
         "quidditch: match against {} started, phase {:?}, {} actors spawned ({} stadium pieces, Harry {}, broom {}, Snitch {}){}",
@@ -643,6 +666,12 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         for e in hits {
             m.rules.on_bludger(e, lost);
             events.push(MatchEvent::Bludger(e));
+        }
+        // The Quaffle flies, and a hoop it goes through the right way is ten points for that side. Nothing
+        // throws it yet (the Chasers are Task 13), so without `HP3_QUID_SHOOT` it lies on the pitch.
+        if let Some(home) = ball::tick(vm, &mut m, dt) {
+            m.rules.add_goal(home);
+            events.push(MatchEvent::Goal { home });
         }
         if let MatchPhase::Ended(outcome) = m.rules.phase() {
             events.push(MatchEvent::Ended(outcome));

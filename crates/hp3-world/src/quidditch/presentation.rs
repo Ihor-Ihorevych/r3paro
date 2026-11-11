@@ -209,13 +209,16 @@ fn dress_snitch(vm: &mut Vm<'_>, snitch: ObjId) {
     note(vm, format!("quidditch: snitch mesh {path} (from the class {}) at scale {scale:.2}", if had.is_some() { "default" } else { "package" }));
 }
 
-/// Spawns one Bludger ball: a round static mesh scaled to `BLUDGER_RADIUS`, darkened and skinned with the
-/// retail halo glow. Born hidden; `tick` shows it while its slot has a Bludger in it.
-fn spawn_bludger(vm: &mut Vm<'_>) -> Option<ObjId> {
+/// Spawns one round static mesh actor of `radius` uu at the origin, born hidden: the shape every ball of the
+/// match is made of, since HP3 ships neither a Bludger nor a Quaffle mesh. `skin`, where it is given, is the
+/// material the ball is wrapped in, and `unlit` makes it bright on its own. The caller owns the actor (it
+/// belongs in the match's `actors`) and shows it when it has somewhere to be. `what` names it in the log;
+/// `None` spawns it silently, which is what a hoop ring's dozenth bead wants.
+pub(super) fn spawn_ball(vm: &mut Vm<'_>, what: Option<&str>, radius: f32, skin: Option<&str>, unlit: bool) -> Option<ObjId> {
     let class = crate::find_object(vm, MESH_ACTOR_CLASS)?;
     let mesh = BLUDGER_MESHES.iter().find_map(|p| crate::find_object_of(vm, p, Some("StaticMesh")));
     let Some(mesh) = mesh else {
-        note(vm, format!("quidditch: no Bludger mesh of {BLUDGER_MESHES:?}, Bludgers are invisible"));
+        note(vm, format!("quidditch: no round mesh of {BLUDGER_MESHES:?}, the {} is invisible", what.unwrap_or("ball")));
         return None;
     };
     let args = [Value::Object(Some(class)), Value::Object(None), Value::Empty, v3(Vec3::ZERO), Value::Struct(vec![Value::Int(0); 3].into())];
@@ -225,17 +228,26 @@ fn spawn_bludger(vm: &mut Vm<'_>) -> Option<ObjId> {
     // Scenery is born `bStatic`, which would freeze it where it was spawned and refuse to destroy it.
     crate::set(vm, a, "bStatic", Value::Bool(false));
     crate::set(vm, a, "bNoDelete", Value::Bool(false));
-    // Lit by the stadium, not by itself: an iron Bludger is a dark ball, and the halo skin alone is a lamp.
-    crate::set(vm, a, "bUnlit", Value::Bool(false));
+    // A Bludger is lit by the stadium (an iron ball is dark, and the halo skin alone is a lamp); a hoop ring
+    // has to be seen from across the pitch, so it carries its own light.
+    crate::set(vm, a, "bUnlit", Value::Bool(unlit));
     crate::set(vm, a, "bHidden", Value::Bool(true));
-    let scale = mesh_radius(vm, mesh).map(|r| BLUDGER_RADIUS / r).unwrap_or(1.0).clamp(0.01, 200.0);
+    let scale = mesh_radius(vm, mesh).map(|r| radius / r).unwrap_or(1.0).clamp(0.01, 200.0);
     crate::set(vm, a, "DrawScale", Value::Float(scale));
-    if let Some(halo) = crate::find_object(vm, BLUDGER_HALO) {
-        crate::set(vm, a, "Skins", Value::Array(vec![Value::Object(Some(halo))]));
+    if let Some(mat) = skin.and_then(|s| crate::find_object(vm, s)) {
+        crate::set(vm, a, "Skins", Value::Array(vec![Value::Object(Some(mat))]));
     }
-    let path = hp3_script::natives::object_path(vm, mesh);
-    note(vm, format!("quidditch: Bludger ball from {path} at scale {scale:.3}"));
+    if let Some(what) = what {
+        let path = hp3_script::natives::object_path(vm, mesh);
+        note(vm, format!("quidditch: {what} from {path} at scale {scale:.3}"));
+    }
     Some(a)
+}
+
+/// Spawns one Bludger ball: a round static mesh scaled to `BLUDGER_RADIUS`, darkened and skinned with the
+/// retail halo glow. Born hidden; `tick` shows it while its slot has a Bludger in it.
+fn spawn_bludger(vm: &mut Vm<'_>) -> Option<ObjId> {
+    spawn_ball(vm, Some("Bludger ball"), BLUDGER_RADIUS, Some(BLUDGER_HALO), false)
 }
 
 /// Starts everything the player sees and hears: the Snitch's mesh, the crowd, the broom and snitch loops and

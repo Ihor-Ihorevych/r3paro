@@ -81,6 +81,21 @@ convention used here is right (yaw turns +X towards +Y, so yaw +90 deg sends loc
 
 Hoop radius 120. Posts' tops: world z 1565 at most.
 
+`quidditch::arena::hoops()` returns those six as `goals::Hoop`s, each with its radius and a unit normal
+pointing into the pitch (the north goal's look down -y, the south goal's up +y): that normal is the side a
+shot has to come from, and `goals::goal_scored` is the disc crossing test. **Which end is whose:** Harry's
+team (Gryffindor, the home side) defends the south goal (`y = -4096`, where `harry_start` puts him) and
+attacks the north, so a ball through a north hoop is a home goal and one through a south hoop is the
+opponent's. Nothing in the retail map says so; it is this engine's choice, and `harry_start` is the only
+thing that has to agree with it.
+
+Because there is no ring mesh at all (and the retail game's own rings are flat black outlines over the pole
+quads), `quidditch::ball` draws each ring as **twelve small round static meshes of radius 32 around the hoop's
+rim** -- 72 in all, spawned `bStatic` so they are never ticked, and destroyed with the rest of the match's
+actors. The retail quads are left exactly where they are. The Quaffle is the same stand-in mesh at radius 60.
+A free Quaffle falls at 980 uu/s^2 and comes to rest on the turf (`GROUND_Z` + its radius), not on the flight
+volume's floor, which is 150 uu of broom clearance over the grass.
+
 ## Chosen arena constants
 
 These are what `quidditch::arena` holds (`bounds()`, and the `pub const`s beside it).
@@ -135,6 +150,16 @@ either: both are gated on a running match.
 - `HP3_QUID_DEBUG=1` — every 120 ticks, a sample of the match: phase, the Snitch's pure and actor positions,
   the catch progress, the Bludger bumps, the HUD item list, the Bludgers in flight, and the broom's position,
   speed, heading and camera.
+- `HP3_QUID_SHOOT=<tick>` — **off by default.** At that tick of the match the Quaffle is shot from the middle
+  of the pitch at a hoop, which is the only thing that throws it until the Chasers arrive (Task 13). It is how
+  a headless run proves that goals are detected and counted: every goal also prints a
+  `quidditch: GOAL for <side> through the hoop at (...)` line. Without it the ball just lies on the turf.
+- `HP3_QUID_SHOOT_HOOP=<0..5>` — which hoop that shot goes through, in the order of `arena::hoops()`: 0, 1, 2
+  are the north goal's low, high and mid hoops (a goal for Gryffindor, 10-0) and 3, 4, 5 the south goal's (a
+  goal for the opponent, 0-10). Default 0.
+- `HP3_QUID_START=<x,y,z>` — **off by default.** Where Harry's broom starts instead of his own goal line,
+  brought inside the flight volume. It exists so a headless frame can be rendered from somewhere other than
+  the kickoff -- `HP3_QUID_START=256,2300,760` puts the chase camera in front of the north goal's three hoops.
 - `HP3_QUID_EASY=1` — **off by default.** The Snitch's catch bar fills from anywhere on the pitch, the catch
   window is wide open and the catch key is held for Harry, so a headless run reaches a caught Snitch (and the
   result line) in about 12 seconds with nobody at the keyboard. Only for tests; it makes the game trivial.

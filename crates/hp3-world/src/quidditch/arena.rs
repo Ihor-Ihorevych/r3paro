@@ -7,6 +7,8 @@
 
 use glam::Vec3;
 
+use super::goals::Hoop;
+
 /// Axis-aligned flight volume: x/y within `center +/- half`, z from
 /// `center.z - half.z` up to `ceiling`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -31,9 +33,38 @@ pub const GOAL_MARGIN: f32 = 500.0;
 /// Playfield half-width, matching the flat `Quttish_Pitch_SM` half-width 3905.
 pub const PLAYFIELD_HALF_X: f32 = 3900.0;
 
-/// Local (y, z) of the three hoop faces of `Quid_GoalPosts_SM`: the flat quads on top of its poles. The rings
-/// themselves are a later task; these are here to place and to check them.
+/// Local (y, z) of the three hoop faces of `Quid_GoalPosts_SM`: the flat quads on top of its poles. The
+/// world centres below were turned out of these with the engine's own rotator maths (Task 6); they stay here
+/// because `glue::log_hoops` checks the one against the other.
 pub const HOOPS_LOCAL: [(f32, f32); 3] = [(610.0, 1118.0), (0.0, 2405.0), (-610.0, 1705.0)];
+
+/// World (x, z) of the three hoop centres of the **north** goal (`y = +GOAL_Y`), from the verified table in
+/// `docs/formats/quidditch-arena.md`: the goal's local +Y lies along world -X after its quarter turn.
+pub const HOOPS_NORTH_XZ: [(f32, f32); 3] = [(-354.0, 158.0), (256.0, 1445.0), (866.0, 745.0)];
+/// The same for the **south** goal (`y = -GOAL_Y`), whose opposite yaw mirrors the three poles in x.
+pub const HOOPS_SOUTH_XZ: [(f32, f32); 3] = [(866.0, 158.0), (256.0, 1445.0), (-354.0, 745.0)];
+/// Half the width of a hoop face's quad: what a shot has to fit through.
+pub const HOOP_RADIUS: f32 = 120.0;
+
+/// The six scoring hoops, the north goal's three first, each facing into the pitch (the side a shot has to
+/// come from).
+///
+/// **Which end is whose.** Harry's team (Gryffindor, the home side) **defends the south goal** (`y =
+/// -GOAL_Y`, where `harry_start` puts him) and **attacks the north** (`y = +GOAL_Y`). So a ball through a
+/// north hoop is a home goal (`home: true`) and one through a south hoop is the opponent's. Nothing in the
+/// retail map says which end belongs to whom -- this is the choice this engine makes, and `harry_start` is
+/// the only thing that has to agree with it.
+pub fn hoops() -> Vec<Hoop> {
+    let mut out = Vec::with_capacity(6);
+    for (y, table, home) in [(GOAL_Y, HOOPS_NORTH_XZ, true), (-GOAL_Y, HOOPS_SOUTH_XZ, false)] {
+        // Into the pitch: the north goal's hoops look down -y, the south goal's up +y.
+        let normal = Vec3::new(0.0, -y.signum(), 0.0);
+        for (x, z) in table {
+            out.push(Hoop { center: Vec3::new(x, y, z), radius: HOOP_RADIUS, normal, home });
+        }
+    }
+    out
+}
 
 /// The stadium meshes, by their full package path.
 pub const PITCH: &str = "HP3_ExteriorArch_SM.Quid_Stadium.QUid_Pitch_SM";
@@ -173,6 +204,35 @@ mod tests {
         assert_ne!(north.rot[1], 0);
         // The same margin lies behind both goals.
         assert_eq!(b.half.y - GOAL_Y, GOAL_MARGIN);
+    }
+
+    #[test]
+    fn six_hoops_three_per_goal_facing_the_pitch() {
+        let b = bounds();
+        let hoops = hoops();
+        assert_eq!(hoops.len(), 6, "three hoops on each of the two goals");
+        for (side, home) in [(GOAL_Y, true), (-GOAL_Y, false)] {
+            let mine: Vec<_> = hoops.iter().filter(|h| h.center.y == side).collect();
+            assert_eq!(mine.len(), 3, "three hoops at y {side}");
+            for h in mine {
+                assert_eq!(h.radius, HOOP_RADIUS);
+                assert_eq!(h.home, home, "{h:?}");
+                // Facing into the pitch: a unit normal straight at y = 0.
+                assert!((h.normal.length() - 1.0).abs() < 1e-6, "{h:?}");
+                assert_eq!(h.normal, Vec3::new(0.0, -side.signum(), 0.0), "{h:?}");
+                assert!((h.center + h.normal).y.abs() < side.abs(), "{h:?} does not face the pitch");
+                // And inside the flight volume, or nothing could ever be shot through it.
+                assert!((h.center.x - b.center.x).abs() <= b.half.x, "{h:?}");
+                assert!(h.center.z >= b.center.z - b.half.z && h.center.z <= b.ceiling, "{h:?}");
+            }
+            // Three different poles at three different heights.
+            let zs: Vec<f32> = hoops.iter().filter(|h| h.center.y == side).map(|h| h.center.z).collect();
+            assert!(zs.iter().all(|z| zs.iter().filter(|o| *o == z).count() == 1), "{zs:?} repeat a height");
+        }
+        // Harry defends the south goal, so the home hoops are the ones he is flying at.
+        let harry = harry_start(&b);
+        let home: Vec<_> = hoops.iter().filter(|h| h.home).collect();
+        assert!(home.iter().all(|h| h.center.y.signum() != harry.y.signum()), "home scores at the far goal");
     }
 
     #[test]
