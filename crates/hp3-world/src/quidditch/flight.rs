@@ -202,12 +202,17 @@ pub fn confine(s: &BroomState, b: &ArenaBounds) -> BroomState {
     if !out.vel.is_finite() {
         out.vel = Vec3::ZERO;
     }
-    if !out.yaw.is_finite() || !out.pitch.is_finite() {
-        out.yaw = 0.0;
-        out.pitch = 0.0;
+    // Each angle on its own: a rubbish pitch must not cost the broom its heading, nor the other way round.
+    if !out.yaw.is_finite() {
+        out.yaw = if out.want_yaw.is_finite() { out.want_yaw } else { 0.0 };
     }
-    if !out.want_yaw.is_finite() || !out.want_pitch.is_finite() {
+    if !out.pitch.is_finite() {
+        out.pitch = if out.want_pitch.is_finite() { out.want_pitch } else { 0.0 };
+    }
+    if !out.want_yaw.is_finite() {
         out.want_yaw = out.yaw;
+    }
+    if !out.want_pitch.is_finite() {
         out.want_pitch = out.pitch;
     }
     let p = if s.pos.is_finite() { s.pos } else { out.pos };
@@ -464,5 +469,19 @@ mod tests {
         let t = BroomTuning::default();
         let i = BroomInput { yaw: 0.5, pitch: -0.2, boost: true, brake: false, look_yaw: 0.01, look_pitch: -0.02 };
         assert_eq!(step(&start(), &i, &t, 0.016), step(&start(), &i, &t, 0.016));
+    }
+
+    /// One rubbish angle costs only itself: the heading the broom still has is kept.
+    #[test]
+    fn confine_keeps_the_good_angle_when_only_one_is_rubbish() {
+        let b = arena::bounds();
+        let s = BroomState { pitch: f32::NAN, want_pitch: f32::NAN, ..BroomState::new(b.center, Vec3::ZERO, 1.25, 0.0) };
+        let c = confine(&s, &b);
+        assert_eq!((c.yaw, c.want_yaw), (1.25, 1.25), "a NaN pitch must not throw the heading away: {c:?}");
+        assert_eq!((c.pitch, c.want_pitch), (0.0, 0.0));
+        let s = BroomState { yaw: f32::NAN, want_yaw: f32::INFINITY, ..BroomState::new(b.center, Vec3::ZERO, 0.0, 0.5) };
+        let c = confine(&s, &b);
+        assert_eq!((c.pitch, c.want_pitch), (0.5, 0.5), "a NaN yaw must not level the broom: {c:?}");
+        assert!(c.yaw.is_finite() && c.want_yaw.is_finite());
     }
 }

@@ -64,6 +64,12 @@ impl Rules {
         matches!(self.phase, MatchPhase::Ended(_))
     }
 
+    /// Whether events count now: only between the kickoff (`start`) and the end. A match still in its intro
+    /// has no score and cannot be won or lost.
+    fn live(&self) -> bool {
+        !self.ended() && self.phase != MatchPhase::Intro
+    }
+
     /// Intro -> Seeking. No effect in any other phase.
     pub fn start(&mut self) {
         if self.phase == MatchPhase::Intro {
@@ -80,7 +86,7 @@ impl Rules {
     /// - `OutOfTries`: ends the match as Lost.
     /// - `ClosingIn` / `Lost`: no rules effect.
     pub fn on_snitch(&mut self, e: SnitchEvent) {
-        if self.ended() {
+        if !self.live() {
             return;
         }
         match e {
@@ -101,9 +107,9 @@ impl Rules {
     /// control by a Hit) is handled by the caller. Kept for a uniform event interface.
     pub fn on_bludger(&mut self, _e: BludgerEvent, _control_lost: bool) {}
 
-    /// +10 to the scoring side; ignored once the match has ended.
+    /// +10 to the scoring side; ignored before the kickoff and once the match has ended.
     pub fn add_goal(&mut self, home: bool) {
-        if self.ended() {
+        if !self.live() {
             return;
         }
         if home {
@@ -230,6 +236,21 @@ mod tests {
         r.on_bludger(BludgerEvent::Hit, true);
         r.on_bludger(BludgerEvent::Hit, false);
         assert_eq!(r.score(), Score { home: 0, away: 0 });
+        assert_eq!(r.phase(), MatchPhase::Seeking);
+    }
+
+    /// Nothing counts before the kickoff: a match still in its intro has no score and cannot end.
+    #[test]
+    fn events_before_the_start_are_ignored() {
+        let mut r = Rules::new();
+        r.add_goal(true);
+        r.add_goal(false);
+        r.on_snitch(SnitchEvent::CatchStart);
+        r.on_snitch(SnitchEvent::Caught);
+        r.on_snitch(SnitchEvent::OutOfTries);
+        assert_eq!(r.phase(), MatchPhase::Intro);
+        assert_eq!(r.score(), Score { home: 0, away: 0 });
+        r.start();
         assert_eq!(r.phase(), MatchPhase::Seeking);
     }
 }

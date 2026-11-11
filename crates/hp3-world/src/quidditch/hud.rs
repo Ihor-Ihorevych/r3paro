@@ -84,7 +84,8 @@ pub fn hud_items(m: &HudInput) -> Vec<HudItem> {
         item(HudKind::SnitchProgress, unit(m.progress)),
         item(HudKind::ScoreHome, m.score_home as f32),
         item(HudKind::ScoreAway, m.score_away as f32),
-        item(HudKind::CatchPips, m.tries_left as f32),
+        // No attempts are left to show once the match is over, whatever was unused when it ended.
+        item(HudKind::CatchPips, if ended { 0.0 } else { m.tries_left as f32 }),
         item(HudKind::Speed, unit(num(m.speed) / num(m.top_speed).max(1.0))),
         // Hits left before the Bludgers take the broom off him, as a fraction.
         item(HudKind::Control, unit(1.0 - m.bumps as f32 / (m.bumps_to_lose.max(1)) as f32)),
@@ -167,6 +168,15 @@ mod tests {
         let m = HudInput { progress: f32::NAN, speed: f32::INFINITY, top_speed: 0.0, bumps: 9, bumps_to_lose: 0, ..seeking() };
         for i in hud_items(&m) {
             assert!(i.value.is_finite(), "{i:?}");
+        }
+    }
+
+    /// A match that is over has no catch attempts to show, however many were left when it ended.
+    #[test]
+    fn hud_shows_no_catch_pips_once_the_match_has_ended() {
+        for o in [Outcome::Won, Outcome::Lost] {
+            let m = HudInput { phase: MatchPhase::Ended(o), tries_left: 3, ..seeking() };
+            assert_eq!(value_of(&hud_items(&m), HudKind::CatchPips), Some(0.0), "{o:?}");
         }
     }
 }
