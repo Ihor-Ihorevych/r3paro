@@ -275,9 +275,9 @@ writes cost **0.007 ms a tick** (`HP3_QUID_DEBUG` prints the running mean every 
 
 ## The Golden Snitch
 
-`quidditch::snitch` is pure and deterministic from the match seed. The Snitch walks random waypoints inside the
-flight volume at 375 uu/s, 875 uu/s when Harry is right on it (the owner asked for "snitch a little bit
-faster", x1.25 on both, against a broom that lost a quarter), and **corkscrews as it goes**, the way HP1's
+`quidditch::snitch` is pure and deterministic from the match seed. The Snitch flies toward random waypoints
+inside the flight volume at 375 uu/s, 875 uu/s when Harry is right on it (the owner asked for "snitch a little
+bit faster", x1.25 on both, against a broom that lost a quarter), and **corkscrews as it goes**, the way HP1's
 Snitch does so the player can pick it out of the sky: a circle of `SnitchTuning::circle_radius` = 150 uu around
 the path point, in the plane across the direction of travel, turning at `circle_rate` = 4.5 rad/s (about 0.7 of
 a loop a second). The path speed is untouched -- the loop is an offset around the path, not extra ground
@@ -289,6 +289,58 @@ progress is measured from and what the catch radius is tested against: nothing w
 one thing that moved with the circling is `catch_radius`, from 350 to **500 uu** = 350 + `circle_radius`, so a
 Snitch looping 150 uu away from where it would otherwise be is exactly as hard to catch as before. Nothing else
 was widened: the progress radii are 600/1500/4000 uu and 150 uu of wobble in them is noise.
+
+### The flight path: a heading that turns, not a line that bends
+
+The path the Snitch flies -- the line the corkscrew is wound around and the line the flight rings are dropped
+on -- is **not** the straight run from waypoint to waypoint it was at first. It used to reach a waypoint and
+set off for the next one in the same frame, which put a corner of up to 180 degrees in the path, and the ring
+chain dropped on it was unreadable (the owner: "the path is NOT OBVIOUS and can be jerky").
+
+It is now a **heading-limited pursuit**: the Snitch carries a heading, the heading turns toward where the
+steering wants to go at a bounded rate, and the path walks `speed * dt` along the heading. Nothing else
+changed: the speed rules, the corkscrew (whose axis now follows the smoothed heading), `pos()`, the catch and
+the progress are all as they were.
+
+A steering model, not a spline through the waypoints, because the turn limit is then a property of the path
+itself rather than of how the spline happens to be fitted: whatever the waypoints do -- including one chosen
+directly behind -- the heading cannot move faster than the limit, so **no input can put a kink in the path**.
+A Catmull-Rom through random waypoints would need its own arc-length parameterisation and still bends as
+tightly as three close waypoints ask it to.
+
+| number (`SnitchTuning`) | value | why |
+|---|---|---|
+| `path_turn_rate` | 0.58 rad/s at `SPEED_NEAR` | really a **curvature**, `path_turn_rate / SPEED_NEAR` = rad per uu flown, so the bend is the same at either speed and the turn between two rings a fixed distance apart does not depend on how fast the Snitch is going. The turn radius is `SPEED_NEAR / path_turn_rate` = **1508 uu**, and 600 uu of ring `spacing` over it is 0.40 rad = 23 degrees. Not wider: the arena is 7060 uu across the short way once the margins are off, and much over 1500 is a Snitch that cannot cross it without hugging a wall |
+| `max_pitch` | 0.35 rad (20 degrees) | a Snitch standing on its tail needs the whole height of the arena to level off, and the chase camera loses it |
+| `path_margin` | 220 uu | room kept between the path and the arena wall on top of `circle_radius`, so a flight ring dropped on the path has its whole rim inside the arena |
+| `path_capture` | 600 uu | how near a waypoint counts as reached. A waypoint is also given up on the moment it falls behind, which is what stops a Snitch whose turn circle is wider than this from orbiting it for ever |
+| `path_min_hop` | 2500 uu | how far off the next waypoint must be, so each leg is a long arc and not a jink |
+| `path_cone` | pi/3 (+-60 degrees) | the forward cone the next waypoint is looked for in. Eight candidates are drawn (always all eight, so the randomness a waypoint costs never depends on which was taken) and the first both far enough off and inside the cone is taken; with nothing in the cone, the farthest-forward one |
+
+**Walls.** The path keeps itself off the arena wall by steering, never by a clamp -- the clamp is still there
+as a backstop but a test asserts it never binds, because a clamped frame covers less than `speed * dt` and so
+drops rings closer together in space and further apart in heading, which is a kink. Each of the four side
+walls gets a *hurry*: the ground the path will make good toward it before the nose comes across it
+(`R (1 - sin phi)` turning away from it, `R (1 + sin phi)` turning toward it, for a nose `phi` off the wall)
+against the room that is left. The worst of the four, blended in from a fifth of the room to nearly half, is
+how far the aim leans off the waypoint; the lean is 40 degrees short of straight out, so the path runs along
+the arena instead of back across the middle of it. The way out is the four hurries summed, so a corner is
+left by its diagonal. The floor and the ceiling do the same to the pitch. Waypoints are drawn from the box
+brought in by `wall_hold` (a fifth of a turn radius) so the steering is not forever pulled at a wall it then
+has to lean out of, and a new Snitch starts in the middle of the box with two turn radii of room, because a
+heading-limited path dropped next to a wall pointing at it cannot get away.
+
+Three things here are not the obvious thing and each was a bug first:
+
+* the turn is **in yaw and pitch**, not a rotation about `heading x aim`. The shortest great circle between
+  two headings far apart in yaw and both near the pitch cap runs up over the pole, so nearly the whole of a
+  step went into a climb the cap took straight back out, and the Snitch flew into the wall it was turning
+  away from with its nose swinging a degree a second.
+* **which way round** the yaw turns is chosen by comparing the two hurries, not by which way is nearer. A
+  wall-at-a-time rule cannot turn out of a corner (each of its walls says to turn into the other), and the
+  summed way out flips sides from frame to frame when the Snitch points nearly straight at a wall -- a
+  rate-limited heading handed first one and then the other averages them and goes nowhere.
+* the way round is **kept** unless the other is clearly better (within 1.3x), for the same reason.
 
 ### The Snitch's ring trail (HP1's hoop trail)
 
@@ -303,10 +355,10 @@ is one number away -- set `catch_rings` and the catch window waits for the run.
 
 | number (`TrailTuning`, all placeholders) | value | why |
 |---|---|---|
-| `spacing` | 900 uu | twice a ring's width, so rings stand clear of each other instead of overlapping |
-| `max_rings` | 6 | about 7 s of the Snitch's flying with Harry on it; enough for a run of three, few enough not to fill the sky (or the phone's frame) |
+| `spacing` | 600 uu | close enough that six of them read as one road rather than six separate targets (it was 900), and short enough against the path's 1508 uu turn radius that the turn from one ring to the next is 0.40 rad = 23 degrees, inside `CHAIN_MAX_TURN` |
+| `max_rings` | 6 | 3600 uu of chain; enough for a run of three, few enough not to fill the sky (or the phone's frame) -- and the particle cost is `max_rings` x 96 sprites |
 | `radius` | 220 uu | nearly twice a goal hoop's 120: it has to be fair to fly through at 450 (900 boosted) uu/s |
-| `life` | 7 s | a ring that nobody went for fades away without a word. 7 s x the chased Snitch's 875 uu/s over a 900 uu `spacing` is 6.8 rings, so the full six really are up; a Snitch left alone (375 uu/s) shows about three |
+| `life` | 6 s | a ring that nobody went for fades away without a word. 6 s x the chased Snitch's 875 uu/s over a 600 uu `spacing` is 7.5 rings, so in a chase it is `max_rings` that decides and the full six are always up; a Snitch left alone (375 uu/s) shows about three |
 | `miss_behind` / `miss_near` | 300 / 900 uu | a ring counts as gone past only when Harry is behind its plane **and** was near it; one on the far side of the pitch is one he never went for |
 | `ring_bonus` | +0.06 of the bar | about four rings' worth of the proximity gain (`gain_rate` 0.25/s) |
 | `streak_len` / `streak_bonus` | 3 / +0.15 | the bigger bonus on every third ring in a row, on top of the ring's own |
@@ -315,8 +367,24 @@ is one number away -- set `catch_rings` and the catch window waits for the run.
 A ring is dropped **on the Snitch's flight path** (`Snitch::path_pos`), not where the Snitch is really seen.
 Dropping them at the circling position was tried and rendered: the loop is 150 uu wide, so consecutive rings
 sit on alternate sides of the path and the trail reads as a cloud of beads instead of a row of hoops. The
-ring's normal is the Snitch's travel direction there (`Snitch::travel_dir`), so it faces the chase. Every
-centre comes out of the Snitch, which flies inside the flight volume, so the trail is bounded by it.
+ring's normal is the **tangent of the smoothed path** there (`Snitch::travel_dir`), so each ring faces along
+the curve and stands a bounded angle from the one before it. Every centre comes out of the Snitch, which
+flies inside the flight volume, so the trail is bounded by it. A ring is dropped every `spacing` of path
+*length*, and the overshoot is carried over rather than thrown away, so the gaps stay a `spacing` apart to
+within a frame's flying.
+
+**The chain is smooth, and it is checked.** `trail::chain_is_smooth` (and `chain_metrics`) is the measure:
+over consecutive rings, the turn from one ring's normal to the next must be at most `CHAIN_MAX_TURN` (0.436
+rad, 25 degrees) and the gap between centres must be within 0.7..1.3 of a `spacing`. It is asserted every
+step of a 20 000-step chase for each of fifty seeds. The guarantee comes from the path, not from the trail:
+the Snitch's flight path bends at no more than `path_turn_rate / SPEED_NEAR` rad per uu flown (see the next
+section), so `spacing` uu of path can turn by at most `spacing / 1508` = 0.40 rad. Measured over fifty seeds:
+worst turn **23.2 degrees**, gaps **585..610 uu** of 600.
+
+Before the smoothed path -- when the Snitch flew straight lines between random waypoints and turned on a
+sixpence at each one -- the same measure over the same fifty seeds gave a worst turn of **179.1 degrees** and
+gaps of **0..913 uu** of 900: rings landing on top of each other and the next one pointing back the way it
+came. That is what the owner saw as "not obvious and jerky".
 
 A ring is flown through **either way round** -- `goals::disc_crossing`, the same disc test a goal uses without
 the direction -- and counts once. A run is reset by going past a ring, and costs nothing else. A full bar with
@@ -361,8 +429,24 @@ boost to); the disc test in `trail` is the only thing that decides a pass-throug
 `glue::stop`, `TurnOff`s each ring and destroys the emitter it is holding -- the emitter is spawned by the
 ring's own script and is not in the match's `actors`, so nothing else would.
 
+**Ours are gold, not white** (`rings::RING_RGB` = 255, 220, 40; the owner's word after playing: a white ring
+is lost in the pitch's fog). It is written twice over, because the two paths reach the sprites differently:
+
+* the ring actor's `ringColorStart` and `ringColorEnd`, which is what `TurnOn` hands the emitter's
+  `SetColor`; and
+* each of the emitter's three `SpriteEmitter`s' **`ColorMultiplierRange`**, written by `rings::tint` right
+  after the `TurnOn`. That is the one the renderer reads: `particles::collect` multiplies the white bat-flap
+  texture by it per channel, so (1.0, 0.863, 0.157) is a plain tint. It must be written in the same frame as
+  the `TurnOn` -- `particles::tick` runs **before** `quidditch::glue::tick`, so an emitter spawned here has
+  its config read, and its first particles born, a frame later. Set it late and every ring would flash white
+  for a frame.
+
+A multiplier must stay in 0..1: the particle code reads a channel above 1 as byte values for a green glow
+(see `HP3_RAW_COLOR_MULT`), which would turn the ring green.
+
 **What it costs**: six rings x 96 sprites = **576 particles** at most, all single quads. That is the number to
-cut first if the phone's frame goes over (fewer rings, or a smaller `max_rings`).
+cut first if the phone's frame goes over (fewer rings, or a smaller `max_rings`). The sprites were not made
+bigger or more numerous for the fog: the colour alone was enough in a render.
 
 Still open, if the rule is ever wanted in its HP1 form: `PM_Hoops` proper, where the rings are the *only* way
 to the Snitch and the proximity bar goes away.

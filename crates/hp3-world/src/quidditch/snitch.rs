@@ -21,6 +21,33 @@ pub struct SnitchTuning {
     /// same. 0 for either is a Snitch that flies the bare path.
     pub circle_radius: f32,
     pub circle_rate: f32,
+    /// **How tightly the flight path may bend (rad/s at `SPEED_NEAR`).** The path is not a run of straight
+    /// lines between waypoints any more -- it is a heading that turns *toward* the next waypoint at a bounded
+    /// rate, so the path is made of gentle arcs and the ring chain dropped on it reads as one road.
+    ///
+    /// The limit is really a **curvature**: `path_turn_rate / SPEED_NEAR` rad per uu flown, which is the same
+    /// at either speed, so the turn between two rings a `spacing` apart does not depend on how fast the Snitch
+    /// happens to be going. 0.58 rad/s at 875 uu/s is a turn radius of **1508 uu**, and 600 uu of `spacing`
+    /// over it is 0.40 rad = 23 degrees, inside `trail::CHAIN_MAX_TURN`. It is not wider than that for a
+    /// reason: the arena is 7060 uu across the short way once the margins are off it, and a turn radius much
+    /// over 1500 leaves a Snitch that cannot cross it without hugging a wall.
+    pub path_turn_rate: f32,
+    /// How steeply the path may climb or dive (rad). Capped well below vertical: a Snitch standing on its tail
+    /// would need the whole height of the arena to level off again, and the chase camera loses it.
+    pub max_pitch: f32,
+    /// Room kept between the flight path and the arena wall, on top of `circle_radius` (uu): the flight rings
+    /// are dropped on the path and are `trail::TrailTuning::radius` wide, so this is that radius.
+    pub path_margin: f32,
+    /// How near a waypoint counts as reached (uu). A waypoint is also given up on the moment it falls behind,
+    /// which is what stops a Snitch whose turn circle is wider than this from orbiting it for ever.
+    pub path_capture: f32,
+    /// How far off the next waypoint must be (uu), so the Snitch commits to a long gentle arc instead of
+    /// picking its way between nearby points.
+    pub path_min_hop: f32,
+    /// Half the forward cone the next waypoint is looked for in (rad): a point behind the Snitch would be a
+    /// U-turn, which the turn limit makes into a long slow loop. Preferred, not required -- with nothing in
+    /// the cone the farthest-forward candidate is taken.
+    pub path_cone: f32,
 }
 
 impl Default for SnitchTuning {
@@ -48,6 +75,12 @@ impl Default for SnitchTuning {
             catch_radius: 500.0,
             circle_radius: 150.0,
             circle_rate: 4.5,
+            path_turn_rate: 0.58,
+            max_pitch: 0.35,
+            path_margin: 220.0,
+            path_capture: 600.0,
+            path_min_hop: 2500.0,
+            path_cone: std::f32::consts::FRAC_PI_3,
         }
     }
 }
@@ -69,6 +102,15 @@ const SPEED_IDLE: f32 = 375.0;
 const SPEED_NEAR: f32 = 875.0;
 /// Longest dt a single step integrates; larger values are clamped.
 const MAX_DT: f32 = 1.0;
+
+/// `a` folded into -pi..pi: how far round, and which way round, is nearer.
+fn short_angle(a: f32) -> f32 {
+    if !a.is_finite() {
+        return 0.0;
+    }
+    let a = a.rem_euclid(std::f32::consts::TAU);
+    if a > std::f32::consts::PI { a - std::f32::consts::TAU } else { a }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Phase {
@@ -92,6 +134,12 @@ pub struct Snitch {
     path: Vec3,
     pos: Vec3,
     waypoint: Vec3,
+    /// Which way the path is going now, as a unit vector: the thing the steering turns and the path follows.
+    /// It is what the rings' normals are taken from, so the chain faces along the curve.
+    heading: Vec3,
+    /// Which way round the yaw is turning to get out of a wall (+1, -1), or 0 for a path with no wall to
+    /// worry about. Held until the heading points out of the wall: see `steer`.
+    escape: f32,
     /// How far round the loop it is (rad).
     angle: f32,
     progress: f32,
@@ -117,16 +165,21 @@ impl Snitch {
         // smaller circle rather than an inside-out one).
         let span = (hi - lo).min_element().max(0.0);
         let r = if tuning.circle_radius.is_finite() { tuning.circle_radius.clamp(0.0, span * 0.5) } else { 0.0 };
+        // And room for the flight rings dropped on the path on top of that, so a ring of the trail is inside
+        // the arena with its rim and not just its centre. Both margins together never eat more than the box.
+        let m = if tuning.path_margin.is_finite() { tuning.path_margin.clamp(0.0, (span * 0.5 - r).max(0.0)) } else { 0.0 };
         let mut s = Snitch {
-            tuning: SnitchTuning { circle_radius: r, ..tuning },
+            tuning: SnitchTuning { circle_radius: r, path_margin: m, ..tuning },
             rng: Rng::new(seed),
             lo,
             hi,
-            path_lo: lo + Vec3::splat(r),
-            path_hi: hi - Vec3::splat(r),
+            path_lo: lo + Vec3::splat(r + m),
+            path_hi: hi - Vec3::splat(r + m),
             path: Vec3::ZERO,
             pos: Vec3::ZERO,
             waypoint: Vec3::ZERO,
+            heading: Vec3::X,
+            escape: 0.0,
             angle: 0.0,
             progress: 0.0,
             tries: 0,
@@ -135,15 +188,251 @@ impl Snitch {
         };
         // The loop starts somewhere of its own, so two Snitches of different seeds are not in step.
         s.angle = s.rng.unit() * std::f32::consts::TAU;
-        s.path = s.random_point();
-        s.waypoint = s.random_point();
+        // Where it starts: in the **middle** of the flight box, not anywhere in it. A heading-limited path
+        // cannot be dropped a few hundred uu off a wall pointing at it -- turning away takes up to a turn
+        // radius of room -- and it would spend its first seconds pressed against the arena. A turn radius of
+        // margin (and never more than a quarter of the box, for the short way up) is room to turn.
+        let turn = (s.turn_radius() * 2.0).min(1e6);
+        let margin = (s.path_hi - s.path_lo) * 0.3;
+        let keep = Vec3::new(turn.min(margin.x), turn.min(margin.y), turn.min(margin.z)).max(Vec3::ZERO);
+        let r3 = Vec3::new(s.rng.unit(), s.rng.unit(), s.rng.unit());
+        s.path = (s.path_lo + keep) + ((s.path_hi - keep) - (s.path_lo + keep)) * r3;
+        // A heading to start on (level, so the first arc is a readable one), and the first waypoint picked in
+        // front of it like every one after.
+        let yaw = s.rng.unit() * std::f32::consts::TAU;
+        s.heading = Vec3::new(yaw.cos(), yaw.sin(), 0.0);
+        s.waypoint = s.pick_waypoint();
         s.pos = s.circling();
         s
     }
 
+    /// A random point of the box waypoints are drawn from: the flight box held off the wall by `wall_hold`,
+    /// so the steering is not forever being pulled into a wall it then has to lean out of.
     fn random_point(&mut self) -> Vec3 {
         let r = Vec3::new(self.rng.unit(), self.rng.unit(), self.rng.unit());
-        self.path_lo + (self.path_hi - self.path_lo) * r
+        let (lo, hi) = self.aim_box();
+        lo + (hi - lo) * r
+    }
+
+    /// How close to the wall the path is allowed to settle (uu): a fifth of a turn radius. Inside it the
+    /// steering leans away whatever the waypoint says, which is what keeps the path clear of the hard clamp --
+    /// and the clamp is the one thing that *would* put a corner in the path, because a clamped frame covers
+    /// less than `speed * dt` and so leaves the turn limit behind.
+    fn wall_hold(&self) -> f32 {
+        (self.turn_radius().min(1e6) * 0.2).max(0.0)
+    }
+
+    /// The box waypoints are drawn from and the path is steered back into: the flight box minus `wall_hold`,
+    /// or the flight box itself where there is not the room for it.
+    fn aim_box(&self) -> (Vec3, Vec3) {
+        let room = (self.path_hi - self.path_lo).min_element() * 0.25;
+        let h = Vec3::splat(self.wall_hold().min(room.max(0.0)));
+        (self.path_lo + h, self.path_hi - h)
+    }
+
+    /// The turn limit as a curvature: rad per uu flown. Taken from `path_turn_rate` at `SPEED_NEAR` so the
+    /// bend of the path -- and so the turn between two rings a fixed distance apart -- is the same however
+    /// fast the Snitch is going. Its reciprocal is the tightest turn radius the path will ever fly.
+    fn curvature(&self) -> f32 {
+        let rate = if self.tuning.path_turn_rate.is_finite() { self.tuning.path_turn_rate.max(0.0) } else { 0.0 };
+        rate / SPEED_NEAR
+    }
+
+    /// The tightest turn radius the path can fly (uu); `f32::MAX` for a Snitch tuned not to turn at all.
+    pub(super) fn turn_radius(&self) -> f32 {
+        let k = self.curvature();
+        if k > 0.0 { 1.0 / k } else { f32::MAX }
+    }
+
+    /// Picks the next waypoint: `CANDIDATES` random points of the inner box, of which the first one both far
+    /// enough off (`path_min_hop`) and inside the forward cone (`path_cone`) is taken. The cone is what keeps
+    /// the path from ever being asked to double back, and the distance is what makes each leg a long arc
+    /// rather than a jink. With nothing in the cone the farthest-forward candidate is taken, and the turn
+    /// limit then makes that into a wide loop rather than a reversal.
+    fn pick_waypoint(&mut self) -> Vec3 {
+        /// How many points are looked at. All of them are drawn every time, so the randomness a waypoint costs
+        /// never depends on which one was taken: same seed, same path.
+        const CANDIDATES: usize = 8;
+        let mut pts = [Vec3::ZERO; CANDIDATES];
+        for p in pts.iter_mut() {
+            *p = self.random_point();
+        }
+        let hop = if self.tuning.path_min_hop.is_finite() { self.tuning.path_min_hop.max(0.0) } else { 0.0 };
+        let cone = if self.tuning.path_cone.is_finite() { self.tuning.path_cone.clamp(0.0, std::f32::consts::PI) } else { 0.0 };
+        let want = cone.cos();
+        let (mut best, mut best_dot) = (pts[0], f32::MIN);
+        for p in pts {
+            let to = p - self.path;
+            let d = to.length();
+            let fwd = if d > 1e-3 { to.dot(self.heading) / d } else { -1.0 };
+            if d >= hop && fwd >= want {
+                return p;
+            }
+            if fwd > best_dot {
+                best_dot = fwd;
+                best = p;
+            }
+        }
+        best
+    }
+
+    /// `v` with its climb or dive brought inside `max_pitch`, keeping its heading on the ground. Both the aim
+    /// and the heading are held to it: an aim outside the cap is the one thing that can send the turn the long
+    /// way round the sphere (the shortest great circle to a steep dive runs through the yaw behind you), which
+    /// is a reversal and exactly what the owner complained of.
+    fn pitch_capped(&self, v: Vec3) -> Vec3 {
+        let v = v.normalize_or_zero();
+        let v = if v == Vec3::ZERO { Vec3::X } else { v };
+        let cap = if self.tuning.max_pitch.is_finite() { self.tuning.max_pitch.clamp(0.0, std::f32::consts::FRAC_PI_2) } else { 0.0 };
+        let pitch = v.z.clamp(-1.0, 1.0).asin();
+        if pitch.abs() <= cap {
+            return v;
+        }
+        let flat = Vec3::new(v.x, v.y, 0.0).normalize_or_zero();
+        let flat = if flat == Vec3::ZERO { Vec3::X } else { flat };
+        let out = flat * cap.cos() + Vec3::Z * cap.sin() * pitch.signum();
+        out.normalize_or_zero()
+    }
+
+    /// The four side walls as the steering sees them: how much room is left to each (uu), which way it lies
+    /// as a yaw, and the unit direction away from it. `yaw` is the heading's.
+    fn side_walls(&self, yaw: f32) -> [(f32, f32, Vec3); 4] {
+        let mut out = [(0.0f32, 0.0f32, Vec3::ZERO); 4];
+        let mut n = 0;
+        for (i, at) in [(0usize, 0.0f32), (1, std::f32::consts::FRAC_PI_2)] {
+            for (side, limit) in [(1.0f32, self.path_lo[i]), (-1.0, self.path_hi[i])] {
+                // Which way the wall lies, as a yaw: the low wall of an axis lies behind that axis.
+                let at = if side > 0.0 { at + std::f32::consts::PI } else { at };
+                let mut away = Vec3::ZERO;
+                away[i] = side;
+                out[n] = ((self.path[i] - limit) * side, short_angle(yaw - at), away);
+                n += 1;
+            }
+        }
+        out
+    }
+
+    /// **How much of a hurry the walls are in**, for a yaw turning the way `s` says, and the way out.
+    ///
+    /// For each wall the heading is closing on, the ground it will make good toward it before the nose comes
+    /// across it is `R (1 - sin phi)` when the turn is away from that wall and `R (1 + sin phi)` when it is
+    /// toward it, for a nose `phi` off the wall. Against the room left that is a *ratio*: under 1 and the
+    /// turn fits, over 1 and the path is going to meet the wall. The worst ratio of the four is the hurry,
+    /// and the lean out is the sum of the ways out weighted by their own ratios -- so a corner is left by its
+    /// diagonal, which is the thing a wall-at-a-time rule cannot do: each of a corner's two walls says to
+    /// turn into the other.
+    ///
+    /// Being inside `wall_hold` of a wall counts as a ratio of its own however the nose points, which is what
+    /// keeps the path off the hard clamp -- and the clamp is the one thing that *would* put a corner in the
+    /// path, since a clamped frame covers less than `speed * dt` and so leaves the turn limit behind.
+    fn wall_hurry(&self, yaw: f32, s: f32) -> (f32, Vec3) {
+        let r = self.turn_radius().min(1e6);
+        let hold = self.wall_hold().max(1.0);
+        let (mut worst, mut out) = (0.0f32, Vec3::ZERO);
+        for (room, phi, away) in self.side_walls(yaw) {
+            let room = room.max(1.0);
+            let need = if phi.abs() < std::f32::consts::FRAC_PI_2 {
+                // Turning away from this wall is `s` having the same sign as `phi`.
+                if s * phi >= 0.0 { r * (1.0 - phi.sin().abs()) } else { r * (1.0 + phi.sin().abs()) }
+            } else {
+                0.0
+            };
+            let ratio = (need / room).max(hold / room);
+            worst = worst.max(ratio);
+            out += away * ratio;
+        }
+        (worst, out)
+    }
+
+    /// One step of the steering: where the path would like to go, and the heading turned that far toward it.
+    /// `max` is the most the heading may move this step (rad).
+    ///
+    /// The aim is the waypoint, blended by wall urgency toward flying out of the arena wall, **in yaw and
+    /// pitch separately** -- the yaw out of the four side walls (summed, so a corner is left by its diagonal)
+    /// and the pitch out of the floor or the ceiling. The heading then turns toward the aim in yaw and pitch
+    /// at a bounded rate, which is the aeroplane the Snitch is pretending to be.
+    ///
+    /// Two things here are not the obvious thing, and both were bugs first:
+    ///
+    /// * the turn is **not** a rotation about `heading x aim`. The shortest great circle between two headings
+    ///   far apart in yaw and both near the pitch cap runs up over the pole, so nearly the whole of a step
+    ///   went into a climb the cap then took straight back out, and the Snitch flew into the wall it was
+    ///   turning away from with its nose swinging a degree a second.
+    /// * while a wall is urgent the **way round is committed to** (`escape`) and held until the heading no
+    ///   longer closes on it. Whichever way round is nearer changes hands when the Snitch points nearly
+    ///   straight at a wall, and the aim then flipped from one side to the other every frame: the
+    ///   rate-limited heading averaged the two and went nowhere. Either way round is equally safe (the
+    ///   quarter turn costs `R` of ground going round either way), so committing costs nothing.
+    fn steer(&mut self, max: f32) {
+        /// How far short of straight-out-of-the-wall the aim stops (rad, 40 degrees): enough that the path
+        /// leaves, little enough that it runs along the arena instead of back across the middle of it.
+        const LEAN: f32 = 0.7;
+        let cap = if self.tuning.max_pitch.is_finite() { self.tuning.max_pitch.clamp(0.0, std::f32::consts::FRAC_PI_2) } else { 0.0 };
+        let (yaw, pitch) = (self.heading.y.atan2(self.heading.x), self.heading.z.clamp(-1.0, 1.0).asin());
+        let to = (self.waypoint - self.path).normalize_or_zero();
+        let to = self.pitch_capped(if to == Vec3::ZERO { self.heading } else { to });
+        let (mut aim_yaw, mut aim_pitch) = (to.y.atan2(to.x), to.z.clamp(-1.0, 1.0).asin());
+
+        // Which way round the yaw turns is the way that leaves the walls the most room -- the lower of the
+        // two hurries -- with the way already being turned kept unless the other is clearly better. Both are
+        // needed: deciding it off the worst single wall cannot turn out of a corner (each of its walls says
+        // to turn into the other), and deciding it off the summed way out flips from frame to frame when the
+        // Snitch points nearly straight at a wall, which a rate-limited heading averages into going nowhere.
+        let (hurry_pos, out_pos) = self.wall_hurry(yaw, 1.0);
+        let (hurry_neg, out_neg) = self.wall_hurry(yaw, -1.0);
+        let keep = self.escape != 0.0 && {
+            let (mine, other) = if self.escape > 0.0 { (hurry_pos, hurry_neg) } else { (hurry_neg, hurry_pos) };
+            mine <= other * 1.3
+        };
+        if !keep {
+            self.escape = if hurry_pos <= hurry_neg { 1.0 } else { -1.0 };
+        }
+        let (hurry, out) = if self.escape > 0.0 { (hurry_pos, out_pos) } else { (hurry_neg, out_neg) };
+        // The hurry as a weight: nothing until the turn wants a fifth of the room there is, everything by the
+        // time it wants nearly half, so the lean comes on early and gently and is never a jerk -- and is
+        // fully on with better than twice the room the turn needs, which is the slack the ramp itself eats.
+        let lean = ((hurry - 0.2) / 0.25).clamp(0.0, 1.0);
+        match Vec3::new(out.x, out.y, 0.0).try_normalize().filter(|_| lean > 0.0) {
+            Some(out) => {
+                let flee = out.y.atan2(out.x);
+                aim_yaw += short_angle((flee - self.escape * LEAN) - aim_yaw) * lean;
+            }
+            // Clear of the walls: the way round is up for grabs again.
+            None => self.escape = 0.0,
+        }
+
+        // The floor and the ceiling have no yaw of their own, only a climb or a dive, and the climb limit is
+        // as steep as any aim is allowed to be anyway. The same hurry: levelling off from a pitch `p` drops
+        // `R (1 - cos p)` on the way, which inside `max_pitch` is a hundred uu or so -- it is `wall_hold`
+        // that does the work here.
+        let r = self.turn_radius().min(1e6);
+        let hold = self.wall_hold().max(1.0);
+        let mut vert = 0.0f32;
+        for (side, limit) in [(1.0f32, self.path_lo[2]), (-1.0, self.path_hi[2])] {
+            let room = ((self.path.z - limit) * side).max(1.0);
+            let need = if pitch * side < 0.0 { r * (1.0 - pitch.cos()) } else { 0.0 };
+            let ratio = (need / room).max(hold / room);
+            if ratio > vert.abs() {
+                vert = ratio * side;
+            }
+        }
+        let lean_v = ((vert.abs() - 0.2) / 0.25).clamp(0.0, 1.0);
+        aim_pitch += (cap * vert.signum() - aim_pitch) * lean_v;
+
+        // And the turn. `escape` forces the way round; otherwise it is whichever is nearer, which at this
+        // rate is a wide arc even for a U-turn and never a reversal.
+        let mut dy = short_angle(aim_yaw - yaw);
+        if self.escape != 0.0 && dy * self.escape < 0.0 {
+            dy += self.escape * std::f32::consts::TAU;
+        }
+        let dp = aim_pitch.clamp(-cap, cap) - pitch;
+        // What that pair of turns costs the heading in radians (yaw counts for less the steeper the climb),
+        // and the two scaled together so the heading never moves more than `max` in a step.
+        let cost = ((dy * pitch.cos()).powi(2) + dp.powi(2)).sqrt();
+        let k = if cost > max.max(0.0) && cost > 1e-9 { max.max(0.0) / cost } else { 1.0 };
+        let (yaw, pitch) = (yaw + dy * k, (pitch + dp * k).clamp(-cap, cap));
+        let h = Vec3::new(pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), pitch.sin());
+        self.heading = h.try_normalize().unwrap_or(Vec3::X);
     }
 
     /// This frame's visible position: the path point with the loop offset added, in the plane across the
@@ -153,10 +442,10 @@ impl Snitch {
         if !(r > 0.0) {
             return self.path;
         }
-        let to = self.waypoint - self.path;
         // A travel direction, and a pair of unit vectors across it. Up is the axis to cross with unless the
-        // travel is itself nearly vertical, in which case X is.
-        let dir = if to.length_squared() > 1e-6 { to.normalize() } else { Vec3::X };
+        // travel is itself nearly vertical, in which case X is. The axis of the corkscrew is the **smoothed**
+        // heading, so the loop follows the arc the path is flying rather than the line to the waypoint.
+        let dir = if self.heading.length_squared() > 1e-6 { self.heading.normalize() } else { Vec3::X };
         let away = if dir.z.abs() < 0.9 { Vec3::Z } else { Vec3::X };
         let u = dir.cross(away);
         let u = if u.length_squared() > 1e-6 { u.normalize() } else { Vec3::Y };
@@ -237,20 +526,32 @@ impl Snitch {
         }
     }
 
-    /// Move toward the current waypoint; faster the closer Harry is. The path speed is untouched by the
-    /// circling: the loop is an offset around the path, not extra ground covered.
+    /// One step of the flight path: **steer, then move**. The heading turns toward where the steering wants to
+    /// go by at most `curvature * ds` radians, and the path then walks `ds = speed * dt` along it, so the path
+    /// is a run of arcs no tighter than `turn_radius` and never has a corner in it. The speed rules are
+    /// untouched (idle, up to `SPEED_NEAR` with Harry on it) and so is the circling: the loop is an offset
+    /// around the path, not extra ground covered.
     fn fly(&mut self, dist: f32, dt: f32) {
         let near = (1.0 - dist / self.tuning.max_loss_radius.max(1.0)).clamp(0.0, 1.0);
         let speed = SPEED_IDLE + (SPEED_NEAR - SPEED_IDLE) * near;
+        let ds = speed * dt;
+        // Reached, or gone past: a waypoint is given up on the moment it falls behind, which is what stops a
+        // Snitch whose turn circle is wider than `path_capture` circling it for ever.
         let to = self.waypoint - self.path;
-        let left = to.length();
-        let reach = speed * dt;
-        if left <= reach || left <= f32::EPSILON {
-            self.path = self.waypoint;
-            self.waypoint = self.random_point();
-        } else {
-            self.path += to * (reach / left);
+        let capture = if self.tuning.path_capture.is_finite() { self.tuning.path_capture.max(0.0) } else { 0.0 };
+        if to.length() <= capture.max(ds) || to.dot(self.heading) <= 0.0 {
+            self.waypoint = self.pick_waypoint();
         }
+        // The turn a step may make: the curvature over the ground covered, and never more than 0.3 rad even
+        // so. The cap only bites at a `dt` of over half a second, where a frame covers more than a ring's
+        // spacing on its own and the chain could not be smooth whatever the path did.
+        self.steer((self.curvature() * ds).min(0.3));
+        self.path += self.heading * ds;
+        if !self.path.is_finite() {
+            self.path = (self.path_lo + self.path_hi) * 0.5;
+        }
+        // The wall look-ahead is what really keeps the path inside; this is the backstop that makes it true
+        // whatever the tuning (a Snitch told not to turn at all would otherwise fly out of the arena).
         self.path = self.path.clamp(self.path_lo, self.path_hi);
         let rate = if self.tuning.circle_rate.is_finite() { self.tuning.circle_rate } else { 0.0 };
         self.angle = (self.angle + rate * dt).rem_euclid(std::f32::consts::TAU);
@@ -268,11 +569,12 @@ impl Snitch {
         self.path
     }
 
-    /// Where the Snitch is heading along its path, as a unit vector (zero only in the frame it has arrived at
-    /// a waypoint). It is the normal of the rings its trail drops (`quidditch::trail`): the path's direction,
-    /// not the loop's, so a ring faces the chase rather than the corkscrew.
+    /// Where the Snitch is heading along its path, as a unit vector: the **tangent of the smoothed path**, not
+    /// the line to the next waypoint. It is the normal of the rings its trail drops (`quidditch::trail`), so
+    /// each ring faces along the curve and stands a bounded angle from the one before it; and it is the path's
+    /// direction, not the loop's, so a ring faces the chase rather than the corkscrew.
     pub fn travel_dir(&self) -> Vec3 {
-        (self.waypoint - self.path).normalize_or_zero()
+        self.heading.normalize_or_zero()
     }
 
     pub fn progress(&self) -> f32 {
@@ -489,8 +791,9 @@ mod tests {
             s.step(&h, false, 1.0 / 60.0);
             let off = s.pos() - s.path;
             assert!((off.length() - t.circle_radius).abs() < 1e-2, "offset {} is not the radius", off.length());
-            // Across the travel, so the loop shows from the side rather than being flown through.
-            let dir = (s.waypoint - s.path).normalize();
+            // Across the travel, so the loop shows from the side rather than being flown through. The travel
+            // is the smoothed heading, which is what the corkscrew's axis follows.
+            let dir = s.heading.normalize();
             assert!(off.normalize().dot(dir).abs() < 1e-2, "the loop is not across the travel");
             // It turns at the tuned rate, and goes right round.
             let step = (s.angle - last).rem_euclid(std::f32::consts::TAU);
@@ -647,6 +950,76 @@ mod tests {
             }
         }
         assert!(agreed > 290, "the travel direction matched the step in only {agreed} of 300 frames");
+    }
+
+    /// The smoothed path keeps itself inside the flight box, with room for the loop *and* the flight rings
+    /// dropped on it, and clear of the floor -- by **steering**, never by the clamp. The clamp matters: a
+    /// clamped frame covers less ground than `speed * dt`, so the rings dropped by path length come closer
+    /// together in space and further apart in heading, and the chain kinks. Fifty seeds, 20 000 steps each.
+    #[test]
+    fn the_path_stays_off_the_walls_by_steering_for_every_seed() {
+        let a = arena();
+        let margin = SnitchTuning::default().circle_radius + SnitchTuning::default().path_margin;
+        let mut nearest = f32::MAX;
+        for seed in 1..=50u64 {
+            let mut s = Snitch::new(seed, &a);
+            for i in 0..20_000 {
+                let th = i as f32 * 0.013;
+                let harry = Vec3::new(th.cos() * 3000.0, th.sin() * 3500.0, 1500.0 + (th * 0.7).sin() * 1200.0);
+                s.step(&harry_at(harry), i % 11 == 0, 1.0 / 60.0);
+                let p = s.path_pos();
+                assert!(p.is_finite(), "seed {seed} step {i}: {p:?}");
+                for k in 0..3 {
+                    let room = (p[k] - s.path_lo[k]).min(s.path_hi[k] - p[k]);
+                    assert!(room > 0.5, "seed {seed} step {i}: the path rode the clamp on axis {k} at {p:?}");
+                    nearest = nearest.min(room);
+                }
+                // The ring dropped here has its whole rim inside the arena, floor included.
+                assert!(p.z - margin >= a.center.z - a.half.z, "seed {seed} step {i}: {p:?} is too low");
+                assert!(p.z + margin <= a.ceiling.min(a.center.z + a.half.z), "seed {seed} step {i}: {p:?} is too high");
+            }
+        }
+        println!("the path came within {nearest:.0} uu of the flight box over 50 seeds");
+    }
+
+    /// A waypoint put **directly behind** the Snitch is a U-turn, and a U-turn here is a wide arc: the path
+    /// never reverses, every step turns by no more than the curvature allows, and the turn it flies is no
+    /// tighter than `turn_radius`. (The waypoint chooser prefers points in front for exactly this reason, so
+    /// this is the case it is not allowed to pick -- forced on it here.)
+    #[test]
+    fn a_waypoint_behind_makes_a_wide_arc_and_never_a_reversal() {
+        let a = arena();
+        let dt = 1.0 / 60.0;
+        let mut s = Snitch::new(17, &a);
+        // Out in the middle, flying +x, with the waypoint hard behind: no wall has anything to say about it.
+        s.path = a.center;
+        s.heading = Vec3::X;
+        s.waypoint = a.center - Vec3::X * 4000.0;
+        let r = s.turn_radius();
+        // Harry well out of it, so the speed is the idle one and the arc is the tightest the path can fly.
+        let h = harry_at(Vec3::new(50_000.0, 0.0, 2000.0));
+        let (mut turned, mut steps) = (0.0f32, 0);
+        let mut was = s.heading;
+        while turned < std::f32::consts::PI * 0.95 && steps < 20_000 {
+            let before = s.path_pos();
+            // The waypoint is kept behind the *current* heading, so the U-turn is never let off the hook.
+            s.waypoint = s.path_pos() - s.travel_dir() * 4000.0;
+            s.step(&h, false, dt);
+            let moved = s.path_pos() - before;
+            let step_turn = was.dot(s.heading).clamp(-1.0, 1.0).acos();
+            // Never a reversal: a frame's step still goes roughly the way the path was already going.
+            assert!(moved.normalize().dot(was) > 0.99, "step {steps} reversed: {moved:?} against {was:?}");
+            // And never tighter than the turn radius: the turn a frame makes against the ground it covers.
+            let radius = moved.length() / step_turn.max(1e-9);
+            assert!(radius >= r * 0.99, "step {steps}: flew a radius of {radius:.0}, tighter than {r:.0}");
+            turned += step_turn;
+            was = s.heading;
+            steps += 1;
+        }
+        assert!(turned >= std::f32::consts::PI * 0.95, "the U-turn never came round: {turned} rad in {steps} steps");
+        // A half turn at that radius takes a half circumference of flying, give or take the pitch.
+        let flown = steps as f32 * SPEED_IDLE * dt;
+        assert!(flown > r * 2.8, "the U-turn was flown in {flown:.0} uu, less than a half circle of {r:.0}");
     }
 
     #[test]

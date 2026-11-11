@@ -47,8 +47,9 @@ pub enum TrailEvent {
 /// The numbers of the ring trail, all placeholders tuned by feel like the rest of the match.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TrailTuning {
-    /// How much of the Snitch's path there is between rings (uu). Twice a ring's width, so a ring stands clear
-    /// of the next one instead of overlapping it.
+    /// How much of the Snitch's path there is between rings (uu). A ring and a half of clear air between
+    /// rims, so the chain reads as a line of hoops rather than a row of separate targets, and short enough
+    /// against the path's turn radius that the turn from one ring to the next stays inside `CHAIN_MAX_TURN`.
     pub spacing: f32,
     /// How many rings of the trail are alive at once; the oldest goes when a new one is dropped. Six of them
     /// is about seven seconds of the Snitch's flying with Harry on it, plenty for a run of three, and little
@@ -57,9 +58,10 @@ pub struct TrailTuning {
     /// How wide a ring is (uu). Wider than a goal hoop (120): a ring has to be fair to fly through at a
     /// broom's 450 (900 boosted) uu/s.
     pub radius: f32,
-    /// How long a ring lasts (s). 7 s against the 875 uu/s the Snitch flies with Harry on it and a `spacing`
-    /// of 900 is 6.8 rings' worth, so a chased Snitch really does show the full six; a Snitch left alone
-    /// (375 uu/s) shows about three, which is what a trail going cold should look like.
+    /// How long a ring lasts (s). 6 s against the 875 uu/s the Snitch flies with Harry on it and a `spacing`
+    /// of 700 is 7.5 rings' worth, so in a chase it is `max_rings` that decides and the full six are always
+    /// up; a Snitch left alone (375 uu/s) shows about three, which is what a trail going cold should look
+    /// like. (With the old 900 `spacing` this wanted 7 s for six rings; 700 buys the second back.)
     pub life: f32,
     /// How far past a ring's plane Harry must be before it counts as gone past (uu).
     pub miss_behind: f32,
@@ -81,10 +83,10 @@ pub struct TrailTuning {
 impl Default for TrailTuning {
     fn default() -> TrailTuning {
         TrailTuning {
-            spacing: 900.0,
+            spacing: 600.0,
             max_rings: 6,
             radius: 220.0,
-            life: 7.0,
+            life: 6.0,
             miss_behind: 300.0,
             miss_near: 900.0,
             // About four rings' worth of the proximity gain (`SnitchTuning::gain_rate` is 0.25 a second), so
@@ -150,6 +152,11 @@ impl RingTrail {
         self.streak >= self.t.catch_rings
     }
 
+    /// Whether the rings up now read as one smooth road (`chain_is_smooth` against this trail's `spacing`).
+    pub fn chain_is_smooth(&self) -> bool {
+        chain_is_smooth(&self.rings, self.t.spacing)
+    }
+
     /// One frame: ages the rings, drops a new one when the Snitch has flown `spacing` since the last, and
     /// answers what Harry's step from `harry_prev` to `harry_now` did to them.
     pub fn step(&mut self, snitch_pos: Vec3, snitch_dir_or_vel: Vec3, harry_prev: Vec3, harry_now: Vec3, dt: f32) -> Vec<TrailEvent> {
@@ -184,7 +191,11 @@ impl RingTrail {
             }
             None => {}
         }
-        self.since = 0.0;
+        // The overshoot is carried over rather than thrown away, so the gaps along the chain stay a `spacing`
+        // apart to within a frame's flying instead of drifting by one every ring. Half a spacing of credit at
+        // most: a frame's overshoot is tens of uu, and a Snitch that jumped the length of the pitch must not
+        // then drop a ring a frame for ever.
+        self.since = (self.since - spacing).clamp(0.0, spacing * 0.5);
         // The travel direction, or the step the Snitch just took, or anything at all rather than a zero
         // normal (which no segment can ever cross).
         let mut n = dir.normalize_or_zero();
@@ -218,6 +229,49 @@ impl RingTrail {
             }
         }
     }
+}
+
+/// The most a ring may be turned from the one before it (rad, about 25 degrees) for the chain to still read
+/// as one curve. The path's own curvature cap is set from this: `SnitchTuning::path_turn_rate` holds the
+/// Snitch's path to a turn radius of `spacing / CHAIN_MAX_TURN` or wider, so this bound is met by
+/// construction -- see `docs/formats/quidditch-arena.md`.
+pub const CHAIN_MAX_TURN: f32 = 0.436;
+/// How far a ring's centre may be from the one before it, as a fraction of `spacing`: a chain whose rings
+/// jump about is not a road.
+pub const CHAIN_GAP: (f32, f32) = (0.7, 1.3);
+
+/// The chain's two numbers, over consecutive rings (ones whose ids follow on): the widest turn from one ring
+/// to the next (rad), and the smallest and largest gap between their centres (uu). All zero for a chain of
+/// fewer than two rings.
+pub fn chain_metrics(rings: &[Ring]) -> (f32, f32, f32) {
+    let mut turn = 0.0f32;
+    let (mut lo, mut hi) = (f32::MAX, 0.0f32);
+    let mut pairs = 0;
+    for w in rings.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        if b.id != a.id + 1 {
+            continue;
+        }
+        pairs += 1;
+        turn = turn.max(a.normal.normalize_or_zero().dot(b.normal.normalize_or_zero()).clamp(-1.0, 1.0).acos());
+        let d = a.center.distance(b.center);
+        lo = lo.min(d);
+        hi = hi.max(d);
+    }
+    if pairs == 0 { (0.0, 0.0, 0.0) } else { (turn, lo, hi) }
+}
+
+/// Whether the chain is a smooth, readable road: every ring turned no more than `CHAIN_MAX_TURN` from the one
+/// before it, and every gap within `CHAIN_GAP` of `spacing`. A chain of fewer than two rings is smooth.
+pub fn chain_is_smooth(rings: &[Ring], spacing: f32) -> bool {
+    let (turn, lo, hi) = chain_metrics(rings);
+    if !(turn.is_finite() && lo.is_finite() && hi.is_finite()) {
+        return false;
+    }
+    if lo == 0.0 && hi == 0.0 {
+        return true;
+    }
+    turn <= CHAIN_MAX_TURN && lo >= CHAIN_GAP.0 * spacing && hi <= CHAIN_GAP.1 * spacing
 }
 
 /// What `e` adds to the Snitch's catch bar: a ring's own bonus, and the bigger one on every `streak_len` in a
@@ -392,6 +446,45 @@ mod tests {
             assert!(t.rings().len() <= TrailTuning::default().max_rings);
         }
         assert!(dropped > 10, "a Snitch flying for 50 s dropped only {dropped} rings");
+    }
+
+    /// The owner's complaint: the chain of rings was not obvious and could be jerky, because the Snitch's path
+    /// turned on a sixpence at every waypoint. Over fifty seeds and 20 000 steps each, every ring of a real
+    /// chase must now be turned no more than `CHAIN_MAX_TURN` from the one before it and sit within
+    /// `CHAIN_GAP` of a `spacing` from it. The worst turn seen is printed, so the number can be read off a
+    /// `--nocapture` run and compared with the old path's.
+    #[test]
+    fn the_ring_chain_of_a_real_chase_is_smooth_for_every_seed() {
+        let a = ArenaBounds { center: Vec3::new(0.0, 0.0, 2000.0), half: Vec3::new(5000.0, 5000.0, 2000.0), ceiling: 3500.0 };
+        let d = TrailTuning::default();
+        let mut worst = 0.0f32;
+        let (mut worst_lo, mut worst_hi) = (f32::MAX, 0.0f32);
+        for seed in 1..=50u64 {
+            let mut s = Snitch::new(seed, &a);
+            let mut t = trail();
+            for i in 0..20_000 {
+                // Harry sweeps the pitch, so the Snitch sees both its speeds and both its moods.
+                let th = i as f32 * 0.013;
+                let harry = Vec3::new(th.cos() * 3000.0, th.sin() * 3500.0, 1500.0 + (th * 0.7).sin() * 1200.0);
+                s.step(&BroomState::new(harry, Vec3::ZERO, 0.0, 0.0), false, 1.0 / 60.0);
+                t.step(s.path_pos(), s.travel_dir(), harry, harry, 1.0 / 60.0);
+                let (turn, lo, hi) = chain_metrics(t.rings());
+                if hi > 0.0 {
+                    worst = worst.max(turn);
+                    worst_lo = worst_lo.min(lo);
+                    worst_hi = worst_hi.max(hi);
+                }
+                assert!(
+                    t.chain_is_smooth(),
+                    "seed {seed} step {i}: turn {:.1} deg, gaps {lo:.0}..{hi:.0} of {spacing} -- {:?}",
+                    turn.to_degrees(),
+                    t.rings().iter().map(|r| (r.id, r.center)).collect::<Vec<_>>(),
+                    spacing = d.spacing,
+                );
+            }
+        }
+        println!("ring chain over 50 seeds: worst turn {:.1} deg, gaps {worst_lo:.0}..{worst_hi:.0} uu of {:.0}", worst.to_degrees(), d.spacing);
+        assert!(worst > 0.0, "the chase dropped no chain at all");
     }
 
     #[test]

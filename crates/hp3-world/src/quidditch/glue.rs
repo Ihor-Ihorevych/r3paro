@@ -631,7 +631,11 @@ fn tick_match(vm: &mut Vm<'_>, m: &mut QuidditchMatch, dt: f32) {
     // `HP3_QUID_RING_AUTOFLY` (debugging): the broom flies the Snitch's ring trail by itself, which is how a
     // headless run shows a ring being flown through. It is off unless the variable is set.
     if let Some(target) = rings::autofly_target(m) {
-        i = flight::look_at(&m.broom, target, false);
+        // On the boost while there is ground to make up, which is what `quid-smoke`'s pilot does: a broom
+        // cruises at 450 uu/s and a chased Snitch flies at 875, so an unboosted autofly never closes on the
+        // trail at all and a headless run shows no ring flown through.
+        let boost = m.broom.pos.distance(m.snitch.pos()) > SnitchTuning::default().catch_radius;
+        i = flight::look_at(&m.broom, target, boost);
     }
     let soft = inset(&m.arena, SOFT_MARGIN);
     // The soft boundary steers the rider's *look* (which is what the broom chases now), not the broom's own
