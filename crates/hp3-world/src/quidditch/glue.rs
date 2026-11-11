@@ -175,9 +175,32 @@ fn rot(r: [i32; 3]) -> Value {
     Value::Struct(vec![Value::Int(r[0]), Value::Int(r[1]), Value::Int(r[2])].into())
 }
 
+thread_local! {
+    /// A seed the headless smoke driver (`hp3-run quid-smoke`) picks per match; the environment is read once per
+    /// thread, so it cannot vary the seed between matches. Never set by the game.
+    static SEED_OVERRIDE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Pins (or, with `None`, releases) the seed of the next matches started on this thread. Debug driver only.
+pub fn set_seed_override(seed: Option<u64>) {
+    SEED_OVERRIDE.with(|c| c.set(seed));
+}
+
+/// Flies this frame's broom with `input` and holds the catch key if `catch` (a scripted pilot, for the headless
+/// smoke run). The same slot the phone's touch layout uses; nothing in the game calls it.
+pub fn feed_scripted(vm: &mut Vm<'_>, input: flight::BroomInput, catch: bool) {
+    if let Some(m) = crate::world(vm).quidditch.as_mut() {
+        m.pending_touch = Some(input);
+        m.pending_input = Some((KeyState { catch, ..KeyState::default() }, (0.0, 0.0)));
+    }
+}
+
 /// The seed the match's randomness starts from: `HP3_MATCH_SEED`, else the opponent's name, so a given
 /// fixture always plays the same way (the headless smoke run needs that).
 fn seed_for(opponent: &str) -> u64 {
+    if let Some(s) = SEED_OVERRIDE.with(|c| c.get()) {
+        return s;
+    }
     if let Some(s) = crate::envc::var("HP3_MATCH_SEED").ok().and_then(|v| v.parse().ok()) {
         return s;
     }
