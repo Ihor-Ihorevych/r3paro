@@ -46,13 +46,14 @@ pub fn desktop_input(keys: &KeyState, mouse: (f32, f32), invert_pitch: bool, boo
     }
     let held = |on: bool| -> f32 { if on { 1.0 } else { 0.0 } };
     let pixels = |v: f32| if v.is_finite() { v * MOUSE_GAIN } else { 0.0 };
-    // The mouse to the right turns right, which is where yaw falls; moving it up (a negative y, as the app
-    // reports it) pulls the nose up, as the game's own mouse look does until the player inverts it. The keys
-    // are the same two axes as a rate, so flying with the keyboard alone still works.
+    // Both mouse axes are the opposite way round to the game's own mouse look, at the owner's word: the mouse
+    // to the right turns the broom left (yaw rises) and moving it up (a negative y, as the app reports it)
+    // dives the nose, flight-sim style. The keys are the same two axes as a rate (left/up as before), so
+    // flying with the keyboard alone still works.
     let yaw = (held(keys.left) - held(keys.right)).clamp(-1.0, 1.0);
     let pitch = (held(keys.up) - held(keys.down)).clamp(-1.0, 1.0);
-    let look_yaw = -pixels(mouse.0);
-    let look_pitch = -pixels(mouse.1);
+    let look_yaw = pixels(mouse.0);
+    let look_pitch = pixels(mouse.1);
     BroomInput {
         yaw,
         pitch: if invert_pitch { -pitch } else { pitch },
@@ -103,25 +104,28 @@ mod tests {
         let keys = KeyState { up: true, ..KeyState::default() };
         let plain = desktop_input(&keys, (0.0, -6.0), false, &mut boost);
         let inverted = desktop_input(&keys, (0.0, -6.0), true, &mut boost);
-        assert!(plain.pitch > 0.0 && plain.look_pitch > 0.0, "{plain:?}");
+        assert!(plain.pitch > 0.0 && plain.look_pitch < 0.0, "{plain:?}");
         assert_eq!(inverted.pitch, -plain.pitch);
         assert_eq!(inverted.look_pitch, -plain.look_pitch);
-        // The mouse alone, both ways round: pushed forward (a negative y) the nose goes up unless inverted.
+        // The mouse alone, both ways round: pushed forward (a negative y) the nose dives unless the game's
+        // own invert setting is on (the mouse is flight-sim style, opposite to the game's mouse look).
         let none = KeyState::default();
         let up = desktop_input(&none, (0.0, -10.0), false, &mut boost);
         let down = desktop_input(&none, (0.0, -10.0), true, &mut boost);
-        assert!((up.look_pitch - 10.0 * MOUSE_GAIN).abs() < 1e-6, "{up:?}");
+        assert!((up.look_pitch + 10.0 * MOUSE_GAIN).abs() < 1e-6, "{up:?}");
         assert_eq!(down.look_pitch, -up.look_pitch);
         assert_eq!((up.pitch, down.pitch), (0.0, 0.0), "the mouse is a look, not a stick");
         // Steering: the keys and the mouse both turn the broom the same way round, the keys as a rate and the
         // mouse as this frame's angle.
         assert!(desktop_input(&KeyState { left: true, ..none }, (0.0, 0.0), false, &mut boost).yaw > 0.0);
         let right = desktop_input(&none, (10.0, 0.0), false, &mut boost);
-        assert!(right.look_yaw < 0.0 && right.yaw == 0.0, "the mouse to the right turns right: {right:?}");
-        assert!((right.look_yaw + 10.0 * MOUSE_GAIN).abs() < 1e-6, "{right:?}");
+        assert!(right.look_yaw > 0.0 && right.yaw == 0.0, "the mouse to the right turns left (inverted): {right:?}");
+        assert!((right.look_yaw - 10.0 * MOUSE_GAIN).abs() < 1e-6, "{right:?}");
         // Twice the motion is twice the angle: nothing saturates, and a flick is a flick.
         let far = desktop_input(&none, (20.0, 0.0), false, &mut boost);
         assert!((far.look_yaw - 2.0 * right.look_yaw).abs() < 1e-6, "{far:?}");
+        // Pushed forward the nose goes DOWN now, down on the mouse pulls it up.
+        assert!(desktop_input(&none, (0.0, 10.0), false, &mut boost).look_pitch > 0.0);
         assert_eq!(desktop_input(&none, (f32::NAN, f32::INFINITY), false, &mut boost), BroomInput::default());
     }
 }
