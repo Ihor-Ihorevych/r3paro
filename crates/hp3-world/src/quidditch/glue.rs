@@ -29,19 +29,14 @@ use super::team::{self, Teams};
 /// retail scripts with empty bodies, which is why the engine drives them.
 const HARRY_CLASS: &str = "HGame.HarryQuid";
 const SNITCH_CLASS: &str = "HGame.Snitch";
-/// What the stadium pieces and the broom are spawned as.
+/// What the stadium pieces are spawned as.
 const MESH_ACTOR_CLASS: &str = "Engine.StaticMeshActor";
-/// The broom Harry rides. Its group inside the package is not documented anywhere (unlike the `Quid_Stadium`
-/// meshes), so it is looked up by name; `find_static_mesh` logs the full path it resolved to. The plan called
-/// the mesh `QuidBroom_SM`, but no static mesh of that name exists in the retail package (only the string, in
-/// its name table): the mesh is `miscDetails.QuiddichBroom_SM`. Both spellings are tried, in that order.
-const BROOM_PACKAGE: &str = "HP3_InteriorAccents_SM";
-const BROOM_MESHES: [&str; 2] = ["QuidBroom_SM", "QuiddichBroom_SM"];
-/// Bones of the `HarryQuid` skeleton the broom may hang from, best first. The first one the mesh has wins;
-/// with none of them the broom is based on the pawn instead (it still rides along, just not off a bone).
-/// `body_broom` is the real one: the retail `HarryQuid` skeleton carries a bone for exactly this (its last,
-/// after the hand and finger bones). The rest are fallbacks in case another mesh is used for the rider.
-const BROOM_BONES: [&str; 5] = ["body_broom", "broom", "body_rhand", "body_lhand", "body_root"];
+//
+// **Harry rides no separate broom actor.** The retail `HarryQuid` skeletal mesh already carries its own
+// broom, modelled into the mesh and posed by the `hover` animation. An earlier pass also hung the static
+// mesh `HP3_InteriorAccents_SM.miscDetails.QuiddichBroom_SM` off the skeleton's `body_broom` bone, which gave
+// him two: the modelled one under him and the static one sticking out sideways (the bone's rest orientation
+// is not the broom's). Attaching nothing is the fix; see `docs/formats/quidditch-arena.md`.
 /// How far inside the arena walls the broom starts steering itself back in (uu): the soft boundary. The hard
 /// one is `flight::confine`, which the broom reaches only by flying at a wall through this band.
 const SOFT_MARGIN: f32 = 900.0;
@@ -261,74 +256,6 @@ fn spawn_piece(vm: &mut Vm<'_>, class: ObjId, p: &ArenaPiece) -> Option<ObjId> {
     Some(a)
 }
 
-/// The first of `names` that is a static mesh of `package`, whatever group it sits in, with the full path it
-/// was found at. `find_object_of` needs the whole `Package.Group.Name`, which is not known for the broom.
-fn find_static_mesh(vm: &mut Vm<'_>, package: &str, names: &[&str]) -> Option<(ObjId, String)> {
-    let pkg = vm.db.set.get(package).ok()?;
-    let meshes: Vec<(usize, String)> = (0..pkg.exports.len())
-        .filter(|&i| pkg.export_class_name(i).eq_ignore_ascii_case("StaticMesh"))
-        .map(|i| (i, pkg.ref_name(hp3_package::ObjRef::from_export(i)).to_string()))
-        .collect();
-    for want in names {
-        if let Some(&(i, _)) = meshes.iter().find(|(_, n)| n.eq_ignore_ascii_case(want)) {
-            let path = pkg.ref_path(hp3_package::ObjRef::from_export(i));
-            return Some((vm.db.obj_for(&pkg, i), path));
-        }
-    }
-    if crate::envc::var_os("HP3_QUID_DEBUG").is_some() {
-        let like: Vec<&String> = meshes.iter().map(|(_, n)| n).filter(|n| n.to_ascii_lowercase().contains("broom")).collect();
-        println!("quidditch: no {names:?} in {package}; its broom-like meshes are {like:?}");
-    }
-    None
-}
-
-/// Gives `harry` his broom: a static mesh actor hung off a bone of his skeleton, so it follows every pose the
-/// animation puts him in. Returns the broom actor, which the match owns like any other.
-fn attach_broom(vm: &mut Vm<'_>, harry: ObjId) -> Option<ObjId> {
-    let Some((mesh, path)) = find_static_mesh(vm, BROOM_PACKAGE, &BROOM_MESHES) else {
-        vm.log.push(format!("quidditch: no broom mesh {BROOM_MESHES:?} in {BROOM_PACKAGE}, Harry rides nothing"));
-        return None;
-    };
-    let class = crate::find_object(vm, MESH_ACTOR_CLASS)?;
-    let (at, facing) = (crate::rd_vec(vm, harry, "Location"), crate::rd_rot(vm, harry, "Rotation"));
-    let args = [Value::Object(Some(class)), Value::Object(Some(harry)), Value::Empty, v3(at), rot(facing)];
-    let broom = crate::natives::spawn(vm, None, &args).ok()?.as_obj()?;
-    crate::set(vm, broom, "StaticMesh", Value::Object(Some(mesh)));
-    // A static mesh actor is born `bStatic`, which would stop it following the pawn: the broom moves.
-    crate::set(vm, broom, "bStatic", Value::Bool(false));
-    crate::set(vm, broom, "bNoDelete", Value::Bool(false));
-    // The bones of Harry's skeletal mesh, to pick the one the broom hangs from.
-    let bones = crate::get(vm, harry, "Mesh")
-        .as_obj()
-        .and_then(|m| crate::anim::skeleton_of(vm, m))
-        .map(|s| s.skeleton.names.clone())
-        .unwrap_or_default();
-    let bone = BROOM_BONES.iter().find(|b| bones.iter().any(|n| n == *b)).copied();
-    match bone {
-        // Exactly what `Actor.AttachToBone` does: base, bone name, and the engine's attachment table, which
-        // puts the child on the bone every frame in `anim::update_attachments`.
-        Some(b) => {
-            let name = vm.db.names.intern(b);
-            crate::set(vm, broom, "Base", Value::Object(Some(harry)));
-            crate::set(vm, broom, "AttachmentBone", Value::Name(name));
-            crate::world(vm).ever_base.insert(harry);
-            crate::world(vm).anim.attachments.insert(broom, (harry, b.to_string()));
-            crate::anim::update_attachments(vm);
-            vm.log.push(format!("quidditch: broom {path} on bone {b}"));
-        }
-        // No bone of ours is in the skeleton: the broom is based on the pawn, so it still moves with him.
-        // The bone list is logged so the right name can be added to `BROOM_BONES`.
-        None => {
-            crate::natives::set_base(vm, broom, Some(harry), false);
-            vm.log.push(format!("quidditch: broom {path} based on the pawn, no bone of {BROOM_BONES:?} in its skeleton"));
-            if crate::envc::var_os("HP3_QUID_DEBUG").is_some() {
-                println!("quidditch: HarryQuid bones: {bones:?}");
-            }
-        }
-    }
-    Some(broom)
-}
-
 /// Hands the player controller the broom pawn, so the player is Harry on his broom and the pawn that walked
 /// into the level stops answering to him. Returns the pawn the controller had, which `stop` gives back.
 ///
@@ -520,15 +447,11 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
         None => arena::harry_start(&bounds),
     };
     let harry = spawn_class(vm, HARRY_CLASS, start_at, 16384);
-    let mut broom = None;
     let mut was_playing = None;
     if let Some(h) = harry {
         crate::set(vm, h, "Physics", Value::Byte(crate::physics::PHYS_FLYING));
         actors.push(h);
-        broom = attach_broom(vm, h);
-        if let Some(b) = broom {
-            actors.push(b);
-        }
+        // No broom actor: the `HarryQuid` mesh has one of its own (see the note by `MESH_ACTOR_CLASS`).
         was_playing = possess(vm, h);
         play_flying(vm, h);
     }
@@ -590,13 +513,12 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
     team::start(vm, &mut m);
     let yes_no = |o: Option<ObjId>| if o.is_some() { "yes" } else { "MISSING" };
     let line = format!(
-        "quidditch: match against {} started, phase {:?}, {} actors spawned ({} stadium pieces, Harry {}, broom {}, Snitch {}){}",
+        "quidditch: match against {} started, phase {:?}, {} actors spawned ({} stadium pieces, Harry {} (broom in his own mesh), Snitch {}){}",
         m.opponent,
         m.rules.phase(),
         m.actors.len(),
         pieces.len(),
         yes_no(m.harry),
-        yes_no(broom),
         yes_no(m.snitch_actor),
         if m.easy { ", HP3_QUID_EASY: the snitch catches itself" } else { "" },
     );
@@ -622,7 +544,7 @@ pub fn stop(vm: &mut Vm<'_>) {
     // holding a deleted pawn.
     unpossess(vm, m.was_playing, m.harry);
     let mut gone = 0;
-    // Backwards, so a child goes before what it rides on (the broom before Harry).
+    // Backwards, so a child goes before whatever it rides on.
     for a in m.actors.iter().rev() {
         // Scenery is born `bStatic`, which `destroy_actor` refuses to remove: clear the flag first.
         crate::set(vm, *a, "bStatic", Value::Bool(false));
@@ -784,12 +706,17 @@ fn tick_match(vm: &mut Vm<'_>, m: &mut QuidditchMatch, dt: f32) {
     let every = crate::envc::var("HP3_QUID_DEBUG").ok().and_then(|v| v.trim().parse::<u64>().ok()).filter(|&n| n > 0).unwrap_or(120);
     if m.frames % every == 0 && crate::envc::var_os("HP3_QUID_DEBUG").is_some() {
         let a = m.snitch_actor.map(|s| crate::rd_vec(vm, s, "Location")).unwrap_or(Vec3::ZERO);
+        // The loop the Snitch is flying around its path, so the helix can be read straight off the trace.
+        let loop_off = m.snitch.pos() - m.snitch.path_pos();
         println!(
-            "quidditch: tick {} phase {:?} snitch ({:.0}, {:.0}, {:.0}) actor ({:.0}, {:.0}, {:.0}) progress {:.2} bumps {}",
+            "quidditch: tick {} phase {:?} snitch ({:.0}, {:.0}, {:.0}) actor ({:.0}, {:.0}, {:.0}) path ({:.0}, {:.0}, {:.0}) loop ({:.0}, {:.0}, {:.0}) r {:.0} progress {:.2} bumps {}",
             m.frames,
             m.rules.phase(),
             m.snitch.pos().x, m.snitch.pos().y, m.snitch.pos().z,
             a.x, a.y, a.z,
+            m.snitch.path_pos().x, m.snitch.path_pos().y, m.snitch.path_pos().z,
+            loop_off.x, loop_off.y, loop_off.z,
+            loop_off.length(),
             m.snitch.progress(),
             m.bludgers.bumps()
         );

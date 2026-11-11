@@ -16,6 +16,11 @@ pub struct SnitchTuning {
     pub max_catch_time: f32,
     pub max_tries: u32,
     pub catch_radius: f32,
+    /// How wide the Snitch loops around its own flight path (uu), and how fast it goes round (rad/s). HP1's
+    /// Snitch visibly corkscrews as it travels, which is how the player picks it out of the sky; ours does the
+    /// same. 0 for either is a Snitch that flies the bare path.
+    pub circle_radius: f32,
+    pub circle_rate: f32,
 }
 
 impl Default for SnitchTuning {
@@ -35,8 +40,14 @@ impl Default for SnitchTuning {
             // Seconds the catch window stays open once the bar is full.
             max_catch_time: 3.0,
             max_tries: 3,
-            // Harry must be this close with the catch key held.
-            catch_radius: 350.0,
+            // Harry must be this close with the catch key held. **350 + `circle_radius`**: every distance
+            // here is measured to the Snitch's real, circling position, so a Snitch looping 150 uu around its
+            // path is up to 150 uu farther away than one flying the bare path. Widening the catch by exactly
+            // the loop leaves the catch as hard as it was before the circling; nothing else was widened (the
+            // progress radii are thousands of uu, and 150 uu of wobble in them is noise).
+            catch_radius: 500.0,
+            circle_radius: 150.0,
+            circle_rate: 4.5,
         }
     }
 }
@@ -68,10 +79,20 @@ enum Phase {
 pub struct Snitch {
     tuning: SnitchTuning,
     rng: Rng,
+    /// The arena, and the same box brought in by `circle_radius`: the path is flown inside the inner box, so
+    /// the loops around it never leave the arena and the radius never has to be cut short.
     lo: Vec3,
     hi: Vec3,
+    path_lo: Vec3,
+    path_hi: Vec3,
+    /// Where the Snitch would be with no circling (the point that walks the waypoints), and where it really
+    /// is: the path point plus this frame's loop offset. `pos` is what everything else sees -- the catch, the
+    /// progress and the actor the VM moves.
+    path: Vec3,
     pos: Vec3,
     waypoint: Vec3,
+    /// How far round the loop it is (rad).
+    angle: f32,
     progress: f32,
     tries: u32,
     phase: Phase,
@@ -86,25 +107,59 @@ impl Snitch {
         let lo = arena.center - arena.half;
         let hi_z = arena.ceiling.min(arena.center.z + arena.half.z).max(lo.z);
         let hi = Vec3::new(arena.center.x + arena.half.x, arena.center.y + arena.half.y, hi_z);
+        // Room for the loop on every axis, and never more than half the box (a flat or tiny arena just gets a
+        // smaller circle rather than an inside-out one).
+        let span = (hi - lo).min_element().max(0.0);
+        let r = if tuning.circle_radius.is_finite() { tuning.circle_radius.clamp(0.0, span * 0.5) } else { 0.0 };
         let mut s = Snitch {
-            tuning,
+            tuning: SnitchTuning { circle_radius: r, ..tuning },
             rng: Rng::new(seed),
             lo,
             hi,
+            path_lo: lo + Vec3::splat(r),
+            path_hi: hi - Vec3::splat(r),
+            path: Vec3::ZERO,
             pos: Vec3::ZERO,
             waypoint: Vec3::ZERO,
+            angle: 0.0,
             progress: 0.0,
             tries: 0,
             phase: Phase::Chasing,
         };
-        s.pos = s.random_point();
+        // The loop starts somewhere of its own, so two Snitches of different seeds are not in step.
+        s.angle = s.rng.unit() * std::f32::consts::TAU;
+        s.path = s.random_point();
         s.waypoint = s.random_point();
+        s.pos = s.circling();
         s
     }
 
     fn random_point(&mut self) -> Vec3 {
         let r = Vec3::new(self.rng.unit(), self.rng.unit(), self.rng.unit());
-        self.lo + (self.hi - self.lo) * r
+        self.path_lo + (self.path_hi - self.path_lo) * r
+    }
+
+    /// This frame's visible position: the path point with the loop offset added, in the plane across the
+    /// direction of travel, so the Snitch corkscrews along its path instead of sliding down it.
+    fn circling(&self) -> Vec3 {
+        let r = self.tuning.circle_radius;
+        if !(r > 0.0) {
+            return self.path;
+        }
+        let to = self.waypoint - self.path;
+        // A travel direction, and a pair of unit vectors across it. Up is the axis to cross with unless the
+        // travel is itself nearly vertical, in which case X is.
+        let dir = if to.length_squared() > 1e-6 { to.normalize() } else { Vec3::X };
+        let away = if dir.z.abs() < 0.9 { Vec3::Z } else { Vec3::X };
+        let u = dir.cross(away);
+        let u = if u.length_squared() > 1e-6 { u.normalize() } else { Vec3::Y };
+        let v = dir.cross(u);
+        let p = self.path + (u * self.angle.cos() + v * self.angle.sin()) * r;
+        if p.is_finite() {
+            p.clamp(self.lo, self.hi)
+        } else {
+            self.path
+        }
     }
 
     pub fn step(&mut self, harry: &BroomState, wants_catch: bool, dt: f32) -> Vec<SnitchEvent> {
@@ -173,24 +228,35 @@ impl Snitch {
         }
     }
 
-    /// Move toward the current waypoint; faster the closer Harry is.
+    /// Move toward the current waypoint; faster the closer Harry is. The path speed is untouched by the
+    /// circling: the loop is an offset around the path, not extra ground covered.
     fn fly(&mut self, dist: f32, dt: f32) {
         let near = (1.0 - dist / self.tuning.max_loss_radius.max(1.0)).clamp(0.0, 1.0);
         let speed = SPEED_IDLE + (SPEED_NEAR - SPEED_IDLE) * near;
-        let to = self.waypoint - self.pos;
+        let to = self.waypoint - self.path;
         let left = to.length();
         let reach = speed * dt;
         if left <= reach || left <= f32::EPSILON {
-            self.pos = self.waypoint;
+            self.path = self.waypoint;
             self.waypoint = self.random_point();
         } else {
-            self.pos += to * (reach / left);
+            self.path += to * (reach / left);
         }
-        self.pos = self.pos.clamp(self.lo, self.hi);
+        self.path = self.path.clamp(self.path_lo, self.path_hi);
+        let rate = if self.tuning.circle_rate.is_finite() { self.tuning.circle_rate } else { 0.0 };
+        self.angle = (self.angle + rate * dt).rem_euclid(std::f32::consts::TAU);
+        self.pos = self.circling();
     }
 
     pub fn pos(&self) -> Vec3 {
         self.pos
+    }
+
+    /// Where the Snitch would be with no circling: the point on its flight path that `pos` loops around.
+    /// Nothing in the game uses it -- it is here for the `HP3_QUID_DEBUG` trace, which prints the loop offset
+    /// so the helix can be read off a headless run.
+    pub fn path_pos(&self) -> Vec3 {
+        self.path
     }
 
     pub fn progress(&self) -> f32 {
@@ -370,6 +436,105 @@ mod tests {
             assert_eq!(s1.pos(), s2.pos());
         }
         assert_ne!(s1.pos(), s3.pos());
+    }
+
+    /// The Snitch really loops: its visible position sits a full `circle_radius` off the path it is flying,
+    /// in the plane across the travel, and it goes round at `circle_rate`.
+    #[test]
+    fn circling_keeps_its_radius_around_the_path() {
+        let t = SnitchTuning::default();
+        let mut s = Snitch::new(11, &arena());
+        let h = harry_at(Vec3::new(4000.0, 4000.0, 1000.0));
+        let mut seen = [false; 4];
+        let mut last = s.angle;
+        for _ in 0..600 {
+            s.step(&h, false, 1.0 / 60.0);
+            let off = s.pos() - s.path;
+            assert!((off.length() - t.circle_radius).abs() < 1e-2, "offset {} is not the radius", off.length());
+            // Across the travel, so the loop shows from the side rather than being flown through.
+            let dir = (s.waypoint - s.path).normalize();
+            assert!(off.normalize().dot(dir).abs() < 1e-2, "the loop is not across the travel");
+            // It turns at the tuned rate, and goes right round.
+            let step = (s.angle - last).rem_euclid(std::f32::consts::TAU);
+            assert!((step - t.circle_rate / 60.0).abs() < 1e-3, "turned {step} in a frame");
+            last = s.angle;
+            seen[(s.angle / std::f32::consts::FRAC_PI_2) as usize % 4] = true;
+        }
+        assert!(seen.iter().all(|&q| q), "the loop never went all the way round: {seen:?}");
+    }
+
+    /// The loop is an offset, not a detour: the path under it still covers exactly `speed * dt` a frame, and
+    /// a Snitch tuned with no circling flies that bare path.
+    #[test]
+    fn circling_leaves_the_path_and_its_speed_alone() {
+        let a = arena();
+        let dt = 1.0 / 60.0;
+        // Harry out past `max_loss_radius`, so the speed is the idle one and known.
+        let h = harry_at(Vec3::new(50_000.0, 0.0, 2000.0));
+        let mut s = Snitch::new(13, &a);
+        let mut steps = 0;
+        for _ in 0..600 {
+            let was = s.path;
+            s.step(&h, false, dt);
+            let moved = s.path.distance(was);
+            // Either a full step along the path, or the frame it reached a waypoint and turned.
+            if (moved - SPEED_IDLE * dt).abs() < 1e-2 {
+                steps += 1;
+            } else {
+                assert!(moved <= SPEED_IDLE * dt + 1e-2, "the loop sped the path up: {moved}");
+            }
+        }
+        assert!(steps > 580, "only {steps} of 600 frames flew a clean path step");
+        let bare = SnitchTuning { circle_radius: 0.0, ..SnitchTuning::default() };
+        let mut straight = Snitch::with_tuning(13, &a, bare);
+        for _ in 0..600 {
+            straight.step(&h, false, dt);
+        }
+        assert_eq!(straight.pos(), straight.path, "a Snitch with no circling flies the bare path");
+        // Same seed, same loop: the whole thing is deterministic, offset and all.
+        let mut again = Snitch::new(13, &a);
+        for _ in 0..600 {
+            again.step(&h, false, dt);
+        }
+        assert_eq!(s.pos(), again.pos());
+    }
+
+    /// Circling never puts the Snitch outside the arena, however long it flies: the path is flown inside the
+    /// arena brought in by the radius, so the loop around it still fits.
+    #[test]
+    fn circling_snitch_stays_inside_bounds_for_10000_steps() {
+        let a = arena();
+        let mut s = Snitch::new(21, &a);
+        let zmax = a.ceiling.min(a.center.z + a.half.z);
+        let mut off_path = 0.0f32;
+        for i in 0..10000 {
+            let t = i as f32 * 0.05;
+            let h = harry_at(Vec3::new(t.cos() * 4800.0, t.sin() * 4800.0, 3400.0));
+            s.step(&h, i % 7 == 0, 1.0 / 60.0);
+            let p = s.pos();
+            assert!(p.is_finite());
+            assert!((p.x - a.center.x).abs() <= a.half.x, "{p:?}");
+            assert!((p.y - a.center.y).abs() <= a.half.y, "{p:?}");
+            assert!(p.z >= a.center.z - a.half.z && p.z <= zmax, "{p:?}");
+            off_path = off_path.max(p.distance(s.path));
+        }
+        assert!((off_path - SnitchTuning::default().circle_radius).abs() < 1e-2, "the loop was cut short: {off_path}");
+    }
+
+    /// A circling Snitch is still catchable: the catch radius covers the loop, so flying onto the path point
+    /// and reaching still gets it.
+    #[test]
+    fn a_circling_snitch_is_still_caught_from_its_path() {
+        let mut s = Snitch::new(4, &arena());
+        for _ in 0..1000 {
+            let h = harry_at(s.path);
+            if s.step(&h, false, 0.25).contains(&SnitchEvent::CatchStart) {
+                break;
+            }
+        }
+        assert!(s.in_catch_window(), "the bar never filled with Harry on the path");
+        let h = harry_at(s.path);
+        assert!(s.step(&h, true, 0.01).contains(&SnitchEvent::Caught), "a looping Snitch could not be caught");
     }
 
     #[test]

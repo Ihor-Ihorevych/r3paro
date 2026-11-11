@@ -26,10 +26,13 @@ pub struct CamState {
     pub arm: f32,
 }
 
-/// How far behind the look-at point the camera sits (uu): the mod's `fLookAtDistance`.
-const ARM: f32 = 128.0;
-/// It looks at a point this far above the broom (uu): the mod's `vLookAtOffset.Z`.
-const LOOK_UP: f32 = 55.0;
+/// How far behind the look-at point the camera sits (uu). The mod's `fLookAtDistance` is 128; **ours is 200**,
+/// deliberately, because at 128 the rider fills the middle of the screen and blocks the view ahead. The whole
+/// rig is scaled with it (`LOOK_UP` below), so only the size of Harry in the frame changes.
+const ARM: f32 = 200.0;
+/// It looks at a point this far above the broom (uu): the mod's `vLookAtOffset.Z` of 55, scaled by the same
+/// 200/128 as the arm, so the rider keeps the place in the picture the mod's rig gives him.
+const LOOK_UP: f32 = 86.0;
 /// How much of the gap to the rider's look direction the camera's own rotation closes per second (1/s, an
 /// exponential approach): the mod's `fRotTightness`, a 1/8 s time constant.
 const ROT_TIGHT: f32 = 8.0;
@@ -43,8 +46,8 @@ const MAX_CAM_PITCH: f32 = 1.342;
 /// `1 - pitch/10000` in rotation units), never below `MIN_SCALE` of it.
 ///
 /// `MIN_SCALE` is **0.3, not the mod's 0.15**, and the pull-in scales the whole rig (the look-at offset with
-/// the arm, see `chase_camera`), which the mod does not: shortening the arm alone while still aiming 55 uu
-/// over the rider swings him off the bottom of the screen as soon as the arm is halved, and at 0.15 of 128 uu
+/// the arm, see `chase_camera`), which the mod does not: shortening the arm alone while still aiming `LOOK_UP`
+/// over the rider swings him off the bottom of the screen as soon as the arm is halved, and at 0.15 of the arm
 /// the camera would be inside him. Scaled, the rider keeps the same place in the picture whatever the arm is.
 const PULL_SPREAD: f32 = 0.9587;
 const MIN_SCALE: f32 = 0.3;

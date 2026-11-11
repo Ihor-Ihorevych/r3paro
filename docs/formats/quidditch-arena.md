@@ -19,10 +19,14 @@ space; world values below apply the placement of the retail map `HP3_Quidditch.u
 There is no `Quid_GoldHoop` mesh in any static mesh package (a scan of every `.usx` and the map for names containing
 `hoop` finds only `Quid_GoalPosts_SM`).
 
-Harry's broom is **not** in this package and is **not** called `QuidBroom_SM`: that string is in the name table of
-`StaticMeshes/HP3_InteriorAccents_SM.usx` but no static mesh carries it. The mesh is
-`HP3_InteriorAccents_SM.miscDetails.QuiddichBroom_SM`, and the retail `HarryQuid` skeleton has a bone named
-`body_broom` (its last bone, after the hand and finger bones) to hang it from.
+**Harry rides no separate broom actor.** The retail `HarryQuid` skeletal mesh already has a broom modelled into
+it, posed by its `hover` animation; nothing has to be attached. There *is* a loose broom static mesh --
+`HP3_InteriorAccents_SM.miscDetails.QuiddichBroom_SM` (not `QuidBroom_SM`: that string is in the name table of
+`StaticMeshes/HP3_InteriorAccents_SM.usx` but no static mesh carries it) -- and the `HarryQuid` skeleton has a
+last bone named `body_broom`. An earlier pass hung that mesh off that bone, which gave Harry **two brooms**: the
+modelled one under him and the static one sticking out sideways across his body, because the bone's rest
+orientation is not the broom's. `glue::start` now attaches nothing, and `stop` therefore has one actor fewer to
+destroy. The AI riders (`QuidPlayer*`) were never given one: their meshes carry their brooms the same way.
 
 ## Assembled or loose
 
@@ -154,17 +158,23 @@ heading, and `flight::confine` levels the look with the broom when it slides alo
 **The camera is an orbit camera, and the broom follows it.** `camera::chase_camera` aims along the rider's
 look direction, not along the broom's heading (so steering is camera-relative, as in the mod), with its own
 lagged rotation in both axes: 8/s towards the look, at most 1.917 rad of yaw and 0.959 rad of pitch in one
-step, pitch clamped to +-1.342 rad. It sits on a 128 uu arm (`ARM`) from a point 55 uu over the rider
-(`LOOK_UP`) -- the mod's numbers, and much closer than the 420/140 rig it replaces -- with no positional lag
-at all. Looking up from below pulls the arm in by `1 - pitch/0.9587`, immediately, and it eases back out at
-2.5/s. The arm is also shortened so the camera stops 5 uu short of the arena wall instead of hanging in the
-stands (the mod traces the world; the flight volume is all the collision a match has).
+step, pitch clamped to +-1.342 rad. It sits on a 200 uu arm (`ARM`) from a point 86 uu over the rider
+(`LOOK_UP`) -- still much closer than the 420/140 rig it replaces -- with no positional lag at all. Looking up
+from below pulls the arm in by `1 - pitch/0.9587`, immediately, and it eases back out at 2.5/s. The arm is also
+shortened so the camera stops 5 uu short of the arena wall instead of hanging in the stands (the mod traces the
+world; the flight volume is all the collision a match has).
 
-Two deliberate differences from the mod, both because its numbers put the rider out of the picture at our
-scale: the pull-in scales the **whole rig** (the 55 uu look-at offset shrinks with the arm), so the rider
-keeps his place in the frame however far the camera is pulled in, and the pull-in floor is **0.3**, not the
-mod's 0.15, which would end with the camera inside him. The field of view still widens with speed (90 -> 100
-deg); that is ours, neither HP1 package has it.
+**The arm is 200 uu, not the mod's 128.** `docs/formats/hp1-broom-movement-mod.md` records `fLookAtDistance` =
+128 and `vLookAtOffset.Z` = 55; ours is deliberately farther, because at 128 uu Harry fills the middle of the
+screen and blocks the view ahead. The whole rig is scaled by the same 200/128 (the look-at offset with it), so
+the only thing that changes is how big he is in the frame -- he keeps his place in the picture, and the
+pull-in, the wall shortening and the camera volume all follow `ARM` and need no separate tuning.
+
+Two further deliberate differences from the mod, both because its numbers put the rider out of the picture at
+our scale: the pull-in scales the **whole rig** (the look-at offset shrinks with the arm), so the rider keeps
+his place in the frame however far the camera is pulled in, and the pull-in floor is **0.3**, not the mod's
+0.15, which would end with the camera inside him. The field of view still widens with speed (90 -> 100 deg);
+that is ours, neither HP1 package has it.
 
 ## The level's own scripts during a match
 
@@ -217,6 +227,22 @@ all thirteen are fully steered on the desktop, and `BudgetGovernor` lowers it wh
 Measured headless on the owner's PC, thirteen fully steered agents plus the thirteen riders' `Location`
 writes cost **0.007 ms a tick** (`HP3_QUID_DEBUG` prints the running mean every 120 ticks).
 
+## The Golden Snitch
+
+`quidditch::snitch` is pure and deterministic from the match seed. The Snitch walks random waypoints inside the
+flight volume at 300 uu/s, 700 uu/s when Harry is right on it, and **corkscrews as it goes**, the way HP1's
+Snitch does so the player can pick it out of the sky: a circle of `SnitchTuning::circle_radius` = 150 uu around
+the path point, in the plane across the direction of travel, turning at `circle_rate` = 4.5 rad/s (about 0.7 of
+a loop a second). The path speed is untouched -- the loop is an offset around the path, not extra ground
+covered -- and the path is flown inside the flight volume brought in by the radius, so a looping Snitch never
+leaves the arena and the loop is never cut short.
+
+`Snitch::pos()` is the real, circling position, and that is what the VM's Snitch actor follows, what the catch
+progress is measured from and what the catch radius is tested against: nothing works off the hidden path. The
+one thing that moved with the circling is `catch_radius`, from 350 to **500 uu** = 350 + `circle_radius`, so a
+Snitch looping 150 uu away from where it would otherwise be is exactly as hard to catch as before. Nothing else
+was widened: the progress radii are 600/1500/4000 uu and 150 uu of wobble in them is noise.
+
 As a backstop, `count_down_travel` refuses `Level.NextURL` for as long as `World::quidditch` is `Some`, clears
 it and logs `quidditch: level travel blocked (<url>)` once per level. A level with no match is untouched by
 either: both are gated on a running match.
@@ -229,7 +255,8 @@ either: both are gated on a running match.
 - `HP3_MATCH_RESTART=<tick>` — stop and start the match again at that tick (to exercise the hand-over).
 - `HP3_QUID_DEBUG=1` — also: which of the level's players each side's riders are, the first rider's whole
   animation set, every pass, shot, catch and Bludger swat as it happens, and the mean cost of a tick of team
-  play every 120 ticks. And every 120 ticks, a sample of the match: phase, the Snitch's pure and actor positions,
+  play every 120 ticks. And every 120 ticks, a sample of the match: phase, the Snitch's pure, actor, path and
+  loop-offset positions (the last two show the corkscrew),
   the catch progress, the Bludger bumps, the HUD item list, the Bludgers in flight, and the broom's position,
   speed, heading, look direction and camera (with its arm). Set it to a number (`HP3_QUID_DEBUG=5`) to sample
   every that many ticks instead, which is how a headless run watches the steering turn frame by frame.
