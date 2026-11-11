@@ -177,8 +177,45 @@ So `quidditch::stage::clear` (from `glue::start`, and from nowhere else) destroy
 machinery -- `KWCutScene`, `KWCutController*`, `KWCutTextController`, `CutFactory`, `CutSceneTrigger` -- and
 its cutscene-only cast -- `Dementor`, `BlackDog`, `DementorsConverging` -- with the controller of each pawn it
 removes. The factory is gone before its state code ever builds the scenes, so no cutscene starts at all. The
-crowd in the stands (`HPGenericStudent`) and the two teams' placed players stay: they stand still and are the
-only audience the pitch has.
+crowd in the stands (`HPGenericStudent`) stays, and so do the two teams' placed players -- the match borrows
+those (below) rather than destroying them.
+
+## The two teams
+
+`HP3_Quidditch` stands fifteen Quidditch players on the turf: eight Gryffindor (`QuidPlayerGriffMale0..7`,
+with `QuidPlayerGriffFem1` among them) and seven Slytherin (`QuidPlayerSlyMale0..7`). A match **borrows**
+them: `quidditch::team::start` records each one's `Location`, `Rotation`, `Physics` and `bHidden`, puts it in
+the air on `PHYS_FLYING` with no world collision, plays its `fly_forward` animation, and from then on writes
+its `Location` and `Rotation` from an agent every frame (in `glue::tick`, which runs after the actors have
+moved, so the match's writes are the ones the frame is drawn from). `quidditch::team::stop` sets them all
+back down exactly as they stood. The thirteen agents (see below) do not match the fifteen placed players in
+mix, so a side that runs short has the rest spawned as `HGame.QuidPlayer{Griff,Sly}{Male,Fem}` and those
+belong to the match; whoever is left over on the turf is hidden for the match and shown again by `stop`.
+
+**The agents** (`quidditch::ai`, pure) are the standard seven a side less Harry, who is the home Seeker and is
+the player: three Chasers, two Beaters and a Keeper for Gryffindor, the same plus a Seeker for the opponent --
+thirteen in all. Each one is a `BroomState` flown by the same `flight::step` the player gets, steered by a
+small state machine: a Chaser shoots when a hoop of the far goal is in front of him, within 2600 uu and
+straight enough on, else passes to an unmarked Chaser nearer the goal, else carries the ball at the goal;
+without it he goes for a loose Quaffle if he is the nearest Chaser, presses whoever of the other side has it,
+or takes up his lane. A Keeper flies the line from the Quaffle to his own hoops at a 700 uu stand-off and
+never leaves a 1800 uu band around them (a broom cannot stop, so on his line he flies a tight circle instead
+of hovering). A Beater swats the Bludger that is on its way to one of his own at the nearest opponent
+(`Bludgers::redirect`). The opposing Seeker chases the snitch after eight seconds, for show: only Harry's
+catch ends a match.
+
+**Possession.** A free Quaffle inside 250 uu of a Chaser is caught by the nearest one, but never while the
+1.5 s goal latch runs or within 0.4 s of a throw (`THROW_GRACE`, so a ball gets out of the thrower's hands).
+Its holder carries it; a pass flies it at a team-mate and a shot at one of the three hoops -- the least
+defended, with a toss between equals. After a goal the ball goes back to the middle of the pitch and **the
+side that conceded restarts with it**, as the real game does: the pitch is symmetric, so without that rule
+every loose ball would go to whichever side happened to be a hair nearer and one team could take them all.
+
+**What a frame costs.** `lod::Budget::max_active_ai` is how many agents get the full `step_agent`; the rest
+are steered cheaply (`drift_agent`: fly to your zone, and look at nothing else). The default budget is 14, so
+all thirteen are fully steered on the desktop, and `BudgetGovernor` lowers it when frames go over 16.6 ms.
+Measured headless on the owner's PC, thirteen fully steered agents plus the thirteen riders' `Location`
+writes cost **0.007 ms a tick** (`HP3_QUID_DEBUG` prints the running mean every 120 ticks).
 
 As a backstop, `count_down_travel` refuses `Level.NextURL` for as long as `World::quidditch` is `Some`, clears
 it and logs `quidditch: level travel blocked (<url>)` once per level. A level with no match is untouched by
@@ -190,14 +227,17 @@ either: both are gated on a running match.
 - `HP3_MATCH_SEED=<n>` — the match's randomness. Without it the seed comes from the opponent's name, so a
   given opponent always plays the same match.
 - `HP3_MATCH_RESTART=<tick>` — stop and start the match again at that tick (to exercise the hand-over).
-- `HP3_QUID_DEBUG=1` — every 120 ticks, a sample of the match: phase, the Snitch's pure and actor positions,
+- `HP3_QUID_DEBUG=1` — also: which of the level's players each side's riders are, the first rider's whole
+  animation set, every pass, shot, catch and Bludger swat as it happens, and the mean cost of a tick of team
+  play every 120 ticks. And every 120 ticks, a sample of the match: phase, the Snitch's pure and actor positions,
   the catch progress, the Bludger bumps, the HUD item list, the Bludgers in flight, and the broom's position,
   speed, heading, look direction and camera (with its arm). Set it to a number (`HP3_QUID_DEBUG=5`) to sample
   every that many ticks instead, which is how a headless run watches the steering turn frame by frame.
 - `HP3_QUID_SHOOT=<tick>` — **off by default.** At that tick of the match the Quaffle is shot from the middle
-  of the pitch at a hoop, which is the only thing that throws it until the Chasers arrive (Task 13). It is how
-  a headless run proves that goals are detected and counted: every goal also prints a
-  `quidditch: GOAL for <side> through the hoop at (...)` line. Without it the ball just lies on the turf.
+  of the pitch at a hoop, from outside the Chasers' play. It is how a headless run proves that goals are
+  detected and counted by themselves: every goal also prints a
+  `quidditch: GOAL for <side> through the hoop at (...)` line. Without it the Chasers are the only ones who
+  throw the ball.
 - `HP3_QUID_SHOOT_HOOP=<0..5>` — which hoop that shot goes through, in the order of `arena::hoops()`: 0, 1, 2
   are the north goal's low, high and mid hoops (a goal for Gryffindor, 10-0) and 3, 4, 5 the south goal's (a
   goal for the opponent, 0-10). Default 0.

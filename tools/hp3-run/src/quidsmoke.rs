@@ -10,7 +10,7 @@ use hp3_package::PackageSet;
 use hp3_script::ClassDb;
 use hp3_world::quidditch::flight::{BroomInput, BroomState};
 use hp3_world::quidditch::glue;
-use hp3_world::quidditch::rules::{MatchPhase, Outcome};
+use hp3_world::quidditch::rules::{MatchPhase, Outcome, Score};
 use hp3_world::quidditch::snitch::SnitchTuning;
 
 pub const TICK_CAP: u32 = 20000;
@@ -19,6 +19,10 @@ const MAP: &str = "HP3_Quidditch";
 pub struct SmokeResult {
     pub outcome: Option<Outcome>,
     pub score: (u32, u32),
+    /// Quaffle goals each side put away, counted as the score moved: the one thing that says the team AI
+    /// played rather than only flew about. The home side's score also carries the 150 for the snitch, so a
+    /// goal is a rise of exactly `Score::GOAL`.
+    pub goals: (u32, u32),
     pub ticks: u32,
     pub errors: usize,
 }
@@ -59,6 +63,8 @@ pub fn play(root: &Path, seed: u64) -> Result<SmokeResult, Box<dyn std::error::E
     started?;
     let mut ticks = 0;
     let mut outcome = None;
+    let mut goals = (0u32, 0u32);
+    let mut was = (0u32, 0u32);
     while ticks < TICK_CAP {
         // Steer from the state the last tick left; boost is a toggle in the real controls, so it is not used.
         let plan = hp3_world::world(&mut vm).quidditch.as_ref().map(|m| (steer(&m.broom, m.snitch.pos(), false), wants_catch(&m.broom, m.snitch.pos())));
@@ -67,11 +73,15 @@ pub fn play(root: &Path, seed: u64) -> Result<SmokeResult, Box<dyn std::error::E
         }
         hp3_world::tick(&mut vm, 1.0 / 60.0);
         ticks += 1;
-        if let Some(m) = hp3_world::world(&mut vm).quidditch.as_ref()
-            && let MatchPhase::Ended(o) = m.rules.phase()
-        {
-            outcome = Some(o);
-            break;
+        if let Some(m) = hp3_world::world(&mut vm).quidditch.as_ref() {
+            let now = (m.rules.score().home, m.rules.score().away);
+            goals.0 += u32::from(now.0 == was.0 + Score::GOAL);
+            goals.1 += u32::from(now.1 == was.1 + Score::GOAL);
+            was = now;
+            if let MatchPhase::Ended(o) = m.rules.phase() {
+                outcome = Some(o);
+                break;
+            }
         }
     }
     let w = hp3_world::world(&mut vm);
@@ -80,16 +90,20 @@ pub fn play(root: &Path, seed: u64) -> Result<SmokeResult, Box<dyn std::error::E
     for e in w.errors.iter().take(10) {
         println!("script error: {e}");
     }
-    Ok(SmokeResult { outcome, score, ticks, errors })
+    Ok(SmokeResult { outcome, score, goals, ticks, errors })
 }
 
 pub fn run(root: &Path, seed: u64) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let r = play(root, seed)?;
     println!(
-        "quid-smoke seed {seed}: outcome {:?}, score {}-{}, {} ticks, {} script errors",
-        r.outcome, r.score.0, r.score.1, r.ticks, r.errors
+        "quid-smoke seed {seed}: outcome {:?}, score {}-{} ({} Gryffindor goals, {} Slytherin goals), {} ticks, {} script errors",
+        r.outcome, r.score.0, r.score.1, r.goals.0, r.goals.1, r.ticks, r.errors
     );
-    Ok(if r.outcome.is_some() && r.errors == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+    let played = r.goals.0 > 0 && r.goals.1 > 0;
+    if !played {
+        println!("quid-smoke seed {seed}: both teams must score at least once, got {:?}", r.goals);
+    }
+    Ok(if r.outcome.is_some() && r.errors == 0 && played { ExitCode::SUCCESS } else { ExitCode::FAILURE })
 }
 
 #[cfg(test)]
@@ -124,6 +138,11 @@ mod tests {
         assert!(!wants_catch(&b, Vec3::new(2.0 * r + 1.0, 0.0, 0.0)));
     }
 
+    /// A match plays itself out, and **both teams score**: the opposing side's Chasers have to take the
+    /// Quaffle the length of the pitch and put it through a hoop, which is the only proof from here that the
+    /// team AI plays rather than only flies about. A match lasts about 1600 ticks (26 s, the snitch's three
+    /// tries running out while the scripted Harry chases it), which is a dozen goals a side, so no debug
+    /// lengthening of the match (`HP3_QUID_MIN_TICKS` and the like) is needed.
     #[test]
     fn smoke_match_ends_within_20000_ticks_for_seeds_1_to_5() {
         let root = std::env::var("HP3_DATA").unwrap_or_else(|_| r"C:\Users\Ihor\hpdroid\spike-hp3".into());
@@ -133,8 +152,11 @@ mod tests {
         }
         for seed in 1..=5 {
             let r = play(Path::new(&root), seed).expect("smoke match runs");
+            println!("seed {seed}: {:?} {}-{}, goals {:?}, {} ticks", r.outcome, r.score.0, r.score.1, r.goals, r.ticks);
             assert!(r.outcome.is_some(), "seed {seed}: no result in {} ticks", r.ticks);
             assert_eq!(r.errors, 0, "seed {seed}: script errors");
+            assert!(r.goals.0 > 0, "seed {seed}: Gryffindor never scored ({:?})", r.goals);
+            assert!(r.goals.1 > 0, "seed {seed}: Slytherin never scored ({:?})", r.goals);
         }
     }
 }

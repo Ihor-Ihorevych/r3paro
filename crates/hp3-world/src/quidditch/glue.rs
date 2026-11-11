@@ -23,6 +23,7 @@ use super::input::{desktop_input, KeyState};
 use super::presentation::{self, Presentation};
 use super::rules::{MatchEvent, MatchPhase, Rules};
 use super::snitch::{Snitch, SnitchTuning};
+use super::team::{self, Teams};
 
 /// Harry's broom pawn (`HGame.HarryQuid`) and the Golden Snitch (`HGame.Snitch`): both classes exist in the
 /// retail scripts with empty bodies, which is why the engine drives them.
@@ -66,9 +67,11 @@ pub struct QuidditchMatch {
     pub cam: CamState,
     pub snitch: Snitch,
     pub bludgers: Bludgers,
-    /// The Quaffle and the six scoring hoops (`quidditch::ball`). Nothing throws the ball until the Chasers
-    /// arrive (Task 13); today only the debug `HP3_QUID_SHOOT` does.
+    /// The Quaffle and the six scoring hoops (`quidditch::ball`). The Chasers of `teams` throw it; the debug
+    /// `HP3_QUID_SHOOT` still does too.
     pub balls: Balls,
+    /// Both sides' AI flyers and the Quaffle play between them (`quidditch::ai`, `quidditch::team`).
+    pub teams: Teams,
     pub rules: Rules,
     /// Every actor `start` made, in the order it made them. `stop` destroys all of them.
     pub actors: Vec<ObjId>,
@@ -530,6 +533,8 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
         snitch,
         bludgers,
         balls: Balls::new(&bounds),
+        // A third stream off the same match seed, so a given fixture always plays the same way.
+        teams: Teams::new(seed ^ 0x2e11_a1be_9c04_77d1),
         rules,
         actors,
         harry,
@@ -547,10 +552,12 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
         reported: false,
         easy,
     };
-    // Meshes, sounds and music, then the Quaffle and the hoop rings. Both add actors of their own, so they
-    // run before the count below is printed.
+    // Meshes, sounds and music, then the Quaffle and the hoop rings, then the teams (whose kickoff hands the
+    // Quaffle to a Chaser, so it has to exist first). All three add actors of their own, so they run before
+    // the count below is printed.
     presentation::start(vm, &mut m, seed);
     ball::start(vm, &mut m);
+    team::start(vm, &mut m);
     let yes_no = |o: Option<ObjId>| if o.is_some() { "yes" } else { "MISSING" };
     let line = format!(
         "quidditch: match against {} started, phase {:?}, {} actors spawned ({} stadium pieces, Harry {}, broom {}, Snitch {}){}",
@@ -577,8 +584,10 @@ pub fn stop(vm: &mut Vm<'_>) {
         return;
     }
     let Some(m) = crate::world(vm).quidditch.take() else { return };
-    // The music stops with the match; the ambient loops go with the actors that carry them.
+    // The music stops with the match; the ambient loops go with the actors that carry them. The level's own
+    // players go back on the turf before anything is destroyed: they are the level's, not the match's.
     presentation::stop(vm, &m);
+    team::stop(vm, &m);
     // The pawn goes back to the player before the broom pawn is destroyed: a controller must never be left
     // holding a deleted pawn.
     unpossess(vm, m.was_playing, m.harry);
@@ -670,10 +679,14 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
             m.rules.on_bludger(e, lost);
             events.push(MatchEvent::Bludger(e));
         }
-        // The Quaffle flies, and a hoop it goes through the right way is ten points for that side. Nothing
-        // throws it yet (the Chasers are Task 13), so without `HP3_QUID_SHOOT` it lies on the pitch.
+        // Both teams: the Chasers take the Quaffle up the pitch and shoot, the Keepers guard their posts and
+        // the Beaters swat the Bludgers. It runs before the ball, so a shot taken this frame flies this frame.
+        team::tick(vm, &mut m, dt);
+        // The Quaffle flies, and a hoop it goes through the right way is ten points for that side. The side
+        // that conceded takes the restart with it.
         if let Some(home) = ball::tick(vm, &mut m, dt) {
             m.rules.add_goal(home);
+            team::restart(&mut m, home);
             events.push(MatchEvent::Goal { home });
         }
         if let MatchPhase::Ended(outcome) = m.rules.phase() {

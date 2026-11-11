@@ -25,6 +25,9 @@ pub const SHOOT_SPEED: f32 = 2200.0;
 /// How long after a goal the same ball may score again (s). The latch that keeps a ball sitting in the ring
 /// from scoring every frame; in play the ball is put back to the centre anyway.
 pub const GOAL_COOLDOWN: f32 = 1.5;
+/// How long after a pass or a shot nobody may catch the ball (s), so it gets out of the thrower's own hands
+/// instead of being taken straight back by him (a pass covers 560 uu in that time, a shot 880).
+pub const THROW_GRACE: f32 = 0.4;
 /// How big the ball is drawn (uu, radius: a 30 uu ball) and how high its centre rests over the turf.
 pub const RADIUS: f32 = 15.0;
 
@@ -39,13 +42,54 @@ pub struct Quaffle {
     prev: Vec3,
     /// Seconds left of the no-second-goal latch.
     cooldown: f32,
+    /// Seconds left of the no-catch grace after a throw (`THROW_GRACE`).
+    grace: f32,
 }
 
 impl Quaffle {
     /// A free ball at rest at `pos`.
     pub fn new(pos: Vec3) -> Quaffle {
         let pos = if pos.is_finite() { pos } else { Vec3::ZERO };
-        Quaffle { pos, vel: Vec3::ZERO, holder: None, prev: pos, cooldown: 0.0 }
+        Quaffle { pos, vel: Vec3::ZERO, holder: None, prev: pos, cooldown: 0.0, grace: 0.0 }
+    }
+
+    /// Whether a Chaser may take the ball now: it is loose, no goal latch is running (a ball that has just
+    /// scored is out of play until it is put back) and the last throw has had time to leave the thrower.
+    pub fn catchable(&self) -> bool {
+        self.holder.is_none() && self.cooldown <= 0.0 && self.grace <= 0.0
+    }
+
+    /// Gives the ball to whichever of `candidates` (a player and where his hands are) is nearest it inside
+    /// `radius`, and says who got it. Nothing happens while it is not `catchable`.
+    pub fn try_catch(&mut self, candidates: &[(PlayerId, Vec3)], radius: f32) -> Option<PlayerId> {
+        if !self.catchable() || !(radius > 0.0) || !self.pos.is_finite() {
+            return None;
+        }
+        let mut best: Option<(f32, PlayerId)> = None;
+        for &(id, p) in candidates {
+            let d = p.distance(self.pos);
+            if !d.is_finite() || d > radius {
+                continue;
+            }
+            if best.is_none_or(|(bd, _)| d < bd) {
+                best = Some((d, id));
+            }
+        }
+        let (_, id) = best?;
+        self.holder = Some(id);
+        self.vel = Vec3::ZERO;
+        Some(id)
+    }
+
+    /// Where its holder carries it this frame. A loose ball is not carried, and neither is a rubbish position.
+    pub fn carry(&mut self, at: Vec3) {
+        if self.holder.is_none() || !at.is_finite() {
+            return;
+        }
+        self.pos = at;
+        // Where it was *is* where it is: a ball carried through a hoop is no goal, only a thrown one is.
+        self.prev = at;
+        self.vel = Vec3::ZERO;
     }
 
     /// Where it was before the last step.
@@ -60,6 +104,7 @@ impl Quaffle {
     pub fn step(&mut self, dt: f32) {
         let dt = if dt.is_finite() { dt.clamp(0.0, 0.25) } else { 0.0 };
         self.cooldown = (self.cooldown - dt).max(0.0);
+        self.grace = (self.grace - dt).max(0.0);
         self.prev = self.pos;
         if self.holder.is_some() {
             self.vel = Vec3::ZERO;
@@ -93,6 +138,7 @@ impl Quaffle {
     /// was aimed instead of short and low.
     fn throw(&mut self, from: Vec3, to: Vec3, speed: f32, fallback: f32) {
         self.holder = None;
+        self.grace = THROW_GRACE;
         self.pos = if from.is_finite() { from } else { Vec3::ZERO };
         self.prev = self.pos;
         self.vel = Vec3::ZERO;
@@ -240,6 +286,78 @@ mod tests {
             // Within one frame of travel of where it was aimed.
             assert!(best < PASS_SPEED * DT * 2.0, "pass to {to:?} got no closer than {best}");
         }
+    }
+
+    #[test]
+    fn a_loose_ball_goes_to_the_nearest_pair_of_hands() {
+        let hands = [(PlayerId(1), Vec3::new(200.0, 0.0, 0.0)), (PlayerId(2), Vec3::new(60.0, 0.0, 0.0))];
+        let mut q = Quaffle::new(Vec3::ZERO);
+        assert!(q.catchable(), "a ball lying about is there to be taken");
+        assert_eq!(q.try_catch(&hands, 300.0), Some(PlayerId(2)), "the nearer pair of hands");
+        assert_eq!(q.holder, Some(PlayerId(2)));
+        assert_eq!(q.vel, Vec3::ZERO);
+        // Held, it is nobody else's, and it rides where its holder puts it.
+        assert!(!q.catchable());
+        assert_eq!(q.try_catch(&hands, 300.0), None);
+        q.carry(Vec3::new(500.0, 100.0, 700.0));
+        assert_eq!(q.pos, Vec3::new(500.0, 100.0, 700.0));
+        q.step(DT);
+        assert_eq!(q.pos, Vec3::new(500.0, 100.0, 700.0), "a carried ball does not fall");
+        // Out of reach of everyone, it stays loose.
+        let mut q = Quaffle::new(Vec3::ZERO);
+        assert_eq!(q.try_catch(&hands, 50.0), None);
+        assert_eq!(q.holder, None);
+        // Rubbish in, nothing out.
+        assert_eq!(q.try_catch(&[(PlayerId(3), Vec3::splat(f32::NAN))], 300.0), None);
+        assert_eq!(q.try_catch(&hands, f32::NAN), None);
+        assert_eq!(q.try_catch(&[], 300.0), None);
+        q.holder = Some(PlayerId(1));
+        q.carry(Vec3::splat(f32::NAN));
+        assert!(q.pos.is_finite(), "{:?}", q.pos);
+    }
+
+    #[test]
+    fn a_thrown_ball_cannot_be_caught_straight_back() {
+        let from = Vec3::new(0.0, 0.0, 500.0);
+        let hands = [(PlayerId(1), from)];
+        for throw in [0, 1] {
+            let mut q = Quaffle::new(from);
+            q.holder = Some(PlayerId(1));
+            if throw == 0 {
+                q.pass(from, Vec3::new(2000.0, 0.0, 500.0), PASS_SPEED);
+            } else {
+                q.shoot(from, Vec3::new(2000.0, 0.0, 500.0), SHOOT_SPEED);
+            }
+            assert_eq!(q.holder, None, "a throw lets go of it");
+            assert!(!q.catchable(), "the thrower may not take it straight back");
+            // The grace runs out with the frames, and by then the ball is long gone.
+            for _ in 0..(THROW_GRACE / DT) as u32 + 2 {
+                q.step(DT);
+            }
+            assert!(q.catchable(), "once it has left him it is anyone's");
+            assert_eq!(q.try_catch(&hands, 250.0), None, "and it is nowhere near him any more");
+        }
+    }
+
+    #[test]
+    fn a_ball_that_just_scored_is_out_of_play() {
+        let h = hoop();
+        let from = Vec3::new(h.center.x, h.center.y - 400.0, h.center.z);
+        let mut q = Quaffle::new(from);
+        q.shoot(from, h.center, SHOOT_SPEED);
+        let mut scored = false;
+        for _ in 0..240 {
+            scored |= q.step_and_score(DT, &[h]).is_some();
+            if scored {
+                break;
+            }
+        }
+        assert!(scored, "the shot went in");
+        assert!(!q.catchable(), "the goal latch keeps it out of play");
+        for _ in 0..(GOAL_COOLDOWN / DT) as u32 + 2 {
+            q.step(DT);
+        }
+        assert!(q.catchable(), "and the latch does run out");
     }
 
     #[test]

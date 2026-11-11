@@ -162,6 +162,24 @@ impl Bludgers {
         self.flying.iter().map(|f| f.pos).collect()
     }
 
+    /// Every Bludger in flight: where it is and where it is going (uu/s). What a Beater needs to see that one
+    /// is on its way to a team-mate (`quidditch::ai`).
+    pub fn flying(&self) -> Vec<(Vec3, Vec3)> {
+        self.flying.iter().map(|f| (f.pos, f.vel)).collect()
+    }
+
+    /// A Beater's bat: sends the Bludger at `index` off along `dir` at `speed` and gives it its life back, so
+    /// a beaten ball flies on instead of expiring where it was struck. False for an index that holds nothing
+    /// or a direction that is no direction; `speed` falls back to the tuning's own.
+    pub fn redirect(&mut self, index: usize, dir: Vec3, speed: f32) -> bool {
+        let speed = if speed.is_finite() && speed > 1.0 { speed } else { self.tuning.speed };
+        let Some(d) = dir.try_normalize() else { return false };
+        let Some(f) = self.flying.get_mut(index) else { return false };
+        f.vel = d * speed;
+        f.age = 0.0;
+        true
+    }
+
     pub fn bumps(&self) -> u32 {
         self.bumps
     }
@@ -355,6 +373,41 @@ mod tests {
             b.step(&harry, 0.1);
         }
         assert_eq!(b.positions().len(), 2);
+    }
+
+    /// A Beater's swat: the ball leaves along the direction it was hit, at the speed it was hit with, and it
+    /// is as good as new (a beaten Bludger that expired the next frame would be no use to anyone).
+    #[test]
+    fn redirect_sends_a_bludger_the_way_it_was_beaten() {
+        let mut t = tuning();
+        t.launch_min = 0.0;
+        t.launch_max = 0.0;
+        t.life = 3.0;
+        let mut b = Bludgers::with_tuning(1, t);
+        let harry = harry_at(Vec3::new(2000.0, 0.0, 0.0));
+        assert!(b.step(&harry, 0.1).contains(&BludgerEvent::Launched));
+        // It is flying at Harry (+x); it is beaten straight up instead.
+        let (was, vel) = b.flying()[0];
+        assert!(vel.x > 0.0, "{vel:?} is not on its way to Harry");
+        assert!(b.redirect(0, Vec3::Z, 900.0));
+        let (still, now) = b.flying()[0];
+        assert_eq!(still, was, "a swat does not move it, only turns it");
+        assert!((now - Vec3::new(0.0, 0.0, 900.0)).length() < 1e-3, "{now:?}");
+        // It then flies the way it was beaten, and lives its whole life again from the swat. Harry is moved
+        // out of the launch band first, so nothing else is launched while it goes.
+        let away = harry_at(Vec3::new(9000.0, 0.0, 0.0));
+        for _ in 0..25 {
+            b.step(&away, 0.1);
+        }
+        assert_eq!(b.flying().len(), 1, "a beaten Bludger flies on");
+        assert!(b.flying()[0].0.z > was.z + 2000.0, "{:?}", b.flying()[0].0);
+        // Nothing to beat, or no direction to beat it in: nothing happens, and nothing panics.
+        assert!(!b.redirect(9, Vec3::Z, 900.0));
+        assert!(!b.redirect(0, Vec3::ZERO, 900.0));
+        assert!(!b.redirect(0, Vec3::splat(f32::NAN), 900.0));
+        // A speed that is no speed falls back to the tuning's own.
+        assert!(b.redirect(0, Vec3::X, f32::NAN));
+        assert!((b.flying()[0].1.length() - tuning().speed).abs() < 1e-3, "{:?}", b.flying()[0].1);
     }
 
     #[test]
