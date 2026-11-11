@@ -33,15 +33,18 @@ pub struct BludgerTuning {
 }
 
 impl Default for BludgerTuning {
-    /// Values in Unreal units (a walking human is ~440 uu/s, a broom cruises ~600 uu/s). The speed was halved
+    /// Values in Unreal units (a walking human is ~440 uu/s, a broom cruises ~450 uu/s). The speed was halved
     /// with the broom's; the radii and the intervals are distances and times, so they stayed as they were.
+    /// It was **not** cut again when the broom lost its last quarter (cruise 600 -> 450, boost 1200 -> 900):
+    /// a Bludger has to stay threatening, and at 750 it now beats a cruising broom outright and is still
+    /// outrun by a boost. Leaving it is the point, not an oversight.
     fn default() -> Self {
         BludgerTuning {
             launch_inner: 800.0,
             launch_outer: 3500.0,
             launch_min: 3.0,
             launch_max: 6.0,
-            // A little faster than the broom, so it can be outrun only by boosting.
+            // Faster than the broom cruises, so it can be outrun only by boosting.
             speed: 750.0,
             velocity_compensation: 0.5,
             // The 30 uu ball (radius 15) plus Harry's body (about 40 uu).

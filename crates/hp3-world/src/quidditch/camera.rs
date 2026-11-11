@@ -361,7 +361,10 @@ mod tests {
         // Monotonic in speed, from one and the same frame before.
         let seed = behind(&flying());
         let mut was = 0.0;
-        for v in [0.0, 100.0, t.speed, 700.0, 900.0, 1100.0, t.boost_speed, 2000.0] {
+        // The in-between speeds are fractions of the cruise..boost span, so retuning the broom cannot leave
+        // this test testing speeds that are both past the boost.
+        let mid = |k: f32| t.speed + (t.boost_speed - t.speed) * k;
+        for v in [0.0, 100.0, t.speed, mid(0.25), mid(0.5), mid(0.75), t.boost_speed, t.boost_speed * 2.0] {
             let f = chase_camera(&at_speed(v), &seed, dt).fov;
             assert!(f >= was - 1e-6, "fov fell from {was} to {f} at {v} uu/s");
             was = f;

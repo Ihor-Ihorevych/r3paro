@@ -57,13 +57,18 @@ pub fn play(root: &Path, seed: u64) -> Result<SmokeResult, Box<dyn std::error::E
     let mut goals = (0u32, 0u32);
     let mut was = (0u32, 0u32);
     while ticks < TICK_CAP {
-        // Steer from the state the last tick left; boost is a toggle in the real controls, so it is not used.
-        // The Snitch is only caught after a run of its flight rings (`quidditch::trail`), so the pilot flies
-        // the next ring while there is one and the Snitch itself when there is not -- which is how a player
-        // plays it, and the only way a scripted match can end in a catch at all.
+        // Steer from the state the last tick left. **The boost is held down** while the Snitch is further off
+        // than the catch radius: a broom cruises at 450 and the Snitch runs at up to 875 with Harry on it, so
+        // a pilot that never boosts never closes at all (it is the boost's 900 that beats the Snitch, barely).
+        // A scripted input is fed straight in rather than through the player's boost *toggle*, so holding it
+        // every frame is simply the boost on.
+        // The Snitch is only caught after a run of its flight rings (`quidditch::trail`) where that rule is
+        // on, so the pilot flies the next ring while there is one and the Snitch itself when there is not --
+        // which is how a player plays it, and the only way a scripted match can end in a catch at all.
         let plan = hp3_world::world(&mut vm).quidditch.as_ref().map(|m| {
             let target = m.rings.trail.next_ring().map(|r| r.center).unwrap_or_else(|| m.snitch.pos());
-            (steer(&m.broom, target, false), wants_catch(&m.broom, m.snitch.pos()))
+            let boost = m.broom.pos.distance(m.snitch.pos()) > SnitchTuning::default().catch_radius;
+            (steer(&m.broom, target, boost), wants_catch(&m.broom, m.snitch.pos()))
         });
         if let Some((input, catch)) = plan {
             glue::feed_scripted(&mut vm, input, catch);

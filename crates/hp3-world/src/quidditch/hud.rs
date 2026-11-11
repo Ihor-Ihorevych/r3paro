@@ -138,7 +138,7 @@ mod tests {
     use super::*;
 
     fn seeking() -> HudInput {
-        HudInput { phase: MatchPhase::Seeking, tries_left: 3, top_speed: 1200.0, bumps_to_lose: 3, ..HudInput::default() }
+        HudInput { phase: MatchPhase::Seeking, tries_left: 3, top_speed: 900.0, bumps_to_lose: 3, ..HudInput::default() }
     }
 
     fn value_of(items: &[HudItem], kind: HudKind) -> Option<f32> {
@@ -161,7 +161,7 @@ mod tests {
 
     #[test]
     fn hud_shows_score_pips_speed_and_hints_while_seeking() {
-        let m = HudInput { score_home: 150, score_away: 30, speed: 600.0, bumps: 1, ..seeking() };
+        let m = HudInput { score_home: 150, score_away: 30, speed: 450.0, bumps: 1, ..seeking() };
         let items = hud_items(&m);
         assert_eq!(value_of(&items, HudKind::ScoreHome), Some(150.0));
         assert_eq!(value_of(&items, HudKind::ScoreAway), Some(30.0));

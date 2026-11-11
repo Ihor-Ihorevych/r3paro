@@ -25,7 +25,7 @@ pub struct SnitchTuning {
 
 impl Default for SnitchTuning {
     /// Values in Unreal units (a walking human is ~440 uu/s, a broom cruises
-    /// ~600 uu/s). The radii are distances, so halving the speeds left them alone.
+    /// ~450 uu/s). The radii are distances, so rescaling the speeds left them alone.
     fn default() -> Self {
         SnitchTuning {
             // Full gain at or inside this distance.
@@ -62,10 +62,11 @@ pub enum SnitchEvent {
     OutOfTries,
 }
 
-/// Snitch speeds (uu/s): idle, and when Harry is right on top of it. Half of what the first pass flew at,
-/// the same factor the broom's own speeds were halved by, so the chase is as catchable as it was.
-const SPEED_IDLE: f32 = 300.0;
-const SPEED_NEAR: f32 = 700.0;
+/// Snitch speeds (uu/s): idle, and when Harry is right on top of it. Half of what the first pass flew at and
+/// then a quarter *faster* again at the owner's word (x1.25), against a broom that lost a quarter: the near
+/// speed 875 sits just under the boost's 900, so a boosting Harry still closes on it, slowly.
+const SPEED_IDLE: f32 = 375.0;
+const SPEED_NEAR: f32 = 875.0;
 /// Longest dt a single step integrates; larger values are clamped.
 const MAX_DT: f32 = 1.0;
 

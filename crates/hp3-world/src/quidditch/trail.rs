@@ -51,13 +51,15 @@ pub struct TrailTuning {
     /// of the next one instead of overlapping it.
     pub spacing: f32,
     /// How many rings of the trail are alive at once; the oldest goes when a new one is dropped. Six of them
-    /// is about twelve seconds of the Snitch's flying, plenty for a run of three, and little enough that the
-    /// sky over the pitch is not a cloud of gold (and that the phone draws six rings and not ten).
+    /// is about seven seconds of the Snitch's flying with Harry on it, plenty for a run of three, and little
+    /// enough that the sky over the pitch is not a cloud of gold (and that the phone draws six rings).
     pub max_rings: usize,
     /// How wide a ring is (uu). Wider than a goal hoop (120): a ring has to be fair to fly through at a
-    /// broom's 600 (1200 boosted) uu/s.
+    /// broom's 450 (900 boosted) uu/s.
     pub radius: f32,
-    /// How long a ring lasts (s).
+    /// How long a ring lasts (s). 7 s against the 875 uu/s the Snitch flies with Harry on it and a `spacing`
+    /// of 900 is 6.8 rings' worth, so a chased Snitch really does show the full six; a Snitch left alone
+    /// (375 uu/s) shows about three, which is what a trail going cold should look like.
     pub life: f32,
     /// How far past a ring's plane Harry must be before it counts as gone past (uu).
     pub miss_behind: f32,
