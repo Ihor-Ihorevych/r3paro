@@ -1,4 +1,4 @@
-# R3paro
+# r3paro
 
 A clean-room reimplementation of the engine of *Harry Potter and the Prisoner of Azkaban* (PC, 2004) in Rust.
 It is a new, open-source engine that runs the game's own compiled UnrealScript, so the levels, characters, spells,
