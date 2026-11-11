@@ -14,6 +14,9 @@ use hp3_world::quidditch::rules::{MatchPhase, Outcome, Score};
 use hp3_world::quidditch::snitch::SnitchTuning;
 
 pub const TICK_CAP: u32 = 20000;
+/// The most goals a side may put away in one smoke match (about 1600 ticks, 27 s) before it counts as the
+/// goal-fest the Keepers are there to prevent: single digits.
+pub const MAX_GOALS: u32 = 9;
 const MAP: &str = "HP3_Quidditch";
 
 pub struct SmokeResult {
@@ -99,9 +102,12 @@ pub fn run(root: &Path, seed: u64) -> Result<ExitCode, Box<dyn std::error::Error
         "quid-smoke seed {seed}: outcome {:?}, score {}-{} ({} Gryffindor goals, {} Slytherin goals), {} ticks, {} script errors",
         r.outcome, r.score.0, r.score.1, r.goals.0, r.goals.1, r.ticks, r.errors
     );
-    let played = r.goals.0 > 0 && r.goals.1 > 0;
+    // The Keepers keep now, so one side can be held scoreless over a single short match: what one match has
+    // to show is that the Quaffle was played at all and that it was not a goal-fest. That both sides score is
+    // asserted over seeds 1 to 5 by the test below.
+    let played = r.goals.0 + r.goals.1 > 0 && r.goals.0 <= MAX_GOALS && r.goals.1 <= MAX_GOALS;
     if !played {
-        println!("quid-smoke seed {seed}: both teams must score at least once, got {:?}", r.goals);
+        println!("quid-smoke seed {seed}: a match needs at least one goal and at most {MAX_GOALS} a side, got {:?}", r.goals);
     }
     Ok(if r.outcome.is_some() && r.errors == 0 && played { ExitCode::SUCCESS } else { ExitCode::FAILURE })
 }
@@ -140,9 +146,10 @@ mod tests {
 
     /// A match plays itself out, and **both teams score**: the opposing side's Chasers have to take the
     /// Quaffle the length of the pitch and put it through a hoop, which is the only proof from here that the
-    /// team AI plays rather than only flies about. A match lasts about 1600 ticks (26 s, the snitch's three
-    /// tries running out while the scripted Harry chases it), which is a dozen goals a side, so no debug
-    /// lengthening of the match (`HP3_QUID_MIN_TICKS` and the like) is needed.
+    /// team AI plays rather than only flies about. A match lasts about 1600 ticks (27 s, the snitch's three
+    /// tries running out while the scripted Harry chases it). The Keepers save shots now, so that is a
+    /// handful of goals and not a dozen a side: every match must have a goal and none may be a goal-fest, and
+    /// each side must score in most of the five (a Keeper may hold one side out of a single short match).
     #[test]
     fn smoke_match_ends_within_20000_ticks_for_seeds_1_to_5() {
         let root = std::env::var("HP3_DATA").unwrap_or_else(|_| r"C:\Users\Ihor\hpdroid\spike-hp3".into());
@@ -150,13 +157,18 @@ mod tests {
             eprintln!("skipping the smoke match: retail data not found at {root} (set HP3_DATA)");
             return;
         }
+        let mut scored_in = (0, 0);
         for seed in 1..=5 {
             let r = play(Path::new(&root), seed).expect("smoke match runs");
             println!("seed {seed}: {:?} {}-{}, goals {:?}, {} ticks", r.outcome, r.score.0, r.score.1, r.goals, r.ticks);
             assert!(r.outcome.is_some(), "seed {seed}: no result in {} ticks", r.ticks);
             assert_eq!(r.errors, 0, "seed {seed}: script errors");
-            assert!(r.goals.0 > 0, "seed {seed}: Gryffindor never scored ({:?})", r.goals);
-            assert!(r.goals.1 > 0, "seed {seed}: Slytherin never scored ({:?})", r.goals);
+            assert!(r.goals.0 + r.goals.1 > 0, "seed {seed}: nobody scored, the Quaffle was not played");
+            assert!(r.goals.0 <= MAX_GOALS && r.goals.1 <= MAX_GOALS, "seed {seed}: a goal-fest ({:?}), the Keepers are not keeping", r.goals);
+            scored_in.0 += u32::from(r.goals.0 > 0);
+            scored_in.1 += u32::from(r.goals.1 > 0);
         }
+        assert!(scored_in.0 >= 3, "Gryffindor scored in only {} of 5 matches", scored_in.0);
+        assert!(scored_in.1 >= 3, "Slytherin scored in only {} of 5 matches", scored_in.1);
     }
 }

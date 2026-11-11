@@ -25,7 +25,7 @@ pub const HARRY: PlayerId = PlayerId(0);
 pub const CATCH_RADIUS: f32 = 250.0;
 /// Nearest and furthest a shot at a hoop is taken from (uu).
 pub const SHOOT_MIN: f32 = 250.0;
-pub const SHOOT_RANGE: f32 = 2600.0;
+pub const SHOOT_RANGE: f32 = 1700.0;
 /// How far in front of the hoop's disc the shooter must be (uu), and how straight on: the cosine of the angle
 /// between the way the ball is thrown and the hoop's own axis, so a ball thrown from the side is not tried.
 const SHOOT_FRONT: f32 = 300.0;
@@ -39,10 +39,20 @@ const PASS_GAIN: f32 = 600.0;
 const PASS_MIN: f32 = 400.0;
 const PASS_RANGE: f32 = 4500.0;
 /// How far from his own goal's hoops a Keeper flies (uu), and the band he is never outside.
-pub const KEEPER_STANDOFF: f32 = 700.0;
+pub const KEEPER_STANDOFF: f32 = 500.0;
 pub const KEEPER_BAND: f32 = 1800.0;
 /// A Quaffle this near his goal (uu) has the Keeper blocking.
 const BLOCK_RANGE: f32 = 3500.0;
+/// How far from his broom a Keeper stops a shot (uu): his arm, his broom and the lunge at the ball. A shot
+/// whose path comes inside it is saved, one that stays outside it is not: there is no dice in a save, only
+/// whether he got there.
+pub const KEEPER_REACH: f32 = 240.0;
+/// The nearest his own posts a Keeper meets a shot (uu in front of the hoops' plane), so the save is made
+/// before the ball is through.
+const KEEPER_DEPTH: f32 = 150.0;
+/// How long a Keeper takes to see that a shot is on its way and go for it (s): somewhere between these, drawn
+/// from the match's own stream for every shot. It is what makes one shot a save and the next one a goal.
+const KEEPER_REACT: (f32, f32) = (0.05, 0.45);
 /// How near a Beater has to be to a Bludger to swat it (uu), how far off a Bludger's line a team-mate still
 /// counts as in its way (uu), and how far down that line it is worth looking (uu).
 pub const BEAT_RADIUS: f32 = 400.0;
@@ -114,9 +124,12 @@ pub struct AiWorld<'a> {
     pub bounds: ArenaBounds,
     /// The six scoring hoops (`arena::hoops`).
     pub hoops: &'a [Hoop],
-    /// Where the Quaffle is, and who has it (`None` while it is loose).
+    /// Where the Quaffle is, where it is going (uu/s), and who has it (`None` while it is loose).
     pub quaffle: Vec3,
+    pub quaffle_vel: Vec3,
     pub holder: Option<PlayerId>,
+    /// The side whose goal a shot is flying at right now, if one is: the Keeper who has to stop it.
+    pub shot: Option<Team>,
     /// Every Bludger in flight: where it is and where it is going.
     pub bludgers: &'a [(Vec3, Vec3)],
     /// Harry, the home Seeker: the player, so not an agent.
@@ -150,6 +163,15 @@ impl Plan {
     fn fly_to(target: Vec3, boost: bool) -> Plan {
         Plan { target, actions: Vec::new(), boost, brake: false }
     }
+}
+
+/// Closest distance from `p` to the segment `a..b` (a == b is fine); infinite for rubbish.
+fn segment_distance(a: Vec3, b: Vec3, p: Vec3) -> f32 {
+    let ab = b - a;
+    let len2 = ab.length_squared();
+    let t = if len2 > 1e-12 { ((p - a).dot(ab) / len2).clamp(0.0, 1.0) } else { 0.0 };
+    let d = (a + ab * t).distance(p);
+    if d.is_finite() { d } else { f32::INFINITY }
 }
 
 /// Whether a goal through `h` is `team`'s own ten points.
@@ -446,12 +468,45 @@ fn beater(a: &Agent, w: &AiWorld) -> Plan {
     }
 }
 
+/// Where a shot flying at `team`'s goal will be when it is as far in front of the posts as `depth` (uu), or
+/// `None` when the ball is not coming at that goal at all (it is past it, or flying away).
+fn shot_meets(w: &AiWorld, team: Team, depth: f32) -> Option<Vec3> {
+    let goal = goal_center(w.hoops, team);
+    let into = own_normal(w.hoops, team);
+    if !w.quaffle.is_finite() || !w.quaffle_vel.is_finite() {
+        return None;
+    }
+    let ahead = (w.quaffle - goal).dot(into);
+    let closing = -w.quaffle_vel.dot(into);
+    if !(ahead > 0.0) || !(closing > 1.0) {
+        return None;
+    }
+    let t = ((ahead - depth) / closing).clamp(0.0, 5.0);
+    Some(w.quaffle + w.quaffle_vel * t + Vec3::new(0.0, 0.0, quaffle::GRAVITY * 0.5 * t * t))
+}
+
 /// A Keeper: on the line from the Quaffle to his own hoops, a fixed stand-off in front of them, and never
 /// outside `KEEPER_BAND` of them. A broom cannot stop, so once he is on his line he flies a tight circle in
-/// front of the posts instead of trying to hover.
+/// front of the posts instead of trying to hover. With a shot on its way at his goal he goes for where it
+/// will cross his own distance from the posts, flat out: `TeamPlay::step` saves it if he gets within
+/// `KEEPER_REACH` of it. With the ball in his hands he throws it out to one of his Chasers.
 fn keeper(a: &Agent, w: &AiWorld) -> Plan {
     let goal = goal_center(w.hoops, a.team);
     let into = own_normal(w.hoops, a.team);
+    if w.holder == Some(a.id) {
+        // The nearest of his Chasers with nobody on him, or simply the nearest.
+        let mates = || w.players.iter().filter(|v| v.team == a.team && v.role == Role::Chaser && v.pos.is_finite());
+        let near = |x: &&AgentView, y: &&AgentView| a.body.pos.distance(x.pos).total_cmp(&a.body.pos.distance(y.pos));
+        let open = mates().filter(|v| !w.players.iter().any(|o| o.team != a.team && o.pos.distance(v.pos) < OPEN_RADIUS)).min_by(near);
+        let actions = open.or_else(|| mates().min_by(near)).map(|v| vec![AiAction::Pass(v.id)]).unwrap_or_default();
+        return Plan { target: goal + into * KEEPER_STANDOFF, actions, boost: false, brake: true };
+    }
+    if w.shot == Some(a.team) && w.holder.is_none() {
+        let depth = (a.body.pos - goal).dot(into).clamp(KEEPER_DEPTH, KEEPER_STANDOFF);
+        if let Some(at) = shot_meets(w, a.team, depth) {
+            return Plan { target: at, actions: vec![AiAction::Block], boost: true, brake: false };
+        }
+    }
     let ball = if w.quaffle.is_finite() { w.quaffle } else { goal + into * 1000.0 };
     let line = (ball - goal).try_normalize().unwrap_or(into);
     let post = goal + line * KEEPER_STANDOFF;
@@ -506,6 +561,8 @@ pub enum TeamEvent {
     Caught { by: PlayerId },
     Passed { from: PlayerId, to: PlayerId },
     Shot { by: PlayerId, home: bool },
+    /// The Keeper `by` stopped a shot at his goal and has the ball.
+    Saved { by: PlayerId },
     /// The Beater swatted Bludger `index` off along `dir`; only `bludger::Bludgers` can do it.
     Beat { index: usize, dir: Vec3 },
 }
@@ -515,11 +572,16 @@ pub struct TeamPlay {
     pub agents: Vec<Agent>,
     rng: Rng,
     views: Vec<AgentView>,
+    /// The side whose goal a shot is flying at (`AiWorld::shot`), from the throw until the ball is in
+    /// someone's hands again or no longer on its way there.
+    shot: Option<Team>,
+    /// Seconds until that side's Keeper has seen the shot (`KEEPER_REACT`).
+    react: f32,
 }
 
 impl TeamPlay {
     pub fn new(seed: u64) -> TeamPlay {
-        TeamPlay { agents: standard_teams(), rng: Rng::new(seed ^ 0x7a11_1deb_eef0_1234), views: Vec::new() }
+        TeamPlay { agents: standard_teams(), rng: Rng::new(seed ^ 0x7a11_1deb_eef0_1234), views: Vec::new(), shot: None, react: 0.0 }
     }
 
     /// The agent of `team` nearest `p`, in whatever role.
@@ -571,11 +633,24 @@ impl TeamPlay {
         // nothing.
         self.views.clear();
         self.views.extend(self.agents.iter().map(|a| AgentView { id: a.id, team: a.team, role: a.role, pos: a.body.pos }));
+        // A shot is over once someone has the ball or it is no longer coming at that goal (it went wide, it
+        // went in and was put back at the centre, it fell short).
+        if let Some(team) = self.shot {
+            let into = own_normal(hoops, team);
+            let coming = (q.pos - goal_center(hoops, team)).dot(into) > 0.0 && q.vel.dot(into) < -1.0;
+            if q.holder.is_some() || !coming {
+                self.shot = None;
+            }
+            self.react -= if dt.is_finite() { dt.clamp(0.0, 0.25) } else { 0.0 };
+        }
         let w = AiWorld {
             bounds: *bounds,
             hoops,
             quaffle: q.pos,
+            quaffle_vel: q.vel,
             holder: q.holder,
+            // The Keeper goes for it only once he has seen it.
+            shot: self.shot.filter(|_| self.react <= 0.0),
             bludgers,
             harry,
             snitch,
@@ -604,6 +679,8 @@ impl TeamPlay {
                 AiAction::Shoot if q.holder == Some(id) => {
                     let Some(h) = pick_hoop(from, &w, team, &mut self.rng) else { continue };
                     q.shoot(from, h.center, quaffle::SHOOT_SPEED);
+                    self.shot = Some(team.other());
+                    self.react = KEEPER_REACT.0 + (KEEPER_REACT.1 - KEEPER_REACT.0) * self.rng.unit();
                     out.push(TeamEvent::Shot { by: id, home: h.home });
                 }
                 AiAction::HitBludger(dir) => {
@@ -620,6 +697,17 @@ impl TeamPlay {
                 }
                 _ => {}
             }
+        }
+        // The save: a shot whose path over the last frame came within the Keeper's reach is his. He has the
+        // ball, and his next frame throws it out to a Chaser.
+        if let Some(team) = self.shot
+            && q.holder.is_none()
+            && let Some(k) = self.agents.iter().find(|a| a.team == team && a.role == Role::Keeper)
+            && segment_distance(q.prev(), q.pos, k.body.pos) <= KEEPER_REACH
+        {
+            q.holder = Some(k.id);
+            self.shot = None;
+            out.push(TeamEvent::Saved { by: k.id });
         }
         // A loose ball goes to the nearest Chaser that can reach it, and whoever has it carries it.
         if q.catchable() {
@@ -655,7 +743,9 @@ mod tests {
             bounds: *b,
             hoops,
             quaffle,
+            quaffle_vel: Vec3::ZERO,
             holder,
+            shot: None,
             bludgers,
             harry: arena::harry_start(b),
             snitch: b.center,
@@ -862,5 +952,85 @@ mod tests {
             assert_eq!(who.role, Role::Chaser);
             assert_eq!(q.pos, who.body.pos);
         }
+    }
+
+    /// A pure match of `ticks` frames (no Harry worth the name, no Bludgers): the goals each side scored.
+    fn play_goals(seed: u64, ticks: u32) -> (u32, u32) {
+        let b = arena::bounds();
+        let hoops = arena::hoops();
+        let mut play = TeamPlay::new(seed);
+        let mut q = Quaffle::new(arena::bludger_home(&b));
+        play.kickoff(&mut q, b.center);
+        let budget = Budget::default();
+        let mut goals = (0u32, 0u32);
+        for _ in 0..ticks {
+            play.step(&b, &hoops, &mut q, &[], arena::harry_start(&b), b.center, &budget, DT);
+            let scored = q.step_and_score(DT, &hoops);
+            q.confine(&b);
+            if let Some(i) = scored {
+                let home = hoops[i].home;
+                if home { goals.0 += 1 } else { goals.1 += 1 }
+                q = Quaffle::new(arena::bludger_home(&b));
+                play.hand_to(&mut q, if home { Team::Away } else { Team::Home }, b.center);
+            }
+        }
+        goals
+    }
+
+    /// The Keepers keep: a match is not a goal every two seconds. Over 1600 frames (the length of the smoke
+    /// match) neither side gets anywhere near double figures, and over a few seeds both sides still score, so
+    /// the Chasers have not been shut out either.
+    #[test]
+    fn keepers_hold_the_score_down_and_both_sides_still_score() {
+        let mut total = (0u32, 0u32);
+        let mut worst = (0u32, 0u32);
+        for seed in 1..=8 {
+            let g = play_goals(seed, 1600);
+            println!("seed {seed}: {g:?}");
+            total = (total.0 + g.0, total.1 + g.1);
+            worst = (worst.0.max(g.0), worst.1.max(g.1));
+        }
+        assert!(worst.0 <= 5 && worst.1 <= 5, "a goal-fest: up to {worst:?} goals a side in 1600 frames");
+        assert!(total.0 >= 4 && total.1 >= 4, "over eight matches the sides scored {total:?}: the Chasers are shut out");
+        // And it is the same match every time it is played from the same seed.
+        assert_eq!(play_goals(3, 1600), play_goals(3, 1600));
+    }
+
+    /// A shot that comes within the Keeper's reach is his: the ball is in his hands, not in the hoop, and the
+    /// next thing he does is throw it out to one of his own Chasers. One that passes out of his reach is not.
+    #[test]
+    fn keeper_saves_a_shot_inside_his_reach_and_throws_it_out() {
+        let (b, hoops) = (arena::bounds(), arena::hoops());
+        let h = *hoops.iter().find(|h| h.home).expect("a north hoop, which the away Keeper guards");
+        let from = h.center + h.normal * 1200.0;
+        let run = |keeper_at: Vec3| {
+            let mut play = TeamPlay::new(5);
+            let keeper = play.agents.iter().position(|a| a.team == Team::Away && a.role == Role::Keeper).expect("an away Keeper");
+            play.agents[keeper].body = BroomState::new(keeper_at, Vec3::ZERO, -std::f32::consts::FRAC_PI_2, 0.0);
+            let shooter = play.agents.iter().position(|a| a.team == Team::Home && a.role == Role::Chaser).expect("a home Chaser");
+            play.agents[shooter].body = BroomState::new(from, Vec3::ZERO, std::f32::consts::FRAC_PI_2, 0.0);
+            let mut q = Quaffle::new(from);
+            q.holder = Some(play.agents[shooter].id);
+            let (mut saved, mut goal, mut thrown) = (None, false, false);
+            for _ in 0..120 {
+                for e in play.step(&b, &hoops, &mut q, &[], arena::harry_start(&b), b.center, &Budget::default(), DT) {
+                    match e {
+                        TeamEvent::Saved { by } => saved = Some(by),
+                        TeamEvent::Passed { from, .. } if Some(from) == saved => thrown = true,
+                        _ => {}
+                    }
+                }
+                goal |= q.step_and_score(DT, &hoops).is_some();
+                q.confine(&b);
+                if goal || thrown {
+                    break;
+                }
+            }
+            (saved.map(|id| id == play.agents[keeper].id), goal, thrown)
+        };
+        // Right in front of the hoop the shot is aimed at (the only one that is on from straight in front).
+        assert_eq!(run(h.center + h.normal * 200.0), (Some(true), false, true), "a Keeper on the ball's line saves it and throws it out");
+        // Far off to the side and low: he never gets there, and it is a goal.
+        assert_eq!(run(h.center + h.normal * 200.0 + Vec3::new(1500.0, 0.0, -400.0)), (None, true, false), "a Keeper nowhere near it does not");
     }
 }
