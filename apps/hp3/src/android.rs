@@ -187,7 +187,9 @@ native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeCutsceneActive
 native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeCreatureActive, CREATURE.load(Ordering::Relaxed));
 native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeLessonDrawing, false);
 native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeVendorActive, false);
-native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeOnBroom, false);
+// A Quidditch match is the broom the overlay knows: it shows its broom layout (a steering stick that presses
+// nothing, a boost button that toggles and a brake that is held; see `crate::broom`).
+native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeOnBroom, crate::broom::on_broom());
 
 native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetDebugMode, _on: u8);
 native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetAutoJump, _on: u8);

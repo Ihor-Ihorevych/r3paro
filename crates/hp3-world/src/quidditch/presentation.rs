@@ -376,7 +376,12 @@ fn place_bludgers(vm: &mut Vm<'_>, m: &mut QuidditchMatch) {
             Some(&p) => {
                 crate::set(vm, a, "Location", v3(super::arena::clamp_into(&m.arena, p)));
                 crate::set(vm, a, "bHidden", Value::Bool(false));
-                if crate::get(vm, a, "AmbientSound").as_obj().is_none() {
+                // The frame budget's one rule the match already keeps (`lod::use_proxy`): a ball further off
+                // than the proxy distance is only seen, not heard. Its loop is inaudible that far away
+                // anyway, and the sound costs a voice and an update a frame.
+                if super::lod::use_proxy((p - m.cam.pos).length(), &m.budget) {
+                    crate::set(vm, a, "AmbientSound", Value::Object(None));
+                } else if crate::get(vm, a, "AmbientSound").as_obj().is_none() {
                     ambient(vm, a, loop_sound, 180.0, 1.0, 4000.0);
                 }
             }

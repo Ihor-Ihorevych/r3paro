@@ -26,6 +26,7 @@ use sdl3::mouse::MouseButton;
 #[cfg(target_os = "android")]
 pub mod android;
 mod audio;
+pub mod broom;
 mod cheatmenu;
 pub mod commands;
 mod gamelog;
@@ -477,6 +478,9 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
     // When the limit was last changed (the window title says so for a few seconds).
     let mut fps_note: Option<(Instant, u32)> = None;
     let mut perf = PerfStats::default();
+    // How long a frame's work is taking, in milliseconds, smoothed over the last frames (0 before the first
+    // one). A Quidditch match's frame budget is chosen from it (`quidditch::lod`).
+    let mut avg_frame_ms = 0.0f32;
     let mut fps_timer = Instant::now();
     let mut free_camera = false;
     let mut in_menu = false;
@@ -700,7 +704,17 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         for command in commands::take() {
             commands::run(&mut vm, &command, &mut pending_level);
         }
+        // A Quidditch match: the phone's touch layout flies the broom (its stick and buttons come in through
+        // `broom`), and the frames it is taking set the match's budget. Both are nothing on every other
+        // level, where no match is running.
+        if hp3_world::world(&mut vm).quidditch.is_some() {
+            if let Some(t) = broom::take() {
+                hp3_world::quidditch::phone::feed_touch(&mut vm, t.stick, t.boost_tap, t.brake);
+            }
+            hp3_world::quidditch::phone::feed_frame_ms(&mut vm, avg_frame_ms);
+        }
         if hp3_world::world(&mut vm).frame % 6 == 0 {
+            broom::set_on_broom(hp3_world::world(&mut vm).quidditch.is_some());
             platform::set_cutscene(player_in_cutscene(&mut vm, in_menu));
             platform::set_creature(player_controls_creature(&mut vm));
             FLYING.store(player_flying(&mut vm), std::sync::atomic::Ordering::Relaxed);
@@ -929,7 +943,11 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             loader.trim();
         }
         frames += 1;
-        perf.add(&stages, frame_start.elapsed().as_secs_f32() * 1000.0);
+        let took = frame_start.elapsed().as_secs_f32() * 1000.0;
+        perf.add(&stages, took);
+        // What a frame is costing, smoothed: the frame rate limiter's own wait is not in it (it is measured
+        // from `frame_start`), so this is the work a frame takes. A Quidditch match's budget follows it.
+        avg_frame_ms += (took - avg_frame_ms) * if avg_frame_ms > 0.0 { 0.1 } else { 1.0 };
         if fps_timer.elapsed().as_secs_f32() >= 1.0 {
             let fps = frames as f32 / fps_timer.elapsed().as_secs_f32();
             if std::env::var_os("HP3_PERF").is_some() || cfg!(target_os = "android") {

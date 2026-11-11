@@ -76,8 +76,19 @@ pub struct QuidditchMatch {
     /// This frame's broom keys and mouse motion, as `crate::input::apply` read them (`feed_input`). Taken by
     /// the tick, so a frame whose input never arrived steers nothing instead of repeating the last one.
     pending_input: Option<(KeyState, (f32, f32))>,
-    /// The boost toggle: a tap of the boost key flips it (HP1's broom works that way).
-    boost: bool,
+    /// This frame's steering from the phone's touch layout (`phone::feed_touch`), already a `BroomInput`
+    /// because the touch controls are a scheme of their own. Set, it is flown instead of the keys and mouse,
+    /// and it is taken by the tick for the same reason as `pending_input`.
+    pub(super) pending_touch: Option<flight::BroomInput>,
+    /// The boost toggle: a tap of the boost key or button flips it (HP1's broom works that way). It is the
+    /// match's, not the input module's, so a pause of the tick cannot reset it.
+    pub(super) boost: bool,
+    /// What this match may spend on a frame, as the app's frame times ask for (`phone::feed_frame_ms`,
+    /// `quidditch::lod`). Nothing steers team players yet (Task 13); what keeps to it today is the
+    /// presentation, which leaves distant Bludgers to their proxy.
+    pub budget: super::lod::Budget,
+    /// The 120-frame count behind `budget`.
+    pub(super) gov: super::lod::BudgetGovernor,
     /// The pawn the player controller had before the match, given back by `stop`.
     was_playing: Option<ObjId>,
     /// Ticks this match has had.
@@ -476,7 +487,10 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
         snitch_actor,
         show: Presentation::default(),
         pending_input: None,
+        pending_touch: None,
         boost: false,
+        budget: super::lod::Budget::default(),
+        gov: super::lod::BudgetGovernor::default(),
         was_playing,
         frames: 0,
         // The restart is a one-shot: the match it starts does not restart itself again.
@@ -563,7 +577,12 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         Some(pc) => crate::settings::mouse_look(vm, pc),
         None => (1.0, false),
     };
-    let mut i = desktop_input(&keys, (mouse.0 * mouse_speed, mouse.1 * mouse_speed), invert_pitch, &mut m.boost);
+    // The phone's touch layout flies the broom itself (`phone::feed_touch` has already turned it into
+    // steering, with the same boost toggle); the keys and the mouse are the desktop's.
+    let mut i = match m.pending_touch.take() {
+        Some(touched) => touched,
+        None => desktop_input(&keys, (mouse.0 * mouse_speed, mouse.1 * mouse_speed), invert_pitch, &mut m.boost),
+    };
     let soft = inset(&m.arena, SOFT_MARGIN);
     let turn = flight::boundary_turn(m.broom.pos, m.broom.yaw, &soft);
     i.yaw = (i.yaw + turn * BOUNDARY_WEIGHT).clamp(-1.0, 1.0);
