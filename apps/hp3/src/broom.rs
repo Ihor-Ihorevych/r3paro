@@ -36,10 +36,9 @@ static TOUCHED: AtomicBool = AtomicBool::new(false);
 pub struct Touch {
     /// The steering stick's deflection, `None` while no finger holds it.
     pub stick: Option<Vec2>,
-    /// The boost button was tapped since the last frame (an edge: it toggles).
-    pub boost_tap: bool,
-    /// The brake button is held now.
-    pub brake: bool,
+    /// The JUMP button was tapped since the last frame (an edge): it reaches for the Snitch. (It was the
+    /// boost; there is no boost any more, speed comes from flight rings.)
+    pub reach_tap: bool,
 }
 
 /// Whether a match is running, which is what the overlay asks before showing the broom layout.
@@ -69,7 +68,7 @@ pub fn take() -> Option<Touch> {
     let stick = STICK_DOWN
         .load(Relaxed)
         .then(|| Vec2::new(f32::from_bits(packed as u32), f32::from_bits((packed >> 32) as u32)));
-    Some(Touch { stick, boost_tap: BOOST_TAPS.swap(0, Relaxed) > 0, brake: BRAKE.load(Relaxed) })
+    Some(Touch { stick, reach_tap: BOOST_TAPS.swap(0, Relaxed) > 0 })
 }
 
 /// Where the steering stick stands now: `x` to the right and `y` upwards, each -1..1, and whether a finger is

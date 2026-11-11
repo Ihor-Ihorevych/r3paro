@@ -48,6 +48,12 @@ pub struct SnitchTuning {
     /// U-turn, which the turn limit makes into a long slow loop. Preferred, not required -- with nothing in
     /// the cone the farthest-forward candidate is taken.
     pub path_cone: f32,
+    /// The **dodge**: the moment the catch window opens the Snitch jinks sideways and bursts away at
+    /// `dodge_speed` (uu/s) for `dodge_time` seconds, turning `dodge_turn` times as tightly as its path
+    /// otherwise may. Harry has to have the speed from his rings to stay on it. 0 time is no dodge.
+    pub dodge_speed: f32,
+    pub dodge_time: f32,
+    pub dodge_turn: f32,
 }
 
 impl Default for SnitchTuning {
@@ -65,22 +71,27 @@ impl Default for SnitchTuning {
             gain_rate: 0.25,
             loss_rate: 0.15,
             // Seconds the catch window stays open once the bar is full.
-            max_catch_time: 3.0,
+            // Two seconds, and a tighter reach: the catch is a moment, not a stretch.
+            max_catch_time: 2.0,
             max_tries: 3,
             // Harry must be this close with the catch key held. **350 + `circle_radius`**: every distance
             // here is measured to the Snitch's real, circling position, so a Snitch looping 150 uu around its
             // path is up to 150 uu farther away than one flying the bare path. Widening the catch by exactly
             // the loop leaves the catch as hard as it was before the circling; nothing else was widened (the
             // progress radii are thousands of uu, and 150 uu of wobble in them is noise).
-            catch_radius: 500.0,
+            catch_radius: 320.0,
             circle_radius: 150.0,
             circle_rate: 4.5,
-            path_turn_rate: 0.58,
+            // 0.4868 rad/s at `SPEED_NEAR` (734): the same 1508 uu turn radius as 0.58 at the old 875.
+            path_turn_rate: 0.4868,
             max_pitch: 0.35,
             path_margin: 220.0,
             path_capture: 600.0,
             path_min_hop: 2500.0,
             path_cone: std::f32::consts::FRAC_PI_3,
+            dodge_speed: 955.0,
+            dodge_time: 0.9,
+            dodge_turn: 2.0,
         }
     }
 }
@@ -98,8 +109,11 @@ pub enum SnitchEvent {
 /// Snitch speeds (uu/s): idle, and when Harry is right on top of it. Half of what the first pass flew at and
 /// then a quarter *faster* again at the owner's word (x1.25), against a broom that lost a quarter: the near
 /// speed 875 sits just under the boost's 900, so a boosting Harry still closes on it, slowly.
-const SPEED_IDLE: f32 = 375.0;
-const SPEED_NEAR: f32 = 875.0;
+///
+/// Slowed again for the ring-driven broom: Harry now cruises at 240 uu/s and only the charge of a run of rings
+/// (up to 760) brings him up to the Snitch, which flies 260 idle and 600 with him close.
+const SPEED_IDLE: f32 = 318.0;
+const SPEED_NEAR: f32 = 734.0;
 /// Longest dt a single step integrates; larger values are clamped.
 const MAX_DT: f32 = 1.0;
 
@@ -150,6 +164,8 @@ pub struct Snitch {
     /// trail's streak (`quidditch::rings`); true for a Snitch nobody tells, which is every unit test and any
     /// caller with no trail, so the rule costs nothing where there are no rings.
     rings_ready: bool,
+    /// Seconds left of the dodge the opening of the catch window set off (0: not dodging).
+    dodge: f32,
 }
 
 impl Snitch {
@@ -185,6 +201,7 @@ impl Snitch {
             tries: 0,
             phase: Phase::Chasing,
             rings_ready: true,
+            dodge: 0.0,
         };
         // The loop starts somewhere of its own, so two Snitches of different seeds are not in step.
         s.angle = s.rng.unit() * std::f32::consts::TAU;
@@ -523,7 +540,28 @@ impl Snitch {
         if self.progress >= 1.0 && self.rings_ready {
             self.phase = Phase::Catching { elapsed: 0.0 };
             events.push(SnitchEvent::CatchStart);
+            self.start_dodge();
         }
+    }
+
+    /// The Snitch sees the catch coming: it jinks to one side (which one is its own coin toss) and bursts away.
+    fn start_dodge(&mut self) {
+        let t = self.tuning;
+        if !(t.dodge_time > 0.0) {
+            return;
+        }
+        let side = if self.rng.unit() < 0.5 { -1.0 } else { 1.0 };
+        let across = self.heading.cross(Vec3::Z).normalize_or_zero();
+        let across = if across == Vec3::ZERO { Vec3::Y } else { across };
+        let (lo, hi) = self.aim_box();
+        self.waypoint = (self.path + across * side * 1800.0 + self.heading * 900.0).clamp(lo, hi);
+        self.dodge = t.dodge_time;
+    }
+
+    /// Whether the Snitch is in the middle of its dodge (the ring trail drops no rings meanwhile: the chain
+    /// stays one smooth road).
+    pub fn dodging(&self) -> bool {
+        self.dodge > 0.0
     }
 
     /// One step of the flight path: **steer, then move**. The heading turns toward where the steering wants to
@@ -534,6 +572,13 @@ impl Snitch {
     fn fly(&mut self, dist: f32, dt: f32) {
         let near = (1.0 - dist / self.tuning.max_loss_radius.max(1.0)).clamp(0.0, 1.0);
         let speed = SPEED_IDLE + (SPEED_NEAR - SPEED_IDLE) * near;
+        // The dodge: a burst, and a tighter turn (the waypoint was already set sideways when it began).
+        let (speed, turn_gain) = if self.dodge > 0.0 {
+            self.dodge = (self.dodge - dt).max(0.0);
+            (speed.max(self.tuning.dodge_speed), self.tuning.dodge_turn.max(1.0))
+        } else {
+            (speed, 1.0)
+        };
         let ds = speed * dt;
         // Reached, or gone past: a waypoint is given up on the moment it falls behind, which is what stops a
         // Snitch whose turn circle is wider than `path_capture` circling it for ever.
@@ -545,7 +590,7 @@ impl Snitch {
         // The turn a step may make: the curvature over the ground covered, and never more than 0.3 rad even
         // so. The cap only bites at a `dt` of over half a second, where a frame covers more than a ring's
         // spacing on its own and the chain could not be smooth whatever the path did.
-        self.steer((self.curvature() * ds).min(0.3));
+        self.steer((self.curvature() * turn_gain * ds).min(0.3));
         self.path += self.heading * ds;
         if !self.path.is_finite() {
             self.path = (self.path_lo + self.path_hi) * 0.5;
@@ -600,6 +645,14 @@ impl Snitch {
     /// True while the catch window is open (the bar is full and Harry has `max_catch_time` to grab it).
     pub fn in_catch_window(&self) -> bool {
         matches!(self.phase, Phase::Catching { .. })
+    }
+
+    /// Seconds the catch window has left (0 when it is not open): for the HUD's prompt.
+    pub fn catch_left(&self) -> f32 {
+        match self.phase {
+            Phase::Catching { elapsed } => (self.tuning.max_catch_time - elapsed).max(0.0),
+            _ => 0.0,
+        }
     }
 
     /// Says whether Harry has the run of flight rings the catch needs (`quidditch::trail`'s

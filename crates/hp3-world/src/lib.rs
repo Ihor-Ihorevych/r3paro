@@ -783,6 +783,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
     for &a in &actors {
         fire(vm, a, "PreBeginPlay", &mut []);
     }
+    widen_flight_corridor(vm, &actors);
     for &a in &actors {
         fire(vm, a, "BeginPlay", &mut []);
     }
@@ -1539,7 +1540,9 @@ pub fn mesh_offset(vm: &mut Vm<'_>, a: ObjId) -> glam::Vec3 {
         let height = get(vm, a, "CollisionHeight").as_float();
         offset.z -= height - keep;
         if get(vm, a, "Physics").as_byte() != 0 {
-            offset.z -= 5.0;
+            // The extra drop (fitted on human-sized characters at 5; the original's own is 2.5) is a quarter of the collision height
+            // up to that: a cat 10 high that sat 5 too low sank into the train seat it lay on.
+            offset.z -= (height * 0.25).min(5.0);
         }
     }
     offset
@@ -1584,6 +1587,46 @@ fn vec_of(v: &Value) -> glam::Vec3 {
 }
 
 /// Collision geometry of a level: its BSP, the triangles of blocking static meshes, and terrain.
+/// The Buckbeak flight is bounded by a corridor along its path: past the `PathMarker`s' tether (their `fTetherWidth` and
+/// `fTetherHeight`, which `PreBeginPlay` takes from the marker's collision size) the rider is turned back toward the path by the
+/// script, fast enough to override the player's steering, so a ring near the edge is hard to line up. On a level that has the flight
+/// game the tethers are widened by `HP3_BUCKBEAK_WALL` (1.5 by default; 1 leaves the original corridor), before `BeginPlay` builds the
+/// perimeter from them.
+fn widen_flight_corridor(vm: &mut Vm<'_>, actors: &[ObjId]) {
+    let factor: f32 = std::env::var("HP3_BUCKBEAK_WALL").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5);
+    if (factor - 1.0).abs() < 1e-3 {
+        return;
+    }
+    let (Some(marker), Some(game)) = (vm.db.find("PathMarker"), vm.db.find("HippoFlyGame")) else {
+        if std::env::var_os("HP3_FLIGHT_DEBUG").is_some() {
+            eprintln!("flight corridor: classes PathMarker {:?} HippoFlyGame {:?}", vm.db.find("PathMarker"), vm.db.find("HippoFlyGame"));
+        }
+        return;
+    };
+    if std::env::var_os("HP3_FLIGHT_DEBUG").is_some() {
+        let g = actors.iter().filter(|&&a| vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, game))).count();
+        eprintln!("flight corridor: {g} flight games in {} actors", actors.len());
+    }
+    let is = |vm: &Vm<'_>, a: ObjId, class: hp3_script::class_db::StructId| vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, class));
+    if !actors.iter().any(|&a| is(vm, a, game)) {
+        return;
+    }
+    let mut widened = 0;
+    for &a in actors {
+        if is(vm, a, marker) {
+            for prop in ["fTetherWidth", "fTetherHeight"] {
+                let v = get(vm, a, prop).as_float();
+                set(vm, a, prop, Value::Float(v * factor));
+            }
+            widened += 1;
+        }
+    }
+    if std::env::var_os("HP3_FLIGHT_DEBUG").is_some() {
+        eprintln!("flight corridor: {widened} path markers widened by {factor}");
+    }
+    vm.log.push(format!("flight corridor: {widened} path markers widened by {factor}"));
+}
+
 /// A mover's collision triangles in its own space (scaled, around its pivot): its static mesh's, or its
 /// brush's polygons.
 fn mover_shape(vm: &mut Vm<'_>, a: ObjId) -> Option<collision::MoverShape> {

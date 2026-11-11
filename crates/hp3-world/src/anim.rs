@@ -154,9 +154,18 @@ pub fn set_of(vm: &mut Vm<'_>, actor: ObjId) -> Option<Rc<AnimSet>> {
                 let (pkg, index) = vm.db.objects.get(mesh).key.clone()?;
                 let p = vm.db.set.get(&pkg).ok()?;
                 let chain = vm.db.set.export_chain(&p, index);
-                let Some(Asset::SkeletalMesh(m)) = crate::native_asset(&p, index, &chain) else { return None };
-                let anim = vm.db.resolve_obj(&p, m.default_anim)?;
-                load_set(vm, anim)
+                match crate::native_asset(&p, index, &chain)? {
+                    Asset::SkeletalMesh(m) => {
+                        let anim = vm.db.resolve_obj(&p, m.default_anim)?;
+                        load_set(vm, anim)
+                    }
+                    // A vertex-animated mesh (the animals the heroes turn into) carries its own sequences.
+                    Asset::VertMesh(v) => {
+                        let list: Vec<(String, i32, f32)> = v.sequences.iter().map(|s| (p.name(s.name).to_string(), s.num_frames, s.rate)).collect();
+                        Some(Rc::new(AnimSet::from_vertex_sequences(&list)))
+                    }
+                    _ => None,
+                }
             })();
             world(vm).anim.mesh_sets.insert(mesh, s.clone());
             s

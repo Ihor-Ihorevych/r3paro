@@ -32,6 +32,7 @@ pub mod commands;
 mod gamelog;
 mod levelmenu;
 mod present;
+mod quidbutton;
 use hp3_script::Value;
 
 /// What the platform layer needs to know about the game and tells it: on Android Flipendo's touch controls ask through JNI
@@ -94,6 +95,8 @@ mod platform {
         1.0
     }
     pub fn note_saved() {}
+    /// Buckbeak's flight (the phone's touch layout can swap its halves; the desktop has nothing to swap).
+    pub fn set_flight(_on: bool) {}
 }
 
 /// The ini's name for a key.
@@ -233,6 +236,12 @@ fn is_jump_key(name: &str) -> bool {
 fn player_flying(vm: &mut Vm<'_>) -> bool {
     let Some(pc) = hp3_world::world(vm).player else { return false };
     vm.state_of(pc).is_some_and(|st| vm.db.names.get(vm.db.get(st).name).starts_with("PlayerFlapping"))
+}
+
+/// Whether the player rides Buckbeak (the controller is in `PlayerFlappingHippo`, which a flying creature like the chicken does not use).
+fn player_on_hippogriff(vm: &mut Vm<'_>) -> bool {
+    let Some(pc) = hp3_world::world(vm).player else { return false };
+    vm.state_of(pc).is_some_and(|st| vm.db.names.get(vm.db.get(st).name).starts_with("PlayerFlappingHippo"))
 }
 
 /// Whether the player is in a cutscene: something other than the player's own controller holds the pawn (a cutscene's
@@ -512,9 +521,24 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             platform::set_in_menu(menu);
             sdl.mouse().set_relative_mouse_mode(&window, !menu);
         }
+        // The QUIDDITCH button is on the front-end menu only, while no match runs and no debug list is open.
+        let quid_button = in_menu && !levels.open && !cheats.open && hp3_world::world(&mut vm).quidditch.is_none() && {
+            let front = hp3_world::quidditch::menu::front_end_map(&mut vm);
+            front.eq_ignore_ascii_case(&current_map)
+        };
         for event in events.poll_iter() {
             match event {
                 Event::Quit { .. } => break 'main,
+                Event::MouseButtonDown { mouse_btn: MouseButton::Left, x, y, .. } if quid_button && {
+                    let (ww, _) = window.size();
+                    let scale = width as f32 / ww.max(1) as f32;
+                    quidbutton::hit(x * scale, y * scale, width, height)
+                } => commands::push("quidditch"),
+                Event::MouseButtonUp { mouse_btn: MouseButton::Left, x, y, .. } if quid_button && {
+                    let (ww, _) = window.size();
+                    let scale = width as f32 / ww.max(1) as f32;
+                    quidbutton::hit(x * scale, y * scale, width, height)
+                } => {}
                 Event::KeyDown { scancode: Some(Scancode::F11), repeat: false, .. } if !cheats.open => levels.toggle(&current_map),
                 Event::KeyDown { scancode: Some(Scancode::F12), repeat: false, .. } if !levels.open => cheats.toggle(),
                 // F7: gamma, brightness and contrast back to the defaults (also while a menu is open).
@@ -714,7 +738,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         // level, where no match is running.
         if hp3_world::world(&mut vm).quidditch.is_some() {
             if let Some(t) = broom::take() {
-                hp3_world::quidditch::phone::feed_touch(&mut vm, t.stick, t.boost_tap, t.brake);
+                hp3_world::quidditch::phone::feed_touch(&mut vm, t.stick, t.reach_tap);
             }
             hp3_world::quidditch::phone::feed_frame_ms(&mut vm, avg_frame_ms);
         }
@@ -723,6 +747,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             platform::set_cutscene(player_in_cutscene(&mut vm, in_menu));
             platform::set_creature(player_controls_creature(&mut vm));
             FLYING.store(player_flying(&mut vm), std::sync::atomic::Ordering::Relaxed);
+            platform::set_flight(player_on_hippogriff(&mut vm));
             CREATURE.store(player_is_creature(&mut vm), std::sync::atomic::Ordering::Relaxed);
         }
         // The window's surface is gone (the app is in the background): nothing is drawn until it is back.
@@ -911,6 +936,10 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         let particle_draw = particle_renderer.prepare(&renderer, &particle_quads, &particle_images);
         stages.push(("particle_upload", frame_start.elapsed().as_secs_f32() * 1000.0));
         renderer.animate_scene(&gpu_scene, hp3_world::world(&mut vm).frame as f32 / 60.0);
+        let fluids = renderer.fluid_actors(&gpu_scene);
+        if !fluids.is_empty() {
+            renderer.move_fluids(&gpu_scene, &hp3_engine::fluid_places(&mut vm, &fluids));
+        }
         // The off-screen image to draw into: waits only if the display is two frames behind.
         let slot = presenter.take();
         stages.push(("wait", frame_start.elapsed().as_secs_f32() * 1000.0));
@@ -931,6 +960,9 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         quads.extend(hp3_engine::screen_flash(&mut vm, width, height));
         quads.extend(levels.quads(width, height, &current_map));
         quads.extend(cheats.quads(width, height));
+        if quid_button {
+            quads.extend(quidbutton::quads(width, height));
+        }
         let images = |k: &hp3_assets::loader::ObjKey| hud_cache.image(&loader, k);
         let hud = overlay.draw(&renderer, &quads, &images, &view, width, height);
         stages.push(("hud", frame_start.elapsed().as_secs_f32() * 1000.0));

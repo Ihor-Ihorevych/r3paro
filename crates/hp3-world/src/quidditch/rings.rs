@@ -227,12 +227,16 @@ pub fn tick(vm: &mut Vm<'_>, m: &mut QuidditchMatch, dt: f32, events: &mut Vec<M
     m.rings.last_harry = Some(now);
     let t = m.rings.trail.tuning();
     // On the Snitch's path, not at the Snitch itself: see the note at the top of `trail`.
+    m.rings.trail.pause_drops(m.snitch.dodging());
     let got = m.rings.trail.step(m.snitch.path_pos(), m.snitch.travel_dir(), prev, now, dt);
     for e in &got {
         match *e {
             TrailEvent::Through { index, streak } => {
                 let bonus = trail::bonus_for(&t, e);
                 m.snitch.bonus_progress(bonus);
+                // The ring is what charges the broom: all of Harry's speed above the base comes from here.
+                m.momentum.on_ring(streak);
+                m.charge_glow = 1.0;
                 let ready = streak >= t.catch_rings;
                 events.push(MatchEvent::Rings { streak, ready });
                 let mut state = m.rings.rng;

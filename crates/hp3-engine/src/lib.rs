@@ -163,6 +163,21 @@ fn texture_key(vm: &Vm<'_>, loader: &Loader<'_>, material: ObjId) -> Option<ObjK
     Some(loader::key(&tp, ti))
 }
 
+/// Where each of the given water surfaces (`FluidSurfaceInfo` actors, from `GpuRenderer::fluid_actors`) is now: its id and
+/// location, for `GpuRenderer::move_fluids`. The surfaces
+/// are baked into the scene when the level loads, and a mover may carry one away (the courtyard fountain's level is lowered by an
+/// invisible mover its water rides on).
+pub fn fluid_places(vm: &mut Vm<'_>, actors: &[u32]) -> Vec<(u32, [f32; 3])> {
+    let mut out = Vec::new();
+    for &a in actors {
+        let id = hp3_script::ObjId(a);
+        if !vm.db.objects.get(id).deleted {
+            out.push((a, hp3_world::physics::vec(&hp3_world::get(vm, id, "Location")).to_array()));
+        }
+    }
+    out
+}
+
 /// Everything the scene builder takes from the running world: lighting (unless `lit` is false) and the
 /// layers of each terrain.
 pub fn map_inputs(vm: &mut Vm<'_>, loader: &Loader<'_>, map: &Package, lit: bool) -> MapInputs {
@@ -188,6 +203,7 @@ pub fn map_inputs(vm: &mut Vm<'_>, loader: &Loader<'_>, map: &Package, lit: bool
                 _ => 1.0,
             };
             out.fluids.push(FluidSurface {
+                actor: a.0 as u32,
                 texture,
                 at: at.to_array(),
                 yaw,
@@ -426,6 +442,64 @@ struct Skinned {
     last: Option<(Option<usize>, u32, u64)>,
 }
 
+/// An actor's own copy of a vertex-animated mesh (the animals Sirius, Pettigrew, Lupin and McGonagall turn into), re-posed from the
+/// animation frames when its animation moves.
+struct VertexAnimated {
+    mesh: ObjId,
+    skins: Vec<Option<ObjId>>,
+    gpu: Rc<GpuMesh>,
+    geom: MeshGeom,
+    /// The (sequence, frame) last written, to skip unchanged poses.
+    last: Option<(Option<usize>, u32)>,
+    /// The video the skin is, when it is one (the animals' fur changes as they turn).
+    movie: Option<MovieSkin>,
+}
+
+/// A skin that is a Bink video: its decoder, the texture the draws sample, and the video frame shown now.
+struct MovieSkin {
+    video: hp3_movie::BinkVideo,
+    texture: hp3_render::gpu::DynamicTexture,
+    shown: Option<u32>,
+}
+
+/// A video that plays on its own, looping, on every mesh that uses its `MovieTexture` (the newspaper's photograph).
+struct MoviePlayer {
+    video: hp3_movie::BinkVideo,
+    texture: hp3_render::gpu::DynamicTexture,
+    shown: Option<u32>,
+}
+
+/// The video a skin plays: the `MovieFilename` of the `MovieTexture` the skin material resolves to, opened from the install's
+/// `Movies` folder. `None` for any other skin, or when the file is not there.
+fn open_skin_video(vm: &Vm<'_>, loader: &Loader<'_>, skin: ObjId) -> Option<hp3_movie::BinkVideo> {
+    let (sp, si) = export_of(vm, skin)?;
+    let (tp, ti) = loader.base_texture(&sp, ObjRef::from_export(si))?;
+    open_texture_video(loader, &tp, ti)
+}
+
+/// The video of a `MovieTexture` export (`None` for another kind of texture, or when its file is missing).
+fn open_texture_video(loader: &Loader<'_>, tp: &Rc<Package>, ti: usize) -> Option<hp3_movie::BinkVideo> {
+    // Some texture keys are not export numbers (a shader's combined picture has one of its own).
+    if ti >= tp.exports.len() || !tp.export_class_name(ti).eq_ignore_ascii_case("MovieTexture") {
+        return None;
+    }
+    let name = loader.with_tags(tp, ti, |tags, _| {
+        let t = hp3_package::props::find(tp, tags, "MovieFilename", 0)?;
+        // A string property: a compact-index length, then that many characters with the closing zero.
+        let n = (*t.data.first()? & 0x3F) as usize;
+        Some(String::from_utf8_lossy(t.data.get(1..1 + n)?).trim_end_matches('\0').to_string())
+    })??;
+    let file = name.rsplit(['\\', '/']).next().unwrap_or(&name).to_string();
+    // The install's `Movies` folder, or the one `HP3_MOVIES` names (a test folder that lacks the videos).
+    let mut dirs = vec![loader.set.root().join("Movies"), loader.set.root().join("movies")];
+    if let Some(d) = std::env::var_os("HP3_MOVIES") {
+        dirs.insert(0, d.into());
+    }
+    let path = dirs.iter().map(|d| d.join(&file)).find(|p| p.exists())?;
+    let data = std::fs::read(path).ok()?;
+    hp3_movie::BinkVideo::new(data).ok()
+}
+
 /// Uploaded meshes, keyed by mesh and skins; animated actors' own skinned copies.
 #[derive(Default)]
 pub struct MeshCache {
@@ -433,6 +507,9 @@ pub struct MeshCache {
     /// The same by object ids, found without building the keys above (every drawn static mesh asks every frame).
     by_obj: HashMap<ObjId, Vec<(Vec<Option<ObjId>>, Option<Rc<GpuMesh>>)>>,
     skinned: HashMap<ObjId, Skinned>,
+    vertex_animated: HashMap<ObjId, VertexAnimated>,
+    /// The videos that play on their own, by the `MovieTexture` they are.
+    movies: HashMap<ObjKey, MoviePlayer>,
     skeletons: HashMap<ObjKey, Rc<hp3_anim::Skeleton>>,
     /// What the actor lighting remembers between frames.
     light: actor_light::LightCache,
@@ -521,6 +598,7 @@ impl MeshCache {
                 .or_insert_with(|| Rc::new(hp3_anim::Skeleton::from_mesh(m, &mp)))
                 .clone();
             let geom = meshes::build(loader, &mp, mi, &skin_refs(vm, &mp, skins))?;
+            self.prepare_movies(loader, r, dynamic, &geom);
             let images = |k: &ObjKey| loader.image(&loader.set.get(&k.0).ok()?, k.1);
             let gpu = Rc::new(dynamic.upload(r, &geom, &images));
             self.uploads += 1;
@@ -591,6 +669,103 @@ impl MeshCache {
         Some(s.gpu.clone())
     }
 
+    /// Before a mesh is uploaded: each of its textures that is a `MovieTexture` with a video in the install gets a player, and its
+    /// picture is a texture the player keeps rewriting, for this mesh and every other that uses it.
+    fn prepare_movies(&mut self, loader: &Loader<'_>, r: &Renderer, dynamic: &Dynamic, geom: &MeshGeom) {
+        for key in geom.batches.iter().filter_map(|b| b.texture.as_ref()) {
+            if self.movies.contains_key(key) || dynamic.has_texture(key) {
+                continue;
+            }
+            let Ok(tp) = loader.set.get(&key.0) else { continue };
+            let Some(mut video) = open_texture_video(loader, &tp, key.1) else { continue };
+            let (w, h) = (video.width, video.height);
+            let Some(rgba) = video.frame_rgba(0).map(|f| f.to_vec()) else { continue };
+            let texture = r.dynamic_texture(w, h, &rgba);
+            dynamic.use_texture_view(key.clone(), texture.view.clone());
+            self.movies.insert(key.clone(), MoviePlayer { video, texture, shown: Some(0) });
+        }
+    }
+
+    /// Moves the playing videos to the frame `seconds` of level time puts them at (they loop).
+    pub fn advance_movies(&mut self, r: &Renderer, seconds: f32) {
+        for p in self.movies.values_mut() {
+            let frame = ((seconds * p.video.fps) as u32) % p.video.frames.max(1);
+            if p.shown != Some(frame)
+                && let Some(rgba) = p.video.frame_rgba(frame)
+            {
+                r.write_dynamic_texture(&p.texture, rgba);
+                p.shown = Some(frame);
+            }
+        }
+    }
+
+    /// A vertex-animated mesh posed from the frames of the actor's animation channel 0; `None` for other meshes.
+    #[allow(clippy::too_many_arguments)]
+    fn vertex_posed(
+        &mut self,
+        vm: &mut Vm<'_>,
+        loader: &Loader<'_>,
+        r: &Renderer,
+        dynamic: &Dynamic,
+        actor: ObjId,
+        mesh: ObjId,
+        skins: &[Option<ObjId>],
+    ) -> Option<Rc<GpuMesh>> {
+        let (mp, mi) = export_of(vm, mesh)?;
+        let asset = loader.asset(&mp, mi)?;
+        let hp3_assets::Asset::VertMesh(m) = &*asset else { return None };
+        if self.vertex_animated.get(&actor).is_none_or(|s| s.mesh != mesh || s.skins != skins) {
+            let geom = meshes::build(loader, &mp, mi, &skin_refs(vm, &mp, skins))?;
+            let images = |k: &ObjKey| loader.image(&loader.set.get(&k.0).ok()?, k.1);
+            // A skin that is a video: its first frame is the texture until the animation moves it on.
+            let mut movie = skins.first().copied().flatten().and_then(|s| open_skin_video(vm, loader, s)).and_then(|mut video| {
+                let (w, h) = (video.width, video.height);
+                let rgba = video.frame_rgba(0)?.to_vec();
+                Some(MovieSkin { texture: r.dynamic_texture(w, h, &rgba), video, shown: Some(0) })
+            });
+            let gpu = Rc::new(dynamic.upload_with_movie(r, &geom, &images, movie.as_ref().map(|m| &m.texture.view)));
+            self.uploads += 1;
+            if std::env::var_os("HP3_MESH_DEBUG").is_some() {
+                let paths: Vec<Option<String>> = skins.iter().map(|s| s.map(|s| hp3_script::natives::object_path(vm, s))).collect();
+                eprintln!(
+                    "vertex mesh of {actor:?}: skins {paths:?}, batches with a texture {:?}, video {}",
+                    geom.batches.iter().map(|b| b.texture.is_some()).collect::<Vec<_>>(),
+                    movie.as_mut().map_or("none".to_string(), |m| format!("{}x{} {} frames", m.video.width, m.video.height, m.video.frames))
+                );
+            }
+            self.vertex_animated.insert(actor, VertexAnimated { mesh, skins: skins.to_vec(), gpu, geom, last: None, movie });
+        }
+        let (seq, frame) = hp3_world::world(vm).anim.actors.get(&actor).and_then(|a| a.channels.first()).map(|c| (c.sequence, c.frame)).unwrap_or((None, 0.0));
+        let key = (seq, frame.to_bits());
+        let s = self.vertex_animated.get_mut(&actor)?;
+        // The video frame that goes with the animation's: the same share of the way through.
+        if let Some(movie) = &mut s.movie {
+            let progress = match seq.and_then(|si| m.sequences.get(si)) {
+                Some(q) => (frame / q.num_frames.max(1) as f32).clamp(0.0, 1.0),
+                None => 0.0,
+            };
+            let want = (progress * (movie.video.frames - 1) as f32).round() as u32;
+            if movie.shown != Some(want)
+                && let Some(rgba) = movie.video.frame_rgba(want)
+            {
+                r.write_dynamic_texture(&movie.texture, rgba);
+                movie.shown = Some(want);
+            }
+        }
+        if s.last != Some(key) {
+            let points: Vec<Vec3> = match seq {
+                Some(si) => m.sequence_points(si, frame),
+                None => m.frame_points(0),
+            }
+            .into_iter()
+            .map(Vec3::from)
+            .collect();
+            dynamic.write_points(r, &s.gpu, &s.geom, &points);
+            s.last = Some(key);
+        }
+        Some(s.gpu.clone())
+    }
+
     fn get(
         &mut self,
         vm: &Vm<'_>,
@@ -633,6 +808,7 @@ impl MeshCache {
             })
             .collect();
         let gpu = meshes::build(loader, &mp, mi, &skin_refs).map(|geom| {
+            self.prepare_movies(loader, r, dynamic, &geom);
             let images = |k: &ObjKey| {
                 let p = loader.set.get(&k.0).ok()?;
                 loader.image(&p, k.1)
@@ -710,6 +886,7 @@ pub fn actor_instances(
     blend: f32,
 ) -> Vec<(Rc<GpuMesh>, Mat4, ActorLight)> {
     let t_total = std::time::Instant::now();
+    cache.advance_movies(r, world(vm).frame as f32 / 60.0);
     let actors = world(vm).actors.clone();
     let mut out = Vec::new();
     let mut shadows: Vec<hp3_render::dynamic::BlobShadow> = Vec::new();
@@ -820,7 +997,11 @@ pub fn actor_instances(
             _ => Vec::new(),
         };
         let t0 = std::time::Instant::now();
-        let skinned = if draw_type == DT_MESH { cache.skinned(vm, loader, r, dynamic, a, mesh, &skins) } else { None };
+        let skinned = if draw_type == DT_MESH {
+            cache.skinned(vm, loader, r, dynamic, a, mesh, &skins).or_else(|| cache.vertex_posed(vm, loader, r, dynamic, a, mesh, &skins))
+        } else {
+            None
+        };
         let t1 = std::time::Instant::now();
         let was_skinned = skinned.is_some();
         let found = skinned.or_else(|| cache.get(vm, loader, r, dynamic, mesh, &skins));

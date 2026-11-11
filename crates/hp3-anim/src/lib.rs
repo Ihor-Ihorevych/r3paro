@@ -118,6 +118,16 @@ impl AnimSet {
         AnimSet { bone_names, sequences, by_name, anim }
     }
 
+    /// The set of a vertex-animated mesh (Sirius as a dog, McGonagall as a cat): its sequences (name, frames, frames a second), with
+    /// no bones to move. A sequence's place among the mesh's frames is read from the mesh by the same index.
+    pub fn from_vertex_sequences(list: &[(String, i32, f32)]) -> AnimSet {
+        let sequences: Vec<Sequence> =
+            list.iter().enumerate().map(|(i, (name, frames, rate))| Sequence { name: name.to_ascii_lowercase(), frames: (*frames).max(1), rate: *rate, motion: i }).collect();
+        let by_name = sequences.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
+        let anim = MeshAnimation { internal_version: 0, bones: Vec::new(), motions: Vec::new(), sequences: Vec::new() };
+        AnimSet { bone_names: Vec::new(), sequences, by_name, anim }
+    }
+
     pub fn find(&self, name: &str) -> Option<usize> {
         self.by_name.get(&name.to_ascii_lowercase()).copied()
     }

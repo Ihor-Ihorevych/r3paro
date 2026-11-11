@@ -1005,17 +1005,28 @@ impl<'s> Vm<'s> {
             Expr::ReturnNothing => Flow::Return,
             Expr::Stop => Flow::Stop,
             Expr::Switch(v) => {
-                frame.switch_value = Some(self.eval(v, frame, None)?);
-                Flow::Next
-            }
-            Expr::Case(next, value) => match value {
-                None => Flow::Next,
-                Some(v) => {
-                    let v = self.eval(v, frame, None)?;
-                    let cur = frame.switch_value.clone().unwrap_or_default();
-                    if values_equal(&cur, &v) { Flow::Next } else { Flow::Jump(*next) }
+                // As the original's `execSwitch`: the cases that follow are tried here, in order, and execution goes to the body of the
+                // first that matches (or after the final marker, for the default or no match). A `Case` met later by running on from the
+                // body above it is only skipped, so a case without `break` falls through into the next one's body.
+                let here = self.current_pc;
+                let cur = self.eval(v, frame, None)?;
+                frame.switch_value = Some(cur.clone());
+                let mut at = here + 1;
+                loop {
+                    match code.statements.get(at) {
+                        Some(Expr::Case(next, Some(value))) => {
+                            let value = self.eval(value, frame, None)?;
+                            if values_equal(&cur, &value) {
+                                break Flow::Jump(at + 1);
+                            }
+                            at = *next;
+                        }
+                        Some(Expr::Case(_, None)) => break Flow::Jump(at + 1),
+                        _ => break Flow::Next,
+                    }
                 }
-            },
+            }
+            Expr::Case(..) => Flow::Next,
             Expr::LabelTable(_) | Expr::Nothing | Expr::EndParms => Flow::Next,
             Expr::Assert(line, cond) => {
                 if !self.eval(cond, frame, None)?.as_bool() {
@@ -1117,7 +1128,9 @@ impl<'s> Vm<'s> {
     /// Sets the object variables an iterator filled to none.
     fn clear_iter_objects(&mut self, places: &[(usize, Place)], values: &[Value], frame: &mut Frame) {
         for (i, p) in places {
-            if matches!(values.get(*i), Some(Value::Object(_))) {
+            // Argument 0 of every actor iterator is the class to look for, an input: clearing it wiped a class variable such as
+            // `CompanionCombatManager.DefaultEnemyClassType`, after which the managers could spawn nothing (no Poxies on GroundsHub).
+            if *i != 0 && matches!(values.get(*i), Some(Value::Object(_))) {
                 self.write(p, frame, Value::Object(None));
             }
         }

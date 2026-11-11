@@ -48,6 +48,28 @@ pub fn run(vm: &mut Vm<'_>, command: &str, level: &mut Option<String>) {
             eprintln!("settings: gamma, brightness and contrast are back to the defaults");
         }
         "dumpnear" => dump_near(vm, arg.and_then(|a| a.parse().ok()).unwrap_or(400.0)),
+        // `trigger <event>` (debugging): fires an event as a script's TriggerEvent would, from the player's controller.
+        "trigger" => match (hp3_world::world(vm).player, arg) {
+            (Some(pc), Some(event)) => {
+                let name = vm.db.names.intern(event);
+                hp3_world::fire(vm, pc, "TriggerEvent", &mut [Value::Name(name), Value::Object(Some(pc)), Value::Object(None)]);
+                eprintln!("trigger: {event}");
+            }
+            _ => eprintln!("trigger: needs an event name and a player controller"),
+        },
+        // `anim <actor name> <sequence>` (debugging): plays a sequence on the actor, as `PlayAnim` does (see HP3_ANIM_TRACE).
+        "anim" => {
+            let (Some(who), Some(seq)) = (arg, words.next()) else { return eprintln!("anim: needs an actor name and a sequence") };
+            let found = hp3_world::world(vm).actors.clone().into_iter().find(|&a| hp3_script::natives::object_path(vm, a).ends_with(&format!(".{who}")));
+            match found {
+                Some(a) => {
+                    let name = vm.db.names.intern(seq);
+                    hp3_world::fire(vm, a, "PlayAnim", &mut [Value::Name(name), Value::Float(1.0), Value::Float(0.0)]);
+                    eprintln!("anim: {who} {seq}");
+                }
+                None => eprintln!("anim: no actor named {who}"),
+            }
+        }
         "level" => *level = arg.map(str::to_string),
         "cheat" => cheat(vm, arg.unwrap_or("")),
         "quidditch" => quidditch(vm, arg.unwrap_or(""), level),

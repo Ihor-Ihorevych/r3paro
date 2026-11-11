@@ -105,6 +105,9 @@ pub struct Presentation {
     white: Option<ObjId>,
     /// Whether `Started` has been reported to the commentary.
     kicked_off: bool,
+    /// The HUD's SVG art for the current screen size, and the size it failed to be made at (not retried).
+    art: Option<super::hud_art::HudArt>,
+    art_failed: Option<i32>,
 }
 
 /// SplitMix64, the same shape as `rng::Rng`: the commentary's own stream, so picking a line never moves the
@@ -338,7 +341,7 @@ pub fn tick(vm: &mut Vm<'_>, m: &mut QuidditchMatch, dt: f32, events: &[MatchEve
     }
     // The broom's loop rides the speed, as HP1's does.
     if let Some(h) = m.harry.filter(|&h| !vm.db.objects.get(h).deleted) {
-        let k = (m.broom.vel.length() / m.tuning.boost_speed.max(1.0)).clamp(0.0, 1.0);
+        let k = (m.broom.vel.length() / m.momentum.tuning().max_speed.max(1.0)).clamp(0.0, 1.0);
         let lerp = |(a, b): (f32, f32)| a + (b - a) * k;
         crate::set(vm, h, "SoundVolume", Value::Byte(lerp(BROOM_VOLUME).clamp(0.0, 255.0) as u8));
         crate::set(vm, h, "SoundPitch", Value::Byte((lerp(BROOM_PITCH) * 64.0).clamp(1.0, 255.0) as u8));
@@ -457,11 +460,15 @@ pub fn hud_input(m: &QuidditchMatch) -> HudInput {
         score_home: m.rules.score().home,
         score_away: m.rules.score().away,
         speed: m.broom.vel.length(),
-        top_speed: m.tuning.boost_speed,
+        top_speed: m.momentum.tuning().max_speed,
         bumps: m.bludgers.bumps(),
         bumps_to_lose: m.bludgers.bumps_to_lose(),
         ring_streak: m.rings.trail.streak(),
         rings_needed: m.rings.trail.tuning().catch_rings,
+        charge: m.momentum.charge(),
+        charge_glow: m.charge_glow,
+        window_left: m.snitch.catch_left(),
+        boost: m.momentum.boost_state(),
     }
 }
 
@@ -480,16 +487,207 @@ fn bar(vm: &mut Vm<'_>, white: Option<ObjId>, r: [f32; 4], color: [u8; 4]) {
     canvas::tile(vm, white, r, [0.0, 0.0, -1.0, -1.0], color, canvas::STY_ALPHA);
 }
 
+/// One picture of the HUD's art, `x y w h` in screen pixels, at `alpha` (0..1).
+fn pic(vm: &mut Vm<'_>, tex: ObjId, r: [f32; 4], alpha: f32) {
+    let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+    canvas::tile(vm, Some(tex), r, [0.0, 0.0, -1.0, -1.0], [255, 255, 255, a], canvas::STY_ALPHA);
+}
+
+/// Text centred on `cx`, its top at `y`.
+fn centered(vm: &mut Vm<'_>, font: ObjId, line: &str, cx: f32, y: f32, color: [u8; 4]) {
+    let tw = canvas::measure(vm, font, line).0;
+    canvas::text(vm, font, line, cx - tw * 0.5, y, cx + tw + 400.0, color);
+}
+
+/// The HUD drawn from the SVG art (`hud_art`): the catch dial with the Snitch in it, the wings that open with
+/// the broom's charge, the run of rings, the tries, the Bludger brooms, the score shields, the catch prompt,
+/// the hints and the result banner. Laid out against a 720-high screen and scaled, like the plain HUD.
+#[allow(clippy::too_many_arguments)]
+fn draw_art(
+    vm: &mut Vm<'_>,
+    art: &super::hud_art::HudArt,
+    items: &[HudItem],
+    input: &HudInput,
+    font: Option<ObjId>,
+    opponent: &str,
+    subtitle: Option<String>,
+    result: Option<String>,
+    (w, h): (f32, f32),
+    frames: u64,
+    touch: bool,
+    caught: bool,
+) {
+    use super::hud_art::{ARC_FRAMES, DIAL, EMBLEM, FEATHERS, HAND, ICON, KEYCAP, PIP, RIBBON, SHIELD, WING, BROOM};
+    let s = (h / 720.0).clamp(0.5, 4.0);
+    let t = frames as f32 / 60.0;
+    let (gold, white_c, dim) = ([255, 214, 110, 255], [255, 255, 255, 255], [215, 205, 180, 255]);
+    let ended = matches!(input.phase, super::rules::MatchPhase::Ended(_));
+    let cx = w * 0.5;
+    // The dial and what hangs on it live in the bottom left corner, at three quarters of their old size.
+    let ds = s * 0.75;
+    let d = DIAL * ds;
+    let (dcx, dcy) = (24.0 * s + d * 0.5, h - 24.0 * s - d * 0.5 - 10.0 * ds);
+
+    // The speed wings, either side of the dial: dim, then lit up to the charge, the feather in between fading
+    // in, with a little breath of light for a ring just taken.
+    let charge = value_of(items, HudKind::Charge).unwrap_or(0.0);
+    let glow = value_of(items, HudKind::ChargeGlow).unwrap_or(0.0);
+    let lit = charge * FEATHERS as f32;
+    let (full, part) = (lit.floor() as usize, lit.fract());
+    // At the top of the screen, in the middle, small (0.6) and a little see-through (0.8).
+    const WING_SCALE: f32 = 0.6;
+    const WING_ALPHA: f32 = 0.8;
+    let (ww, wh) = (WING.0 * s * WING_SCALE, WING.1 * s * WING_SCALE);
+    let wing_y = 14.0 * s;
+    let gap = 44.0 * s;
+    // Between the wings, the boost: a gold ring when it is ready (breathing while it runs), a dark one that
+    // fills in while it cools down.
+    let boost = value_of(items, HudKind::Boost).unwrap_or(1.0);
+    let bs = 28.0 * s;
+    let (bx, by) = (cx - bs * 0.5, wing_y + (wh - bs) * 0.5);
+    if boost >= 2.0 {
+        let k = 1.0 + 0.15 * (t * 18.0).sin().abs();
+        pic(vm, art.hoop_on, [cx - bs * k * 0.5, by - bs * (k - 1.0) * 0.5, bs * k, bs * k], 1.0);
+    } else if boost >= 1.0 {
+        pic(vm, art.hoop_on, [bx, by, bs, bs], WING_ALPHA);
+    } else {
+        pic(vm, art.hoop_off, [bx, by, bs, bs], WING_ALPHA);
+        pic(vm, art.hoop_on, [bx, by, bs, bs], boost * 0.6);
+    }
+    for (side, set) in [(0, &art.wing_l), (1, &art.wing_r)] {
+        let x = if side == 0 { cx - gap * 0.5 - ww } else { cx + gap * 0.5 };
+        pic(vm, set[0], [x, wing_y, ww, wh], WING_ALPHA);
+        if full > 0 {
+            pic(vm, set[full.min(FEATHERS)], [x, wing_y, ww, wh], WING_ALPHA);
+        }
+        if full < FEATHERS && part > 0.0 {
+            pic(vm, set[full + 1], [x, wing_y, ww, wh], part * WING_ALPHA);
+        }
+        if glow > 0.0 && full > 0 {
+            // The lit wing drawn again, a hair bigger and thin, is the flash.
+            let grow = 3.0 * s * glow;
+            pic(vm, set[full.min(FEATHERS)], [x - grow, wing_y - grow, ww + 2.0 * grow, wh + 2.0 * grow], glow * 0.3);
+        }
+    }
+
+    // The dial: backing, the catch bar's arc, the Snitch (which beats when the catch is on).
+    let (dx, dy) = (dcx - d * 0.5, dcy - d * 0.5);
+    pic(vm, art.dial, [dx, dy, d, d], 1.0);
+    let progress = value_of(items, HudKind::SnitchProgress).unwrap_or(0.0);
+    let frame = (progress * ARC_FRAMES as f32).round() as usize;
+    pic(vm, art.arc[frame.min(ARC_FRAMES)], [dx, dy, d, d], 1.0);
+    let window = value_of(items, HudKind::CatchWindow);
+    let beat = if window.is_some() { 1.0 + 0.12 * (t * 14.0).sin().abs() } else { 1.0 };
+    let (ew, eh) = (EMBLEM.0 * ds * beat, EMBLEM.1 * ds * beat);
+    pic(vm, art.emblem, [dcx - ew * 0.5, dcy - eh * 0.5, ew, eh], if progress > 0.0 || window.is_some() { 1.0 } else { 0.7 });
+
+    // (No ring-run indicator on screen: the owner's word. The run still decides when the catch opens.)
+    // One little Snitch under the dial for each catch left.
+    let tries = value_of(items, HudKind::CatchPips).unwrap_or(0.0) as i32;
+    let pw = PIP.0 * ds;
+    let x0 = dcx - (tries as f32 * (pw + 6.0 * ds) - 6.0 * ds) * 0.5;
+    for i in 0..tries.max(0) {
+        pic(vm, art.pip, [x0 + i as f32 * (pw + 6.0 * ds), dcy + d * 0.5 - 6.0 * ds, pw, PIP.1 * ds], 1.0);
+    }
+
+    // Top left: the two shields with the score, and the brooms the Bludgers have left him.
+    let (sw, sh) = (SHIELD.0 * s, SHIELD.1 * s);
+    let home = value_of(items, HudKind::ScoreHome).unwrap_or(0.0) as i32;
+    let away = value_of(items, HudKind::ScoreAway).unwrap_or(0.0) as i32;
+    pic(vm, art.shield_home, [24.0 * s, 18.0 * s, sw, sh], 1.0);
+    pic(vm, art.shield_away, [24.0 * s + sw + 10.0 * s, 18.0 * s, sw, sh], 1.0);
+    let left = ((value_of(items, HudKind::Control).unwrap_or(1.0)) * input.bumps_to_lose.max(1) as f32).round() as u32;
+    for i in 0..input.bumps_to_lose.clamp(1, 6) {
+        let tex = if i < left { art.broom_ok } else { art.broom_lost };
+        pic(vm, tex, [24.0 * s + i as f32 * (BROOM.0 + 4.0) * s, 18.0 * s + sh + 10.0 * s, BROOM.0 * s, BROOM.1 * s], 1.0);
+    }
+
+    let Some(f) = font else { return };
+    centered(vm, f, &home.to_string(), 24.0 * s + sw * 0.5, 18.0 * s + sh * 0.27, white_c);
+    centered(vm, f, &away.to_string(), 24.0 * s + sw * 1.5 + 10.0 * s, 18.0 * s + sh * 0.27, white_c);
+    canvas::text(vm, f, &format!("Gryffindor - {opponent}"), 24.0 * s + 2.0 * sw + 24.0 * s, 18.0 * s + sh * 0.3, w, dim);
+
+    // The catch prompt, while the window is open: a hand, pulsing, and the key (or the button on a phone).
+    if let Some(left) = window {
+        let pulse = 0.65 + 0.35 * (t * 10.0).sin().abs();
+        let hs = HAND * s * (1.0 + 0.1 * pulse);
+        let y = h * 0.52;
+        pic(vm, art.hand, [cx - hs - 14.0 * s, y - hs * 0.5, hs, hs], pulse);
+        let (kw, kh) = (KEYCAP.0 * s, KEYCAP.1 * s);
+        pic(vm, art.keycap, [cx + 6.0 * s, y - kh * 0.5, kw, kh], 1.0);
+        centered(vm, f, if touch { "JUMP" } else { "SPACE" }, cx + 6.0 * s + kw * 0.5, y - 11.0 * s, gold);        centered(vm, f, &format!("{left:.1}"), cx, y + hs * 0.5 + 4.0 * s, dim);
+    }
+
+    // The first seconds of a match: what the controls are, as pictures with a few words.
+    if !ended && t < 11.0 {
+        let a = ((11.0 - t) / 2.0).clamp(0.0, 1.0);
+        let c = |base: [u8; 4]| [base[0], base[1], base[2], (base[3] as f32 * a) as u8];
+        let rows: [(ObjId, &str); 3] = [
+            (art.fly, if touch { "STICK: FLY" } else { "MOUSE / ARROWS: FLY" }),
+            (art.hoop_on, "FLY THROUGH RINGS TO SPEED UP"),
+            (art.hand, if touch { "JUMP: BOOST + CATCH" } else { "RIGHT CLICK / A: BOOST + CATCH" }),
+        ];
+        let is = ICON * s;
+        let mut y = 20.0 * s;
+        let x = w - 24.0 * s - 360.0 * s;
+        for (tex, label) in rows {
+            pic(vm, tex, [x, y, is, is], a);
+            canvas::text(vm, f, label, x + is + 10.0 * s, y + is * 0.28, w, c(white_c));
+            y += is + 6.0 * s;
+        }
+    }
+
+    if let Some(line) = subtitle {
+        centered(vm, f, &line, cx, h - 282.0 * s, gold);
+    }
+    if let Some(line) = result {
+        let won = value_of(items, HudKind::Result) == Some(1.0);
+        let rw = (RIBBON.0 * s).min(w * 0.86);
+        let rh = rw * RIBBON.1 / RIBBON.0;
+        let (rx, ry) = (cx - rw * 0.5, h * 0.42 - rh * 0.5);
+        pic(vm, if won { art.ribbon_win } else { art.ribbon_lose }, [rx, ry, rw, rh], 1.0);
+        centered(vm, f, &line, cx, ry + rh * 0.4, if won { gold } else { white_c });
+        if caught {
+            let (ew, eh) = (EMBLEM.0 * s * 1.3, EMBLEM.1 * s * 1.3);
+            pic(vm, art.emblem, [cx - ew * 0.5, ry - eh - 4.0 * s, ew, eh], 1.0);
+        }
+    }
+}
+
 /// Draws the match's HUD over the game's own, in screen pixels. Called from `canvas::render`; a no-op on every
 /// level that is not playing a match, which is every level but a Quidditch one.
 pub fn draw_hud(vm: &mut Vm<'_>, width: u32, height: u32) {
     let Some(m) = crate::world(vm).quidditch.as_ref() else { return };
+    // The SVG art is made for this screen size the first time it is wanted (and again if the size changes).
+    let bucket = super::hud_art::bucket_for(height as f32);
+    if m.show.art.as_ref().map(|a| a.bucket) != Some(bucket) && m.show.art_failed != Some(bucket) {
+        let opponent = m.opponent.clone();
+        let art = super::hud_art::HudArt::build(vm, bucket, &opponent);
+        if art.is_none() {
+            note(vm, format!("quidditch: the HUD's SVG art could not be made at size {bucket}, the plain HUD is used"));
+        }
+        if let Some(m) = crate::world(vm).quidditch.as_mut() {
+            m.show.art_failed = art.is_none().then_some(bucket);
+            m.show.art = art;
+        }
+    }
+    let Some(m) = crate::world(vm).quidditch.as_ref() else { return };
     let (input, opponent) = (hud_input(m), m.opponent.clone());
     let (font, white) = (m.show.font, m.show.white);
-    let subtitle = m.show.subtitle.as_ref().map(|(t, _)| t.clone());
+    // The commentator's line is not put on screen (the owner's word); it is still said and logged.
+    let subtitle: Option<String> = None;
     let items = hud::hud_items(&input);
-    let result = hud::result_line(&input, &opponent);
+    // No result banner or "won" text over the finish: the camera orbit is the whole of it (the owner's word).
+    // The line is still logged by `glue` through `result_of`.
+    let result: Option<String> = None;
     let (w, h) = (width as f32, height as f32);
+    if let Some(art) = m.show.art.clone().filter(|a| a.bucket == bucket) {
+        let touch = cfg!(target_os = "android") || m.touch_seen;
+        let frames = m.frames;
+        let caught = m.caught;
+        draw_art(vm, &art, &items, &input, font, &opponent, subtitle, result, (w, h), frames, touch, caught);
+        return;
+    }
     // Everything is laid out against a 720-high screen and scaled, so the HUD keeps its share of any window.
     let s = (h / 720.0).clamp(0.5, 4.0);
     let gold = [255, 205, 70, 255];
@@ -506,10 +704,7 @@ pub fn draw_hud(vm: &mut Vm<'_>, width: u32, height: u32) {
         canvas::text(vm, f, "SNITCH", bx, by - 20.0 * s, bx + bw, white_c);
         // The run of the Snitch's flight rings, at the other end of the catch bar: without it the catch window
         // never opens, so it belongs where the player is already looking.
-        if let Some(line) = hud::ring_line(
-            value_of(&items, HudKind::RingStreak).unwrap_or(0.0) as u32,
-            value_of(&items, HudKind::RingsNeeded).unwrap_or(0.0) as u32,
-        ) {
+        if let Some(line) = None::<String> {
             let tw = canvas::measure(vm, f, &line).0;
             canvas::text(vm, f, &line, bx + bw - tw, by - 20.0 * s, bx + bw, gold);
         }

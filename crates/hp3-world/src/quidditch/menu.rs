@@ -26,7 +26,7 @@ const LEAGUE_FILE: &str = "League.txt";
 /// The front-end map, when the ini names none.
 const FRONT_END: &str = "HP_Preamble";
 /// How long the result line stays on screen before the player is taken back to the menu (ticks of 1/60 s).
-pub const LINGER_TICKS: u64 = 300;
+pub const LINGER_TICKS: u64 = 540;
 
 thread_local! {
     /// The match the front end asked for, waiting for the level that can play it. A thread local for the same

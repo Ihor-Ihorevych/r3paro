@@ -15,7 +15,7 @@
 use glam::Vec3;
 
 use super::arena::{self, ArenaBounds};
-use super::flight::{wrap_pi, BroomState, BroomTuning};
+use super::flight::{wrap_pi, BroomState};
 
 /// Where the camera is, where it looks (Unreal's (pitch, yaw, roll) in 65536ths of a turn), how wide its view
 /// is (horizontal degrees, already low-passed towards the speed's target) -- which is what `player_view`
@@ -79,7 +79,7 @@ const CUSHION: f32 = 5.0;
 /// rather than written down twice, and the opening is a smoothstep between them so it neither starts nor ends
 /// with a corner. On top of that the field of view is low-passed towards that target with `FOV_TAU`, so a
 /// boost switched on or off, or a brake, eases in and out instead of snapping.
-const FOV: f32 = 90.0;
+const FOV: f32 = 115.0; // 90, plus 25 at the owner's word
 const FOV_BOOST: f32 = 15.0;
 /// The time constant of that low pass (s): about a third of a second to most of the way.
 const FOV_TAU: f32 = 0.35;
@@ -87,8 +87,8 @@ const FOV_TAU: f32 = 0.35;
 /// Where the field of view wants to be at this speed (uu/s): `FOV` up to the cruise speed, `FOV + FOV_BOOST`
 /// at the boost speed, a smoothstep in between.
 fn fov_for(speed: f32) -> f32 {
-    let t = BroomTuning::default();
-    let (cruise, fast) = (t.speed, t.boost_speed.max(t.speed + 1.0));
+    let t = super::momentum::MomentumTuning::default();
+    let (cruise, fast) = (t.base_speed, t.max_speed.max(t.base_speed + 1.0));
     let x = if speed.is_finite() { ((speed - cruise) / (fast - cruise)).clamp(0.0, 1.0) } else { 0.0 };
     FOV + FOV_BOOST * (x * x * (3.0 - 2.0 * x))
 }
@@ -212,10 +212,82 @@ pub fn chase_camera(s: &BroomState, prev: &CamState, dt: f32) -> CamState {
     }
 }
 
+/// The catch orbit (the HP1/HP2 finish): the camera swings slowly round Harry. How fast (rad/s, about 18 s a
+/// turn), how far from him and how high over him it settles (uu), where on him it looks, and how long it
+/// takes to come out of the chase pose and into the orbit (s).
+pub const ORBIT_RATE: f32 = 0.35;
+const ORBIT_RADIUS: f32 = 340.0;
+const ORBIT_UP: f32 = 90.0;
+const ORBIT_AIM: f32 = 40.0;
+const ORBIT_EASE: f32 = 1.5;
+const ORBIT_TURN_EASE: f32 = 1.0;
+
+fn smooth01(x: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
+}
+
+/// The camera `t` seconds into the orbit round `center` (Harry), which began from the chase pose `from`.
+/// Everything eases in -- the angular speed from nothing, the radius and height from where the chase left
+/// them, the view from the chase's rotation -- so the orbit takes over from the chase without a cut.
+pub fn orbit_camera(center: Vec3, from: &CamState, t: f32) -> CamState {
+    let t = if t.is_finite() { t.max(0.0) } else { 0.0 };
+    let center = if center.is_finite() { center } else { from.pos };
+    let rel = from.pos - center;
+    let (r0, h0) = (rel.truncate().length().max(1.0), rel.z);
+    let a0 = rel.y.atan2(rel.x);
+    // The angle turned: the integral of a rate that eases in over `ORBIT_EASE`.
+    let u = (t / ORBIT_EASE).min(1.0);
+    let turned = ORBIT_RATE * (ORBIT_EASE * (u * u * u - u * u * u * u * 0.5) + (t - ORBIT_EASE).max(0.0));
+    let k = smooth01(t / ORBIT_EASE);
+    let radius = r0 + (ORBIT_RADIUS - r0) * k;
+    let up = h0 + (ORBIT_UP - h0) * k;
+    let a = a0 + turned;
+    let pos = arena::clamp_into(&volume(), center + Vec3::new(a.cos() * radius, a.sin() * radius, up));
+    let to = center + Vec3::Z * ORBIT_AIM - pos;
+    let (aim_yaw, aim_pitch) = (to.y.atan2(to.x), (to.z / to.length().max(1e-3)).clamp(-1.0, 1.0).asin());
+    // The view turns from the chase's own rotation to the aim.
+    let (was_yaw, was_pitch) = (wrap_pi(from.rot[1] as f32 / UU), wrap_pi(from.rot[0] as f32 / UU));
+    let b = smooth01(t / ORBIT_TURN_EASE);
+    let yaw = was_yaw + wrap_pi(aim_yaw - was_yaw) * b;
+    let pitch = was_pitch + (aim_pitch - was_pitch) * b;
+    let fov = if from.fov.is_finite() { from.fov + (FOV - from.fov) * (1.0 - (-t / FOV_TAU).exp()) } else { FOV };
+    CamState { pos, rot: rotator(pitch, yaw), fov, arm: from.arm }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::flight::{self, BroomInput, BroomTuning};
     use super::*;
+
+    #[test]
+    fn the_orbit_takes_over_without_a_cut_and_goes_slowly_round() {
+        let s = flying();
+        let chase = chase_camera(&s, &behind(&s), 1.0 / 60.0);
+        let first = orbit_camera(s.pos, &chase, 0.0);
+        assert!(first.pos.distance(chase.pos) < 1.0, "{:?} vs {:?}", first.pos, chase.pos);
+        let mut last = first;
+        let mut angle = 0.0f32;
+        let mut prev_a = (first.pos - s.pos).y.atan2((first.pos - s.pos).x);
+        for n in 1..=60 * 20 {
+            let c = orbit_camera(s.pos, &chase, n as f32 / 60.0);
+            assert!(c.pos.is_finite());
+            assert!(c.pos.distance(last.pos) < 14.0, "a jump of {} in one frame", c.pos.distance(last.pos));
+            let a = (c.pos - s.pos).y.atan2((c.pos - s.pos).x);
+            angle += wrap_pi(a - prev_a);
+            prev_a = a;
+            last = c;
+        }
+        // After 20 s it has turned at about the orbit rate (less the ease-in).
+        let want = ORBIT_RATE * (20.0 - 0.75);
+        assert!((angle - want).abs() < 0.15, "turned {angle}, wanted {want}");
+        // It has settled at its distance, looking at Harry.
+        assert!(((last.pos - s.pos).truncate().length() - ORBIT_RADIUS).abs() < 5.0);
+        let look = Vec3::new(cam_pitch(&last).cos() * cam_yaw(&last).cos(), cam_pitch(&last).cos() * cam_yaw(&last).sin(), cam_pitch(&last).sin());
+        assert!((s.pos + Vec3::Z * ORBIT_AIM - last.pos).normalize().dot(look) > 0.999);
+        // Rubbish in gives something usable.
+        assert!(orbit_camera(Vec3::splat(f32::NAN), &chase, f32::NAN).pos.is_finite());
+    }
 
     fn flying() -> BroomState {
         BroomState::new(Vec3::new(100.0, -200.0, 500.0), Vec3::ZERO, 0.4, 0.0)
@@ -355,7 +427,9 @@ mod tests {
     /// broom's own cruise and boost speeds, low-passed with `FOV_TAU`.
     #[test]
     fn fov_grows_with_speed_and_is_approached_gradually() {
-        let t = BroomTuning::default();
+        // The broom's cruise and top speed are the momentum's base and full-charge speeds now.
+        let m = crate::quidditch::momentum::MomentumTuning::default();
+        let t = BroomTuning { speed: m.base_speed, boost_speed: m.max_speed, ..BroomTuning::default() };
         let dt = 1.0 / 60.0;
         let at_speed = |v: f32| BroomState { vel: Vec3::new(v, 0.0, 0.0), ..flying() };
         // Monotonic in speed, from one and the same frame before.

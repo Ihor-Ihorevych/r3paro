@@ -321,6 +321,16 @@ impl Dynamic {
         Dynamic { pipeline, alpha_pipeline, additive_pipeline, model_layout, instances: RefCell::new((buffer, bind, 256)), images: RefCell::new(HashMap::new()), posed: RefCell::default(), shadow_pipeline, shadow_buffer, shadow_count: std::cell::Cell::new(0) }
     }
 
+    /// Makes `view` the texture every mesh uploaded from now on takes for `key` (a video's picture the caller keeps rewriting).
+    pub fn use_texture_view(&self, key: ObjKey, view: wgpu::TextureView) {
+        self.images.borrow_mut().insert(key, view);
+    }
+
+    /// Whether `key` already has a texture uploaded (or put there by `use_texture_view`).
+    pub fn has_texture(&self, key: &ObjKey) -> bool {
+        self.images.borrow().contains_key(key)
+    }
+
     /// The soft shadows to draw this frame (replaces last frame's).
     pub fn set_shadows(&self, r: &Renderer, shadows: &[BlobShadow]) {
         let n = shadows.len().min(SHADOW_CAPACITY as usize);
@@ -354,6 +364,12 @@ impl Dynamic {
 
     /// Uploads a mesh, sharing textures with earlier uploads.
     pub fn upload(&self, r: &Renderer, geom: &MeshGeom, images: &dyn Fn(&ObjKey) -> Option<std::rc::Rc<Image>>) -> GpuMesh {
+        self.upload_with_movie(r, geom, images, None)
+    }
+
+    /// Like `upload`; the sections whose skin is a video (`MeshBatch::placeholder`) sample `movie`, a texture the caller keeps
+    /// writing the video's frames into.
+    pub fn upload_with_movie(&self, r: &Renderer, geom: &MeshGeom, images: &dyn Fn(&ObjKey) -> Option<std::rc::Rc<Image>>, movie: Option<&wgpu::TextureView>) -> GpuMesh {
         let mut draws = Vec::new();
         for (bi, b) in geom.batches.iter().enumerate() {
             if b.indices.is_empty() {
@@ -373,7 +389,11 @@ impl Dynamic {
                     None => None,
                 }
             };
-            let view = view.unwrap_or_else(|| r.upload_view(1, 1, &[200, 200, 200, 255]));
+            let grey = if b.placeholder { 95 } else { 200 };
+            let view = match (b.placeholder, movie) {
+                (true, Some(m)) => m.clone(),
+                _ => view.unwrap_or_else(|| r.upload_view(1, 1, &[grey, grey, grey, 255])),
+            };
             let bind = r.texture_bind(&view);
             let vertices = r.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,

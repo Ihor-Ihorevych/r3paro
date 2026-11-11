@@ -83,10 +83,11 @@ pub struct TrailTuning {
 impl Default for TrailTuning {
     fn default() -> TrailTuning {
         TrailTuning {
-            spacing: 600.0,
-            max_rings: 6,
+            // Half as many rings: twice the gap, and half as many standing at once (the same stretch of sky).
+            spacing: 1200.0,
+            max_rings: 3,
             radius: 220.0,
-            life: 6.0,
+            life: 7.0,
             miss_behind: 300.0,
             miss_near: 900.0,
             // About four rings' worth of the proximity gain (`SnitchTuning::gain_rate` is 0.25 a second), so
@@ -94,7 +95,8 @@ impl Default for TrailTuning {
             ring_bonus: 0.06,
             streak_len: 3,
             streak_bonus: 0.15,
-            catch_rings: 0,
+            // HP1's `PM_Hoops` rule: no catch window until six rings in a row (the owner's word: harder).
+            catch_rings: 6,
         }
     }
 }
@@ -113,6 +115,8 @@ pub struct RingTrail {
     /// Snitch path flown since the last ring was dropped (uu).
     since: f32,
     last_snitch: Option<Vec3>,
+    /// While set, no ring is dropped (the Snitch's dodge: its path bends harder than a chain may).
+    paused: bool,
 }
 
 impl RingTrail {
@@ -123,7 +127,12 @@ impl RingTrail {
     }
 
     pub fn with_tuning(t: TrailTuning) -> RingTrail {
-        RingTrail { t, rings: Vec::new(), next_id: 0, streak: 0, since: 0.0, last_snitch: None }
+        RingTrail { t, rings: Vec::new(), next_id: 0, streak: 0, since: 0.0, last_snitch: None, paused: false }
+    }
+
+    /// Stops (or resumes) dropping rings. The rings already up carry on as they were.
+    pub fn pause_drops(&mut self, paused: bool) {
+        self.paused = paused;
     }
 
     pub fn tuning(&self) -> TrailTuning {
@@ -180,6 +189,9 @@ impl RingTrail {
             return;
         }
         let was = self.last_snitch.replace(snitch_pos);
+        if self.paused {
+            return;
+        }
         let spacing = if self.t.spacing.is_finite() { self.t.spacing.max(1.0) } else { 1.0 };
         match was {
             Some(p) => {
@@ -235,7 +247,8 @@ impl RingTrail {
 /// as one curve. The path's own curvature cap is set from this: `SnitchTuning::path_turn_rate` holds the
 /// Snitch's path to a turn radius of `spacing / CHAIN_MAX_TURN` or wider, so this bound is met by
 /// construction -- see `docs/formats/quidditch-arena.md`.
-pub const CHAIN_MAX_TURN: f32 = 0.436;
+/// (0.85 rad since the rings are 1200 apart: the same 1508 uu turn radius bends twice as far between two.)
+pub const CHAIN_MAX_TURN: f32 = 0.85;
 /// How far a ring's centre may be from the one before it, as a fraction of `spacing`: a chain whose rings
 /// jump about is not a road.
 pub const CHAIN_GAP: (f32, f32) = (0.7, 1.3);

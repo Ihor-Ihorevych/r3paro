@@ -157,6 +157,16 @@ fn rasterize(vm: &mut Vm<'_>, family: &str, px: u32) -> Option<ObjId> {
     Some(font_obj)
 }
 
+/// A texture object made at run time from `image` (straight, not premultiplied, alpha): what a canvas tile
+/// can draw like any other texture. Used for art drawn by the engine itself (the Quidditch HUD's SVGs).
+pub fn register_image(vm: &mut Vm<'_>, name: &str, image: Image) -> Option<ObjId> {
+    let tex_class = vm.db.find("Texture")?;
+    let name = vm.db.names.intern(name);
+    let tex = vm.new_object(tex_class, name);
+    world(vm).native_fonts.images.insert(tex, Rc::new(image));
+    Some(tex)
+}
+
 /// Whether the configured language draws its text with system fonts (its script is missing from HP3's
 /// bitmap fonts).
 pub fn need_sap_font(vm: &mut Vm<'_>) -> bool {

@@ -112,6 +112,31 @@ impl Default for BroomTuning {
 /// turns towards it: part of the gap each frame and never faster than the rate caps, so a flick of the mouse
 /// is a turn the broom takes a moment to fly, not a snap.
 pub fn step(s: &BroomState, i: &BroomInput, t: &BroomTuning, dt: f32) -> BroomState {
+    let target = if i.brake {
+        t.decel
+    } else if i.boost {
+        t.boost_speed
+    } else {
+        t.speed
+    };
+    advance(s, i, t, dt, |cur, dt| {
+        let max_delta = t.accel * dt;
+        cur + (target - cur).clamp(-max_delta, max_delta)
+    })
+}
+
+/// How long the speed takes to close most of the gap to its target in `step_to` (s): a first-order ease, so
+/// speed neither jerks nor snaps when the target moves.
+pub const SPEED_TAU: f32 = 0.5;
+
+/// `step`, but the speed eases toward `target` (uu/s) with `SPEED_TAU` and `boost`/`brake` are ignored. This is
+/// how Harry flies: the target comes from his momentum (`quidditch::momentum`), not from any button.
+pub fn step_to(s: &BroomState, i: &BroomInput, t: &BroomTuning, target: f32, dt: f32) -> BroomState {
+    let target = if target.is_finite() { target.max(0.0) } else { 0.0 };
+    advance(s, i, t, dt, |cur, dt| cur + (target - cur) * (1.0 - (-dt / SPEED_TAU).exp()))
+}
+
+fn advance(s: &BroomState, i: &BroomInput, t: &BroomTuning, dt: f32, next_speed: impl Fn(f32, f32) -> f32) -> BroomState {
     let dt = if dt.is_finite() { dt.clamp(0.0, 0.25) } else { 0.0 };
     let look = |v: f32| if v.is_finite() { v } else { 0.0 };
     let want_yaw = fold(s.want_yaw + look(i.look_yaw) + i.yaw.clamp(-1.0, 1.0) * t.yaw_rate * dt);
@@ -126,16 +151,8 @@ pub fn step(s: &BroomState, i: &BroomInput, t: &BroomTuning, dt: f32) -> BroomSt
     };
     let yaw = toward(s.yaw, want_yaw, t.yaw_rate_max);
     let pitch = toward(s.pitch, want_pitch, t.pitch_rate_max).clamp(-t.max_pitch, t.max_pitch);
-    let target = if i.brake {
-        t.decel
-    } else if i.boost {
-        t.boost_speed
-    } else {
-        t.speed
-    };
     let cur = if s.vel.is_finite() { s.vel.length() } else { 0.0 };
-    let max_delta = t.accel * dt;
-    let speed = cur + (target - cur).clamp(-max_delta, max_delta);
+    let speed = next_speed(cur, dt);
     let fwd = Vec3::new(pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), pitch.sin());
     let vel = fwd * speed;
     BroomState { pos: s.pos + vel * dt, vel, yaw, pitch, want_yaw, want_pitch }
@@ -284,6 +301,23 @@ mod tests {
         let plain = run(&none(), 10);
         let boosted = run(&BroomInput { boost: true, ..none() }, 10);
         assert!(boosted.vel.length() > plain.vel.length() + 1.0);
+    }
+
+    #[test]
+    fn step_to_eases_to_the_target_without_overshoot() {
+        let t = BroomTuning::default();
+        let mut s = BroomState::new(Vec3::ZERO, Vec3::X * 240.0, 0.0, 0.0);
+        let mut last = 240.0;
+        for _ in 0..600 {
+            s = step_to(&s, &none(), &t, 700.0, 1.0 / 60.0);
+            let v = s.vel.length();
+            assert!(v >= last - 1e-3 && v <= 700.0 + 1e-3 && v - last < 16.0, "{last} -> {v}");
+            last = v;
+        }
+        assert!((last - 700.0).abs() < 1.0);
+        // Down again just as gently, and boost/brake mean nothing to it.
+        let down = step_to(&s, &BroomInput { boost: true, brake: true, ..none() }, &t, 240.0, 1.0 / 60.0);
+        assert!(down.vel.length() < last && last - down.vel.length() < 16.0);
     }
 
     #[test]

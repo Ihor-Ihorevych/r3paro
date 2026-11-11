@@ -11,13 +11,13 @@ use super::lod::Budget;
 use super::touch::touch_input;
 
 /// This frame's steering from the phone's touch layout: the steering stick's deflection (`None`: no finger on
-/// it), a tap of the boost button this frame and the brake button held now. It is used instead of the
-/// desktop's keys and mouse for the frame it is fed, and the boost toggle it flips is the match's own, so a
-/// pause that stops the tick cannot reset it.
-pub fn feed_touch(vm: &mut Vm<'_>, stick: Option<Vec2>, boost_tap: bool, brake_held: bool) {
+/// it) and a tap of the JUMP button this frame, which reaches for the Snitch. It is used instead of the
+/// desktop's keys and mouse for the frame it is fed.
+pub fn feed_touch(vm: &mut Vm<'_>, stick: Option<Vec2>, reach_tap: bool) {
     let Some(m) = crate::world(vm).quidditch.as_mut() else { return };
-    let i = touch_input(stick, boost_tap, brake_held, &mut m.boost);
-    m.pending_touch = Some(i);
+    m.pending_touch = Some(touch_input(stick));
+    m.pending_reach |= reach_tap;
+    m.touch_seen = true;
 }
 
 /// How long the app's frames are taking on average, in milliseconds: the budget follows it (see

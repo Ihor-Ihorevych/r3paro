@@ -125,10 +125,9 @@ impl Input {
 /// pressed sets keep them.
 const BROOM_KEYS: [&str; 5] = ["leftmouse", "rightmouse", "a", "z", "space"];
 
-/// The broom keys of this frame, for a Quidditch match: the arrow keys steer, `RightMouse` or `A` taps the
-/// boost, `LeftMouse` or `Z` holds the brake and `Space` or `Enter` reaches out for the snitch. Keys are
-/// named as the ini names them, in lower case (as `key_down` keeps them); the boost is a press of this
-/// frame, because it is a toggle. `Enter` is deliberately not in `BROOM_KEYS`: it stays the menus' key.
+/// The broom keys of this frame, for a Quidditch match: the arrow keys steer, `RightMouse` or `A` taps a
+/// reach for the snitch (as does holding `Space` or `Enter`). There is no boost and no brake. Keys are
+/// named as the ini names them, in lower case (as `key_down` keeps them); a tap is an edge of this frame. `Enter` is deliberately not in `BROOM_KEYS`: it stays the menus' key.
 fn broom_keys(input: &Input) -> crate::quidditch::input::KeyState {
     let held = |k: &str| input.held.contains(k);
     let pressed = |k: &str| input.pressed.iter().any(|p| p == k);
@@ -137,8 +136,8 @@ fn broom_keys(input: &Input) -> crate::quidditch::input::KeyState {
         right: held("right"),
         up: held("up"),
         down: held("down"),
-        boost: pressed("rightmouse") || pressed("a"),
-        brake: held("leftmouse") || held("z"),
+        // A tap: a press, or (the phone's JUMP is a RightMouse *toggle* on the broom) a release.
+        reach: pressed("rightmouse") || pressed("a") || input.released.iter().any(|p| p == "rightmouse"),
         catch: held("space") || held("enter"),
     }
 }

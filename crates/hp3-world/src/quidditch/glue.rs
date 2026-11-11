@@ -20,10 +20,11 @@ use super::bludger::Bludgers;
 use super::camera::{self, CamState};
 use super::flight::{self, BroomInput, BroomState, BroomTuning};
 use super::input::{desktop_input, KeyState};
+use super::momentum::Momentum;
 use super::presentation::{self, Presentation};
 use super::rings::{self, TrailRings};
 use super::rules::{MatchEvent, MatchPhase, Rules};
-use super::snitch::{Snitch, SnitchTuning};
+use super::snitch::{Snitch, SnitchEvent, SnitchTuning};
 use super::team::{self, Teams};
 
 /// Harry's broom pawn (`HGame.HarryQuid`) and the Golden Snitch (`HGame.Snitch`): both classes exist in the
@@ -53,12 +54,11 @@ const FLY_ANIMS: [&str; 5] = ["Hover", "QuidFly", "Fly", "Idle", "Stand"];
 /// (`BludgerTuning::bumps_to_lose_control`), in seconds. A placeholder, tuned by feel like the rest.
 const SPIN_TIME: f32 = 2.0;
 
-/// Whether Harry reaches for the Snitch by himself while the catch window is open. The phone has no catch
-/// button (the overlay's broom layout is a steering stick and a boost button, `apps/hp3/src/broom.rs`), so
-/// there the reach is automatic and the catch is flying into range in time; `HP3_QUID_AUTOCATCH` turns the
-/// same thing on anywhere, to try it on the desktop.
+/// Whether Harry reaches for the Snitch by himself while the catch window is open. Off: the catch is the
+/// player's (Space on the desktop, the JUMP button on the phone). `HP3_QUID_AUTOCATCH` turns it on, for
+/// headless runs.
 fn auto_catch() -> bool {
-    cfg!(target_os = "android") || crate::envc::var_os("HP3_QUID_AUTOCATCH").is_some()
+    crate::envc::var_os("HP3_QUID_AUTOCATCH").is_some()
 }
 
 /// A match in progress: the pure systems, the arena they play in, and the actors that show them.
@@ -97,9 +97,21 @@ pub struct QuidditchMatch {
     /// because the touch controls are a scheme of their own. Set, it is flown instead of the keys and mouse,
     /// and it is taken by the tick for the same reason as `pending_input`.
     pub(super) pending_touch: Option<flight::BroomInput>,
-    /// The boost toggle: a tap of the boost key or button flips it (HP1's broom works that way). It is the
-    /// match's, not the input module's, so a pause of the tick cannot reset it.
-    pub(super) boost: bool,
+    /// Harry's speed: there is no boost or brake, a run of flight rings charges it up and it drains away on
+    /// its own (`quidditch::momentum`).
+    pub(super) momentum: Momentum,
+    /// A tap of the phone's JUMP button no frame has taken yet (`phone::feed_touch`).
+    pub(super) pending_reach: bool,
+    /// Seconds left of the reach a tap opened: the catch is wanted while it lasts.
+    reach_left: f32,
+    /// 1 right after a ring was taken, fading to 0: the HUD's pulse.
+    pub(super) charge_glow: f32,
+    /// Set once the Snitch has been caught (and by whom the match is won is the score's business).
+    pub(super) caught: bool,
+    /// Whether a touch layout has ever steered this match (the HUD then names the JUMP button, not Space).
+    pub(super) touch_seen: bool,
+    /// The finish: the slow camera orbit round Harry once the match is over.
+    pub(super) finale: Option<Finale>,
     /// What this match may spend on a frame, as the app's frame times ask for (`phone::feed_frame_ms`,
     /// `quidditch::lod`). Nothing steers team players yet (Task 13); what keeps to it today is the
     /// presentation, which leaves distant Bludgers to their proxy.
@@ -129,6 +141,20 @@ pub struct QuidditchMatch {
     /// Nothing in the game sets it.
     easy: bool,
 }
+
+/// The end of a match: Harry glides to a hover and the camera orbits him. `t` is seconds since it began.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Finale {
+    pub t: f32,
+    /// The chase camera as it was at the end, which the orbit grows out of.
+    pub from: CamState,
+}
+
+/// How long a tap of reach keeps the catch wanted (s).
+const REACH_TIME: f32 = 0.4;
+/// The slow motion of the catch: the broom's time runs at this at first and eases back to 1 over `SLOWMO_TIME`.
+const SLOWMO: f32 = 0.35;
+const SLOWMO_TIME: f32 = 0.8;
 
 /// The snitch of an `HP3_QUID_EASY` run: the bar fills from anywhere on the pitch and the catch window is
 /// wide open, so the match ends on its own without anyone at the keyboard. The gain rate is deliberately slow
@@ -495,7 +521,13 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
         show: Presentation::default(),
         pending_input: None,
         pending_touch: None,
-        boost: false,
+        momentum: Momentum::default(),
+        pending_reach: false,
+        reach_left: 0.0,
+        charge_glow: 0.0,
+        caught: false,
+        touch_seen: false,
+        finale: None,
         budget: super::lod::Budget::default(),
         gov: super::lod::BudgetGovernor::default(),
         was_playing,
@@ -617,25 +649,47 @@ fn tick_match(vm: &mut Vm<'_>, m: &mut QuidditchMatch, dt: f32) {
         None => (1.0, false),
     };
     // The phone's touch layout flies the broom itself (`phone::feed_touch` has already turned it into
-    // steering, with the same boost toggle); the keys and the mouse are the desktop's.
+    // steering); the keys and the mouse are the desktop's.
     let mut i = match m.pending_touch.take() {
         Some(touched) => touched,
-        None => desktop_input(&keys, (mouse.0 * mouse_speed, mouse.1 * mouse_speed), invert_pitch, &mut m.boost),
+        None => desktop_input(&keys, (mouse.0 * mouse_speed, mouse.1 * mouse_speed), invert_pitch),
     };
-    // Knocked off course by the Bludgers, the broom flies itself for a moment: a braked, diving turn, whatever
-    // the player does (his boost toggle is left as he had it).
+    // A tap of reach (a key, or the phone's JUMP) wants the catch for a moment.
+    let tapped = keys.reach || std::mem::take(&mut m.pending_reach);
+    if tapped {
+        m.reach_left = REACH_TIME;
+        // The same tap is the boost: one second of speed, then a cooldown (`momentum`), so the lunge for the
+        // Snitch is a thing you have to time and not a thing you hold.
+        m.momentum.try_boost();
+    }
+    let real_dt = if dt.is_finite() { dt.clamp(0.0, 0.25) } else { 0.0 };
+    m.reach_left = (m.reach_left - if tapped { 0.0 } else { real_dt }).max(0.0);
+    m.charge_glow = (m.charge_glow - real_dt * 1.5).max(0.0);
+    // Knocked off course by the Bludgers, the broom flies itself for a moment: a diving turn, whatever the
+    // player does, and the charge is gone with his grip on the broom.
     if m.spin > 0.0 {
-        m.spin -= if dt.is_finite() { dt.clamp(0.0, 0.25) } else { 0.0 };
-        i = BroomInput { yaw: 1.0, pitch: -0.12, brake: true, ..BroomInput::default() };
+        m.spin -= real_dt;
+        i = BroomInput { yaw: 1.0, pitch: -0.12, ..BroomInput::default() };
+        m.momentum.cut(0.0);
     }
     // `HP3_QUID_RING_AUTOFLY` (debugging): the broom flies the Snitch's ring trail by itself, which is how a
-    // headless run shows a ring being flown through. It is off unless the variable is set.
+    // headless run shows a ring being flown through. It is off unless the variable is set. It has no boost to
+    // reach for: it earns its speed from the rings like anyone else.
     if let Some(target) = rings::autofly_target(m) {
-        // On the boost while there is ground to make up, which is what `quid-smoke`'s pilot does: a broom
-        // cruises at 450 uu/s and a chased Snitch flies at 875, so an unboosted autofly never closes on the
-        // trail at all and a headless run shows no ring flown through.
-        let boost = m.broom.pos.distance(m.snitch.pos()) > SnitchTuning::default().catch_radius;
-        i = flight::look_at(&m.broom, target, boost);
+        i = flight::look_at(&m.broom, target, false);
+    }
+    // The match is over: nobody steers any more. The broom glides to a hover, levelling out, in the slow
+    // motion of the catch, and the camera orbits him instead of chasing.
+    let mut sim_dt = dt;
+    let mut target_speed = m.momentum.target_speed();
+    if let Some(f) = m.finale.as_mut() {
+        f.t += real_dt;
+        i = BroomInput::default();
+        target_speed = 0.0;
+        sim_dt = dt * (SLOWMO + (1.0 - SLOWMO) * (f.t / SLOWMO_TIME).clamp(0.0, 1.0));
+        m.broom.want_pitch *= (1.0 - 2.0 * real_dt).max(0.0);
+    } else {
+        m.momentum.step(dt);
     }
     let soft = inset(&m.arena, SOFT_MARGIN);
     // The soft boundary steers the rider's *look* (which is what the broom chases now), not the broom's own
@@ -643,9 +697,12 @@ fn tick_match(vm: &mut Vm<'_>, m: &mut QuidditchMatch, dt: f32) {
     // pointing at the wall.
     let turn = flight::boundary_turn(m.broom.pos, m.broom.want_yaw, &soft);
     i.yaw = (i.yaw + turn * BOUNDARY_WEIGHT).clamp(-1.0, 1.0);
-    let flown = flight::step(&m.broom, &i, &m.tuning, dt);
+    let flown = flight::step_to(&m.broom, &i, &m.tuning, target_speed, sim_dt);
     m.broom = flight::confine(&flown, &m.arena);
-    m.cam = camera::chase_camera(&m.broom, &m.cam, dt);
+    m.cam = match m.finale {
+        Some(f) => camera::orbit_camera(m.broom.pos, &f.from, f.t),
+        None => camera::chase_camera(&m.broom, &m.cam, dt),
+    };
     // Harry's pawn shows where the broom is. Its `Location` is the clamped one, so nothing the match does can
     // put the player outside the arena, let alone out of the world.
     if let Some(h) = m.harry.filter(|&h| !vm.db.objects.get(h).deleted) {
@@ -663,8 +720,14 @@ fn tick_match(vm: &mut Vm<'_>, m: &mut QuidditchMatch, dt: f32) {
     if !ended && m.rules.phase() != MatchPhase::Intro {
         // The catch key (`Space`/`Enter`), or every frame under `HP3_QUID_EASY` and where there is no catch key
         // to hold (`auto_catch`).
-        let wants_catch = m.easy || keys.catch || auto_catch();
+        let wants_catch = m.easy || keys.catch || m.reach_left > 0.0 || auto_catch();
         for e in m.snitch.step(&m.broom, wants_catch, dt) {
+            match e {
+                SnitchEvent::Caught => m.caught = true,
+                // A catch missed costs half the speed he had built.
+                SnitchEvent::Missed => m.momentum.cut(0.5),
+                _ => {}
+            }
             m.rules.on_snitch(e);
             events.push(MatchEvent::Snitch(e));
         }
@@ -683,6 +746,9 @@ fn tick_match(vm: &mut Vm<'_>, m: &mut QuidditchMatch, dt: f32) {
         }
         let lost = m.bludgers.control_lost();
         for e in hits {
+            if e == super::bludger::BludgerEvent::Hit {
+                m.momentum.hit();
+            }
             m.rules.on_bludger(e, lost);
             events.push(MatchEvent::Bludger(e));
         }
@@ -712,9 +778,21 @@ fn tick_match(vm: &mut Vm<'_>, m: &mut QuidditchMatch, dt: f32) {
     }
     if !ended && let MatchPhase::Ended(outcome) = m.rules.phase() {
         events.push(MatchEvent::Ended(outcome));
+        // The finish begins: the orbit grows out of the chase camera as it stands.
+        m.finale = Some(Finale { t: 0.0, from: m.cam });
     }
     if let Some(s) = m.snitch_actor.filter(|&s| !vm.db.objects.get(s).deleted) {
-        let at = arena::clamp_into(&m.arena, m.snitch.pos());
+        let mut at = arena::clamp_into(&m.arena, m.snitch.pos());
+        if m.finale.is_some() {
+            if m.caught {
+                // Caught: it sits in Harry's hand (a little to his right and over the broom), wings still.
+                let fwd = Vec3::new(m.broom.yaw.cos(), m.broom.yaw.sin(), 0.0);
+                at = m.broom.pos + fwd.cross(Vec3::Z) * 25.0 + Vec3::Z * 30.0;
+            } else {
+                // Never caught: the match ended on the last miss, and it flies off the screen with the chase.
+                crate::set(vm, s, "bHidden", Value::Bool(true));
+            }
+        }
         crate::set(vm, s, "Location", v3(at));
     }
     // The Bludger balls, the sounds that follow the match and the commentary line this frame's events earn.
@@ -757,7 +835,7 @@ fn tick_match(vm: &mut Vm<'_>, m: &mut QuidditchMatch, dt: f32) {
             (m.arena.ceiling - flown.pos.z).min(flown.pos.z - (m.arena.center.z - m.arena.half.z)),
         );
         println!(
-            "quidditch: tick {} broom ({:.0}, {:.0}, {:.0}) pawn ({:.0}, {:.0}, {:.0}) speed {:.0} yaw {:.2} pitch {:.2} look ({:.2}, {:.2}) boost {} camera ({:.0}, {:.0}, {:.0}) arm {:.0} fov {:.1} flown ({:.0}, {:.0}, {:.0}) room ({:.0}, {:.0}, {:.0})",
+            "quidditch: tick {} broom ({:.0}, {:.0}, {:.0}) pawn ({:.0}, {:.0}, {:.0}) speed {:.0} yaw {:.2} pitch {:.2} look ({:.2}, {:.2}) charge {:.2} camera ({:.0}, {:.0}, {:.0}) arm {:.0} fov {:.1} flown ({:.0}, {:.0}, {:.0}) room ({:.0}, {:.0}, {:.0})",
             m.frames,
             m.broom.pos.x, m.broom.pos.y, m.broom.pos.z,
             h.x, h.y, h.z,
@@ -766,7 +844,7 @@ fn tick_match(vm: &mut Vm<'_>, m: &mut QuidditchMatch, dt: f32) {
             m.broom.pitch,
             m.broom.want_yaw,
             m.broom.want_pitch,
-            m.boost,
+            m.momentum.charge(),
             m.cam.pos.x, m.cam.pos.y, m.cam.pos.z,
             m.cam.arm,
             m.cam.fov,

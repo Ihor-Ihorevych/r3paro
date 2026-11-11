@@ -158,6 +158,14 @@ pub const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 4] =
 
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
+/// A texture whose pixels are replaced from time to time (a video's picture).
+pub struct DynamicTexture {
+    texture: wgpu::Texture,
+    pub view: wgpu::TextureView,
+    pub width: u32,
+    pub height: u32,
+}
+
 pub struct Renderer {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -480,6 +488,37 @@ impl Renderer {
         self.upload(width, height, rgba)
     }
 
+    /// A texture whose pixels can be replaced (a video's picture): `view` is what the draws sample.
+    pub fn dynamic_texture(&self, width: u32, height: u32, rgba: &[u8]) -> DynamicTexture {
+        let texture = self.device.create_texture_with_data(
+            &self.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("video"),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            rgba,
+        );
+        let view = texture.create_view(&Default::default());
+        DynamicTexture { texture, view, width, height }
+    }
+
+    /// Replaces the pixels of a dynamic texture (`rgba` is `width * height * 4` bytes).
+    pub fn write_dynamic_texture(&self, t: &DynamicTexture, rgba: &[u8]) {
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &t.texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            rgba,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * t.width), rows_per_image: Some(t.height) },
+            wgpu::Extent3d { width: t.width, height: t.height, depth_or_array_layers: 1 },
+        );
+    }
+
     fn upload(&self, width: u32, height: u32, rgba: &[u8]) -> wgpu::TextureView {
         let tex = self.device.create_texture_with_data(
             &self.queue,
@@ -576,7 +615,8 @@ impl Renderer {
             let translucent = batch.texture.as_ref().and_then(|k| scene.images.get(k)).is_some_and(|i| i.translucent && (!mostly_binary_alpha(i) || std::env::var_os("HP3_NO_BINARY_ALPHA").is_some()));
             let pass = if batch.blend.is_some() { 1 } else if translucent { 2 } else { 0 };
             let pan = batch.pan.map(|p| (p, batch.vertices.clone()));
-            draws.push(Draw { bind, vertices, indices, count: batch.indices.len() as u32, pass, sky: batch.sky, pan });
+            let fluid = batch.fluid.map(|(actor, at)| (actor, at, batch.vertices.clone()));
+            draws.push(Draw { bind, vertices, indices, count: batch.indices.len() as u32, pass, sky: batch.sky, pan, fluid, fluid_shift: std::cell::Cell::new([0.0; 3]) });
         }
         // A second camera for the sky zone's view.
         let sky_globals = d.create_buffer(&wgpu::BufferDescriptor {
@@ -604,6 +644,28 @@ impl Renderer {
             // The pan wraps every 8 repeats, as the game's own does, which keeps the numbers small.
             let (du, dv) = ((seconds * pan.u).rem_euclid(8.0), (seconds * pan.v).rem_euclid(8.0));
             let moved: Vec<Vertex> = base.iter().map(|v| Vertex { uv: [v.uv[0] + du, v.uv[1] + dv], ..*v }).collect();
+            self.queue.write_buffer(&d.vertices, 0, bytemuck::cast_slice(&moved));
+        }
+    }
+
+    /// The actors (object ids) of the water surfaces baked into `scene`, so that only those are looked at for `move_fluids`.
+    pub fn fluid_actors(&self, scene: &GpuScene) -> Vec<u32> {
+        scene.draws.iter().filter_map(|d| d.fluid.as_ref().map(|f| f.0)).collect()
+    }
+
+    /// Puts each water surface at the place its actor has now (`places`: actor id and location). A fountain whose level a mover
+    /// lowers is baked into the scene at the height it had when the level loaded; this carries the grid along. Only a surface whose
+    /// place differs from the one last given is rewritten.
+    pub fn move_fluids(&self, scene: &GpuScene, places: &[(u32, [f32; 3])]) {
+        for d in &scene.draws {
+            let Some((actor, built_at, base)) = &d.fluid else { continue };
+            let Some(&(_, now)) = places.iter().find(|(a, _)| a == actor) else { continue };
+            let shift = [now[0] - built_at[0], now[1] - built_at[1], now[2] - built_at[2]];
+            if d.fluid_shift.get() == shift {
+                continue;
+            }
+            d.fluid_shift.set(shift);
+            let moved: Vec<Vertex> = base.iter().map(|v| Vertex { position: [v.position[0] + shift[0], v.position[1] + shift[1], v.position[2] + shift[2]], ..*v }).collect();
             self.queue.write_buffer(&d.vertices, 0, bytemuck::cast_slice(&moved));
         }
     }
@@ -841,6 +903,10 @@ struct Draw {
     sky: bool,
     /// A scrolling material: its speed and the vertices as built, which `animate_scene` shifts.
     pan: Option<(hp3_assets::loader::Pan, Vec<Vertex>)>,
+    /// A water surface: its actor, the place the vertices were built at, and the vertices as built, which `move_fluids` shifts.
+    fluid: Option<(u32, [f32; 3], Vec<Vertex>)>,
+    /// How far `move_fluids` has shifted it.
+    fluid_shift: std::cell::Cell<[f32; 3]>,
 }
 
 /// A scene uploaded to the GPU.

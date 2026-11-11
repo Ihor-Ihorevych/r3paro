@@ -23,6 +23,14 @@ pub enum HudKind {
     RingStreak,
     /// Rings in a row the catch needs (`TrailTuning::catch_rings`); 0 means they are not required.
     RingsNeeded,
+    /// The broom's charge from flight rings, 0..1 (what the speed wings show).
+    Charge,
+    /// A ring was just taken: 1 fading to 0 (the wings' pulse).
+    ChargeGlow,
+    /// The boost: 2 while it runs, else how ready the next one is (0..1, 1 = ready).
+    Boost,
+    /// Seconds left of the catch window; present only while it is open.
+    CatchWindow,
     /// The control hints; the value is how many lines there are (`HINTS`).
     Hints,
     /// Shown once the match is over: 1 won, 0 lost.
@@ -56,10 +64,16 @@ pub struct HudInput {
     /// Flight rings of the Snitch's trail taken in a row, and how many in a row the catch needs.
     pub ring_streak: u32,
     pub rings_needed: u32,
+    /// The broom's charge (0..1), the pulse of the last ring taken, and the seconds the catch window has left.
+    pub charge: f32,
+    pub charge_glow: f32,
+    pub window_left: f32,
+    /// `Momentum::boost_state`.
+    pub boost: f32,
 }
 
 /// The control hints, in the order they are shown.
-pub const HINTS: [&str; 5] = ["Arrows/Mouse: fly", "A: boost", "Z: brake", "Space: catch", "Fly the Snitch's rings to catch it"];
+pub const HINTS: [&str; 3] = ["Arrows/Mouse: fly", "Fly through rings to charge the broom", "Right click / A / JUMP: boost and catch"];
 
 /// The ring counter's words, or `None` when there is nothing to say (no rings are wanted and none have been
 /// taken). `n` is the run Harry is on, `needed` how many in a row the catch wants.
@@ -85,6 +99,10 @@ impl Default for HudInput {
             bumps_to_lose: 1,
             ring_streak: 0,
             rings_needed: 0,
+            charge: 0.0,
+            charge_glow: 0.0,
+            window_left: 0.0,
+            boost: 1.0,
         }
     }
 }
@@ -114,6 +132,12 @@ pub fn hud_items(m: &HudInput) -> Vec<HudItem> {
     if !ended {
         out.push(item(HudKind::RingStreak, m.ring_streak as f32));
         out.push(item(HudKind::RingsNeeded, m.rings_needed as f32));
+    }
+    out.push(item(HudKind::Charge, unit(m.charge)));
+    out.push(item(HudKind::ChargeGlow, unit(m.charge_glow)));
+    out.push(item(HudKind::Boost, if m.boost.is_finite() { m.boost.clamp(0.0, 2.0) } else { 1.0 }));
+    if !ended && m.window_left.is_finite() && m.window_left > 0.0 {
+        out.push(item(HudKind::CatchWindow, m.window_left));
     }
     if ended {
         out.push(item(HudKind::Result, if m.phase == MatchPhase::Ended(Outcome::Won) { 1.0 } else { 0.0 }));
