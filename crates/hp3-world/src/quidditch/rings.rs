@@ -19,6 +19,10 @@
 //!   in the defaults**: `SetRadius` is what opens it out, and the actor's rotation turns the circle so it
 //!   stands across the flight. The retail rings are 192 uu (`CollisionWidth`) and white (255, 255, 255).
 //!
+//! **Ours are gold** (`RING_RGB`), the owner's word after playing: a white ring is lost in the pitch's fog.
+//! The ring's own `ringColorStart`/`ringColorEnd` are set to it, and the multiply that actually tints the
+//! sprites is written onto the emitter's three `SpriteEmitter`s -- see `tint`.
+//!
 //! **Why the first attempt got a swarm of bats.** It spawned a bare `HGame.HippoRingEmitter` and left it
 //! alone. With no `HippoRing` to call `SetRadius`, the polar radius stays 0, so all 96 sprites are born on
 //! top of each other at the actor and the only thing that moves them is the +-8 uu/s drift: a cloud, not a
@@ -42,9 +46,12 @@ use super::glue::QuidditchMatch;
 use super::rules::MatchEvent;
 use super::trail::{self, RingTrail, TrailEvent};
 
-/// The retail Buckbeak flight ring. Its own script builds the sprite ring; we only place it, size it and
-/// switch it on.
+/// The retail Buckbeak flight ring. Its own script builds the sprite ring; we only place it, size it, colour
+/// it and switch it on.
 const RING_CLASS: &str = "HGame.HippoRing";
+/// **Gold, not white** (the owner's word after playing: the retail white ring vanishes into the pitch's fog).
+/// Red, green, blue. The bat-flap sprites are a white alpha texture, so a plain multiply tints them.
+const RING_RGB: [u8; 3] = [255, 220, 40];
 /// The sound of going through one: HP1 plays one of fifteen `Q_Through_Hoop` samples, which HP3 does not ship
 /// (`soundeffects.Quidditch` has no hoop sound at all), so these are its broom swishes and whooshes, picked at
 /// random the same way.
@@ -97,6 +104,35 @@ fn v3(v: Vec3) -> Value {
     Value::Struct(vec![Value::Float(v.x), Value::Float(v.y), Value::Float(v.z)].into())
 }
 
+/// An Unreal `Color`, which is declared **B, G, R, A** (as `natives::set_skin_colour` writes it too).
+fn colour(rgb: [u8; 3]) -> Value {
+    Value::Struct(vec![Value::Byte(rgb[2]), Value::Byte(rgb[1]), Value::Byte(rgb[0]), Value::Byte(255)].into())
+}
+
+/// A `RangeVector` whose three ranges are each a single number: `X`, `Y`, `Z`, every one a `Min`/`Max` pair.
+fn range3(v: Vec3) -> Value {
+    let one = |f: f32| Value::Struct(vec![Value::Float(f), Value::Float(f)].into());
+    Value::Struct(vec![one(v.x), one(v.y), one(v.z)].into())
+}
+
+/// Tints a turned-on ring's sprites. `HippoRing.TurnOn` hands its fresh `HippoRingEmitter` the ring's
+/// `ringColorStart`/`ringColorEnd` through `SetColor`, which is why those are set on the actor as well -- but
+/// what actually decides a sprite's colour here is each `SpriteEmitter`'s **`ColorMultiplierRange`**, a plain
+/// per-channel multiply on the white bat-flap texture (`particles::collect`). So the multiply is written
+/// straight onto the three emitters, which is the one way that cannot depend on how much of the retail
+/// script's `SetColor` our VM gets through.
+///
+/// It must happen in the same frame as the `TurnOn`: `particles::tick` runs **before** `quidditch::glue::tick`,
+/// so an emitter spawned here is first read, and its particles first born, a frame later -- by which time this
+/// has been written. Set it late and the first 96 sprites of every ring would flash white.
+fn tint(vm: &mut Vm<'_>, fx: ObjId) {
+    let mult = Vec3::new(RING_RGB[0] as f32, RING_RGB[1] as f32, RING_RGB[2] as f32) / 255.0;
+    let Value::Array(emitters) = crate::get(vm, fx, "Emitters") else { return };
+    for e in emitters.iter().filter_map(Value::as_obj).collect::<Vec<_>>() {
+        crate::set(vm, e, "ColorMultiplierRange", range3(mult));
+    }
+}
+
 /// A line that goes to the console and into the level's log.
 fn note(vm: &mut Vm<'_>, line: String) {
     println!("{line}");
@@ -141,6 +177,10 @@ pub fn start(vm: &mut Vm<'_>, m: &mut QuidditchMatch) {
         crate::set(vm, a, "CollisionWidth", Value::Float(t.radius));
         crate::set(vm, a, "CollisionHeight", Value::Float(t.radius));
         crate::set(vm, a, "fRingLength", Value::Float(0.0));
+        // What `TurnOn` hands the emitter's `SetColor`. The retail rings are white (255, 255, 255); these are
+        // gold, so the chain shows through the pitch's fog.
+        crate::set(vm, a, "ringColorStart", colour(RING_RGB));
+        crate::set(vm, a, "ringColorEnd", colour(RING_RGB));
         m.actors.push(a);
         m.rings.pool.push(a);
     }
@@ -148,8 +188,8 @@ pub fn start(vm: &mut Vm<'_>, m: &mut QuidditchMatch) {
     m.rings.slot = vec![None; slots];
     m.rings.fx = vec![None; slots];
     note(vm, format!(
-        "quidditch: the Snitch's ring trail: {slots} Buckbeak flight rings ({RING_CLASS}) at radius {:.0}, one every {:.0} uu, {:.0} s each, {} in a row to catch",
-        t.radius, t.spacing, t.life, t.catch_rings,
+        "quidditch: the Snitch's ring trail: {slots} Buckbeak flight rings ({RING_CLASS}) at radius {:.0}, one every {:.0} uu, {:.0} s each, gold ({}, {}, {}), {} in a row to catch",
+        t.radius, t.spacing, t.life, RING_RGB[0], RING_RGB[1], RING_RGB[2], t.catch_rings,
     ));
 }
 
@@ -261,6 +301,9 @@ fn place(vm: &mut Vm<'_>, m: &mut QuidditchMatch) {
                 crate::fire(vm, a, "TurnOn", &mut [Value::Name(Name::NONE)]);
                 crate::set(vm, a, "bCollideActors", Value::Bool(false));
                 m.rings.fx[i] = crate::get(vm, a, "ringFX").as_obj();
+                if let Some(fx) = m.rings.fx[i] {
+                    tint(vm, fx);
+                }
             }
             Some(_) => {}
             None if m.rings.slot[i].is_some() => {
@@ -315,5 +358,30 @@ mod tests {
             let r = facing(n);
             assert!(r.fields().iter().all(|v| matches!(v, Value::Int(_))), "{r:?}");
         }
+    }
+
+    /// The gold the rings are tinted with, both ways it is written: an Unreal `Color` is **B, G, R, A**, and
+    /// the sprites' `ColorMultiplierRange` is the same colour as three one-number ranges in 0..1, which is
+    /// what `particles::collect` multiplies the white bat-flap texture by. Clearly yellow, and nothing above
+    /// 1 (a multiplier over 1 means something else entirely to the particle code).
+    #[test]
+    fn the_rings_are_tinted_a_bright_gold() {
+        assert_eq!(RING_RGB, [255, 220, 40]);
+        let c = colour(RING_RGB);
+        let f = c.fields();
+        assert_eq!(f.len(), 4);
+        assert_eq!((f[0].as_byte(), f[1].as_byte(), f[2].as_byte(), f[3].as_byte()), (40, 220, 255, 255), "a Color is B, G, R, A");
+        let mult = Vec3::new(RING_RGB[0] as f32, RING_RGB[1] as f32, RING_RGB[2] as f32) / 255.0;
+        let r = range3(mult);
+        let ch = r.fields();
+        assert_eq!(ch.len(), 3, "a RangeVector is three ranges");
+        for (i, want) in [mult.x, mult.y, mult.z].into_iter().enumerate() {
+            let pair = ch[i].fields();
+            assert_eq!(pair.len(), 2, "a Range is a Min and a Max");
+            assert!((pair[0].as_float() - want).abs() < 1e-6 && (pair[1].as_float() - want).abs() < 1e-6, "{:?}", ch[i]);
+            assert!(want > 0.0 && want <= 1.0, "channel {i} is {want}, which the particle code would read as a byte glow");
+        }
+        // Yellow, not white and not orange: red full, green high, blue low.
+        assert!(mult.x > 0.95 && mult.y > 0.8 && mult.y < 0.95 && mult.z < 0.25, "{mult:?} is not a bright gold");
     }
 }
