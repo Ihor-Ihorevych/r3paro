@@ -353,7 +353,9 @@ The mod's camera is the single biggest change to how flying feels, and ours is s
   `1 - pitch_units/10000` floored at **0.15**; in radians that is `1 - pitch/0.9587`, i.e. the arm reaches its floor
   of 19.2 uu at 8500 units = 46.7 deg of camera pitch. Shrink immediately, grow back with an exponential approach at
   **2.5 /s**.
-- **Look-at point: the broom plus 55 uu up** (we use `LOOK_UP` = 70, close; 55 matches the mod).
+- **Look-at point: the broom plus 55 uu up** (we scale it with our longer arm, and now also stand the camera
+  off the arm: `AIM_UP` = 116 with a `RISE` of 30, so the camera is 146 uu over the rider and looks 8.5 deg
+  down at him -- see `docs/formats/quidditch-arena.md`, which is where our rig is written down).
 - **Camera rotation is its own state, lagging the look direction in both axes**, not derived from the broom's
   heading: keep a `CamState` rotation that closes `min(1, 8.0 * dt)` of the gap to the *look* direction
   (`want_yaw`/`want_pitch`), with the per-step clamps +-20000 units yaw (1.917 rad) and +-10000 units pitch

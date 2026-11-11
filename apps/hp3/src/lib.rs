@@ -258,11 +258,16 @@ thread_local! {
 
 /// Dynamic field of view: the faster the hero slides, the wider the view (up to `HP3_DYN_FOV_MAX` degrees, 16 by default, 0 turns
 /// it off), eased in and out so it neither jumps nor lags.
+///
+/// The *slide* is all this is for. A Quidditch match opens the view with speed too, and does it in the chase
+/// camera itself (`quidditch::camera`, which has the broom's speed to hand and smooths it there); while one
+/// runs this adds nothing, so the two never stack.
 fn dynamic_fov(vm: &mut Vm<'_>) -> f32 {
     let max: f32 = std::env::var("HP3_DYN_FOV_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(16.0);
+    let playing_quidditch = hp3_world::world(vm).quidditch.is_some();
     let pawn = hp3_world::world(vm).player.and_then(|pc| hp3_world::get(vm, pc, "Pawn").as_obj());
     let target = match pawn {
-        Some(p) if max > 0.0 && hp3_world::get(vm, p, "bIsSliding").as_bool() => {
+        Some(p) if max > 0.0 && !playing_quidditch && hp3_world::get(vm, p, "bIsSliding").as_bool() => {
             let speed = hp3_world::physics::vec(&hp3_world::get(vm, p, "Velocity")).length();
             ((speed - 150.0) / 450.0).clamp(0.0, 1.0) * max
         }

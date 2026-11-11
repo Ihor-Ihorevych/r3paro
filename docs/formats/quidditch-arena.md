@@ -158,8 +158,14 @@ heading, and `flight::confine` levels the look with the broom when it slides alo
 **The camera is an orbit camera, and the broom follows it.** `camera::chase_camera` aims along the rider's
 look direction, not along the broom's heading (so steering is camera-relative, as in the mod), with its own
 lagged rotation in both axes: 8/s towards the look, at most 1.917 rad of yaw and 0.959 rad of pitch in one
-step, pitch clamped to +-1.342 rad. It sits on a 200 uu arm (`ARM`) from a point 86 uu over the rider
-(`LOOK_UP`) -- still much closer than the 420/140 rig it replaces -- with no positional lag at all. Looking up
+step, pitch clamped to +-1.342 rad. It sits on a 200 uu arm (`ARM`) from a point 116 uu over the rider
+(`AIM_UP`), 30 uu off that arm square to it (`RISE`), which puts it **146 uu over the rider in level flight**
+(`CAM_UP`) and tips its own facing 8.5 deg below the look (`TILT`, and its distance from the look-at point is
+`SLANT` = 1.011 arms) -- still much closer than the 420/140 rig it replaces -- with no positional lag at all.
+Standing square to the arm rather than straight up is what keeps the framing the same at every pitch: the
+whole rig simply tips with the look. Harry sits 27.6 deg under the middle of the picture (it was 23.3 with the
+old 86 uu rig and no tilt), so he is a little lower in the frame and more of the pitch ahead is in it: the
+owner asked for the camera "a little bit up" after playing. Looking up
 from below pulls the arm in by `1 - pitch/0.9587`, immediately, and it eases back out at 2.5/s. The arm is also
 shortened so the camera stops 5 uu short of the arena wall instead of hanging in the stands (the mod traces the
 world; the flight volume is all the collision a match has).
@@ -173,8 +179,22 @@ pull-in, the wall shortening and the camera volume all follow `ARM` and need no 
 Two further deliberate differences from the mod, both because its numbers put the rider out of the picture at
 our scale: the pull-in scales the **whole rig** (the look-at offset shrinks with the arm), so the rider keeps
 his place in the frame however far the camera is pulled in, and the pull-in floor is **0.3**, not the mod's
-0.15, which would end with the camera inside him. The field of view still widens with speed (90 -> 100 deg);
-that is ours, neither HP1 package has it.
+0.15, which would end with the camera inside him.
+
+**The field of view widens with speed, smoothly** (ours; neither HP1 package has it). It is the one field-of-
+view mechanism a match has -- the slide's `dynamic_fov` in `apps/hp3` adds nothing while a match runs, so the
+two never stack. The rule, all of it in `camera::chase_camera` so it is unit-tested with the rest of the rig:
+
+* target = **90** deg (`FOV`) + **15** deg (`FOV_BOOST`) x `smoothstep` of the speed between the broom's own
+  cruise and boost speeds, **600 and 1200 uu/s**, read from `BroomTuning::default()` rather than written down
+  a second time;
+* the field of view carried in `CamState.fov` is low-passed towards that target every frame,
+  `fov += (target - fov) * (1 - exp(-dt / 0.35))` -- a time constant of **0.35 s** (`FOV_TAU`), frame-rate
+  independent, so boost on, boost off and braking all ease in and out and nothing ever jumps;
+* clamped to 90..105 deg, and a non-finite `dt` or a rubbish frame before it starts again from 90.
+
+A boost toggle traced with `HP3_QUID_DEBUG` (the tick line carries `fov`) ramps 90 -> 105 over about a second
+and back down again the same way.
 
 ## The level's own scripts during a match
 
@@ -258,7 +278,7 @@ either: both are gated on a running match.
   play every 120 ticks. And every 120 ticks, a sample of the match: phase, the Snitch's pure, actor, path and
   loop-offset positions (the last two show the corkscrew),
   the catch progress, the Bludger bumps, the HUD item list, the Bludgers in flight, and the broom's position,
-  speed, heading, look direction and camera (with its arm). Set it to a number (`HP3_QUID_DEBUG=5`) to sample
+  speed, heading, look direction and camera (with its arm and its field of view). Set it to a number (`HP3_QUID_DEBUG=5`) to sample
   every that many ticks instead, which is how a headless run watches the steering turn frame by frame.
 - `HP3_QUID_SHOOT=<tick>` — **off by default.** At that tick of the match the Quaffle is shot from the middle
   of the pitch at a hoop, from outside the Chasers' play. It is how a headless run proves that goals are

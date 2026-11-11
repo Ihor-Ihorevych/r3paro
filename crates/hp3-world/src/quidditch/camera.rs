@@ -6,17 +6,21 @@
 //! arm from a point above the rider, aimed along the rider's *look* direction (`BroomState::want_yaw` /
 //! `want_pitch`) rather than along the broom's heading, so steering is camera-relative and the broom is seen
 //! turning into the look. All the softness is in the rotation -- it closes part of the gap to the look each
-//! frame -- and none in the position, which sits exactly on the arm. Looking up from below pulls the camera in
-//! towards the rider, and the arm is shortened so the camera never leaves the flight volume.
+//! frame -- and none in the position, which sits exactly on the arm (a little over it, since the owner asked
+//! for the camera "a little bit up": see `AIM_UP`/`RISE`). Looking up from below pulls the camera in towards
+//! the rider, and the arm is shortened so the camera never leaves the flight volume. The one thing here that
+//! is neither the mod's nor the retail game's is the field of view, which opens with speed and is low-passed
+//! so it never jumps (`fov_for`, `FOV_TAU`); it is the only such mechanism a match has.
 
 use glam::Vec3;
 
 use super::arena::{self, ArenaBounds};
-use super::flight::{wrap_pi, BroomState};
+use super::flight::{wrap_pi, BroomState, BroomTuning};
 
 /// Where the camera is, where it looks (Unreal's (pitch, yaw, roll) in 65536ths of a turn), how wide its view
-/// is (horizontal degrees) -- which is what `player_view` returns -- and how long its arm is this frame, the
-/// one piece of camera state that is not in the rotation.
+/// is (horizontal degrees, already low-passed towards the speed's target) -- which is what `player_view`
+/// returns -- and how long its arm is this frame. The arm and the field of view are the two pieces of camera
+/// state that are not in the rotation, and both are carried from frame to frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CamState {
     pub pos: Vec3,
@@ -28,11 +32,25 @@ pub struct CamState {
 
 /// How far behind the look-at point the camera sits (uu). The mod's `fLookAtDistance` is 128; **ours is 200**,
 /// deliberately, because at 128 the rider fills the middle of the screen and blocks the view ahead. The whole
-/// rig is scaled with it (`LOOK_UP` below), so only the size of Harry in the frame changes.
+/// rig is scaled with it (`CAM_UP`/`AIM_UP` below), so only the size of Harry in the frame changes.
 const ARM: f32 = 200.0;
-/// It looks at a point this far above the broom (uu): the mod's `vLookAtOffset.Z` of 55, scaled by the same
-/// 200/128 as the arm, so the rider keeps the place in the picture the mod's rig gives him.
-const LOOK_UP: f32 = 86.0;
+/// How high over the broom the camera hangs when the rig is level (uu) and how high over it the camera
+/// *looks* -- the mod has one number for both (`vLookAtOffset.Z` of 55, 86 here once scaled by our 200/128
+/// arm), and so had we until the owner asked for the camera "a little bit up". Now the camera stands `RISE`
+/// off the arm, square to it, and looks back down at a point `AIM_UP` over the rider: it sits over Harry's
+/// shoulder looking down at him, he is lower in the frame (27.6 deg under the middle, was 23.3), and more of
+/// the pitch ahead is in the picture. Standing square to the arm rather than straight up is what keeps that
+/// framing the same at every pitch and every arm -- the whole rig simply tips with the look.
+const AIM_UP: f32 = 116.0;
+const RISE: f32 = 30.0;
+/// The level height that comes to, for the doc and the tests: `AIM_UP + ARM * SLANT * sin(TILT)`.
+const CAM_UP: f32 = AIM_UP + RISE;
+/// What that rise does to the rig, with `r = RISE / ARM`: the camera's own facing is `TILT` below the look
+/// direction and its distance from the look-at point is `SLANT` arms. Both are fixed, whatever the pitch and
+/// whatever the arm, which is the one thing `chase_camera` needs to read the look back out of the rotation it
+/// handed out the frame before. (`the_rig_is_raised_and_looks_down` checks the two against `RISE`.)
+const TILT: f32 = 0.148_890; // r.atan()
+const SLANT: f32 = 1.011_187; // (1.0 + r * r).sqrt()
 /// How much of the gap to the rider's look direction the camera's own rotation closes per second (1/s, an
 /// exponential approach): the mod's `fRotTightness`, a 1/8 s time constant.
 const ROT_TIGHT: f32 = 8.0;
@@ -46,7 +64,7 @@ const MAX_CAM_PITCH: f32 = 1.342;
 /// `1 - pitch/10000` in rotation units), never below `MIN_SCALE` of it.
 ///
 /// `MIN_SCALE` is **0.3, not the mod's 0.15**, and the pull-in scales the whole rig (the look-at offset with
-/// the arm, see `chase_camera`), which the mod does not: shortening the arm alone while still aiming `LOOK_UP`
+/// the arm, see `chase_camera`), which the mod does not: shortening the arm alone while still aiming `AIM_UP`
 /// over the rider swings him off the bottom of the screen as soon as the arm is halved, and at 0.15 of the arm
 /// the camera would be inside him. Scaled, the rider keeps the same place in the picture whatever the arm is.
 const PULL_SPREAD: f32 = 0.9587;
@@ -55,11 +73,25 @@ const MIN_SCALE: f32 = 0.3;
 const BACK_TIGHT: f32 = 2.5;
 /// How far short of a wall the camera stops (uu): the mod's trace cushion.
 const CUSHION: f32 = 5.0;
-/// Field of view at rest (horizontal degrees), and how much wider it opens at `FAST` (so speed reads). Ours,
-/// not the mod's -- neither HP1 package changes the field of view with speed.
+/// Field of view at rest (horizontal degrees) and how much wider it opens at the boost's top speed (so speed
+/// reads). Ours, not the mod's -- neither HP1 package changes the field of view with speed. The two speeds it
+/// is measured between are the broom's own cruise and boost speeds (`BroomTuning::default`), read from there
+/// rather than written down twice, and the opening is a smoothstep between them so it neither starts nor ends
+/// with a corner. On top of that the field of view is low-passed towards that target with `FOV_TAU`, so a
+/// boost switched on or off, or a brake, eases in and out instead of snapping.
 const FOV: f32 = 90.0;
-const FOV_SPEED: f32 = 10.0;
-const FAST: f32 = 1200.0;
+const FOV_BOOST: f32 = 15.0;
+/// The time constant of that low pass (s): about a third of a second to most of the way.
+const FOV_TAU: f32 = 0.35;
+
+/// Where the field of view wants to be at this speed (uu/s): `FOV` up to the cruise speed, `FOV + FOV_BOOST`
+/// at the boost speed, a smoothstep in between.
+fn fov_for(speed: f32) -> f32 {
+    let t = BroomTuning::default();
+    let (cruise, fast) = (t.speed, t.boost_speed.max(t.speed + 1.0));
+    let x = if speed.is_finite() { ((speed - cruise) / (fast - cruise)).clamp(0.0, 1.0) } else { 0.0 };
+    FOV + FOV_BOOST * (x * x * (3.0 - 2.0 * x))
+}
 
 /// Radians to Unreal's rotation units.
 const UU: f32 = 65536.0 / std::f32::consts::TAU;
@@ -70,9 +102,10 @@ pub fn rotator(pitch: f32, yaw: f32) -> [i32; 3] {
     [unit(pitch), unit(yaw), 0]
 }
 
-/// The camera as it starts: straight behind the broom on a full arm, nothing to lag behind yet.
+/// The camera as it starts: straight behind the broom on a full arm, nothing to lag behind yet. (The seed's
+/// rotation is a *given* rotation, so the rig facing `chase_camera` reads back out of it is the look.)
 pub fn behind(s: &BroomState) -> CamState {
-    let seed = CamState { pos: s.pos, rot: rotator(s.want_pitch, s.want_yaw), fov: FOV, arm: ARM };
+    let seed = CamState { pos: s.pos, rot: rotator(s.want_pitch - TILT, s.want_yaw), fov: FOV, arm: ARM };
     chase_camera(s, &seed, 0.0)
 }
 
@@ -90,13 +123,14 @@ fn volume() -> ArenaBounds {
     ArenaBounds {
         center: b.center,
         half: Vec3::new(b.half.x, b.half.y, b.center.z - floor),
-        ceiling: b.ceiling + ARM + LOOK_UP,
+        ceiling: b.ceiling + ARM + CAM_UP,
     }
 }
 
 /// How far the camera may go from `from` along `dir` before it leaves `b`, less the cushion: the mod traces
 /// look-at to camera against the world and pulls the camera in to the first hit. The arena is all the
-/// collision a match has, so the wall it stops at is the camera volume's (`volume`).
+/// collision a match has, so the wall it stops at is the camera volume's (`volume`). `dir` is the camera's own
+/// facing, which is `TILT` under the arm, so what comes back is a slant and the arm in it is `/ SLANT`.
 fn room_along(from: Vec3, dir: Vec3, b: &ArenaBounds) -> f32 {
     if !from.is_finite() || !dir.is_finite() {
         return ARM;
@@ -113,7 +147,7 @@ fn room_along(from: Vec3, dir: Vec3, b: &ArenaBounds) -> f32 {
             }
         }
     }
-    (hit - CUSHION).clamp(0.0, ARM)
+    (hit - CUSHION).clamp(0.0, ARM * SLANT)
 }
 
 /// This frame's camera, from the broom and the camera of the frame before.
@@ -122,8 +156,10 @@ pub fn chase_camera(s: &BroomState, prev: &CamState, dt: f32) -> CamState {
     let finite = |v: f32, or: f32| if v.is_finite() { v } else { or };
     // Where the rider is looking is where the camera wants to point (camera-relative steering: the broom then
     // turns into the camera, not the other way round).
+    // (`prev.rot` is the rotation the camera was *given*, already tilted down by the rise; the rig's own
+    // facing, which is what is smoothed, is that much higher.)
     let was_yaw = wrap_pi(prev.rot[1] as f32 / UU);
-    let was_pitch = wrap_pi(prev.rot[0] as f32 / UU);
+    let was_pitch = wrap_pi(prev.rot[0] as f32 / UU) + TILT;
     let want_yaw = finite(s.want_yaw, was_yaw);
     let want_pitch = finite(s.want_pitch, 0.0).clamp(-MAX_CAM_PITCH, MAX_CAM_PITCH);
     // Part of the gap each frame, and never more than one bounded step: a broom whipped round half a turn
@@ -140,27 +176,38 @@ pub fn chase_camera(s: &BroomState, prev: &CamState, dt: f32) -> CamState {
     } else {
         was_arm + (want_arm - was_arm) * (1.0 - (-BACK_TIGHT * dt).exp())
     };
-    // The look-at point, a little over the rider, and the camera exactly `arm` back along its own facing --
-    // shortened so it stops short of the arena wall instead of hanging in the stands. The height over the
-    // rider shrinks with the arm, so he keeps his place in the picture however far the camera is pulled in.
+    // The look-at point, a little over the rider, and the camera `arm` back along the arm and `RISE` square
+    // off it -- shortened so it stops short of the arena wall instead of hanging in the stands. The height
+    // over the rider shrinks with the arm, so he keeps his place in the picture however far the camera is
+    // pulled in.
     let rider = if s.pos.is_finite() { s.pos } else { prev.pos };
     let rider = if rider.is_finite() { rider } else { Vec3::ZERO };
-    let fwd = Vec3::new(pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), pitch.sin());
+    // The camera stands `RISE` off the arm, square to it: that is the same rig with its arm `SLANT` times as
+    // long and its facing `TILT` lower, so `fwd` here is the camera's own facing and everything below is the
+    // old rig along it.
+    let (cam_pitch, fwd) = {
+        let p = pitch - TILT;
+        (p, Vec3::new(p.cos() * yaw.cos(), p.cos() * yaw.sin(), p.sin()))
+    };
     //
     // The whole rig is confined, not only the arm: the look-at point is itself kept inside the volume (a ray
     // cast from outside it finds no wall to stop at), the arm is measured twice (shortening it lowers the look-at point, which moves the ray), and whatever
     // rounding is left is clamped away, so the camera is never outside the walls, under the floor or over the
     // top whatever the broom and the look are doing.
     let bounds = volume();
-    let look_at = |arm: f32| arena::clamp_into(&bounds, rider + Vec3::Z * LOOK_UP * (arm / ARM));
-    let arm = arm.min(room_along(look_at(arm), -fwd, &bounds));
-    let arm = arm.min(room_along(look_at(arm), -fwd, &bounds));
+    let look_at = |arm: f32| arena::clamp_into(&bounds, rider + Vec3::Z * AIM_UP * (arm / ARM));
+    let arm = arm.min(room_along(look_at(arm), -fwd, &bounds) / SLANT);
+    let arm = arm.min(room_along(look_at(arm), -fwd, &bounds) / SLANT);
     let at = look_at(arm);
+    // The field of view: where this speed wants it, approached with a time constant of `FOV_TAU` so it never
+    // jumps. `dt` is already clamped and finite, and a rubbish previous frame starts again from `FOV`.
     let speed = if s.vel.is_finite() { s.vel.length() } else { 0.0 };
+    let was_fov = finite(prev.fov, FOV).clamp(FOV, FOV + FOV_BOOST);
+    let fov = was_fov + (fov_for(speed) - was_fov) * (1.0 - (-dt / FOV_TAU).exp());
     CamState {
-        pos: arena::clamp_into(&bounds, at - fwd * arm),
-        rot: rotator(pitch, yaw),
-        fov: FOV + (speed / FAST).clamp(0.0, 1.0) * FOV_SPEED,
+        pos: arena::clamp_into(&bounds, at - fwd * (arm * SLANT)),
+        rot: rotator(cam_pitch, yaw),
+        fov: finite(fov, FOV).clamp(FOV, FOV + FOV_BOOST),
         arm,
     }
 }
@@ -211,22 +258,23 @@ mod tests {
             if pitch < 0.4 {
                 assert!(c.pos.z > s.pos.z, "camera at {:?} is not above the broom at {:?}", c.pos, s.pos);
             }
-            // Close, but never closer than the pull-in's floor (so never inside the rider) and never farther
-            // than the whole rig.
+            // Close, but never inside the rider (he is about 40 uu across) and never farther than the whole
+            // rig: the arm and the camera's height over him.
             let d = (c.pos - s.pos).length();
-            let full = Vec3::new(ARM, 0.0, LOOK_UP).length();
+            let full = Vec3::new(ARM, 0.0, CAM_UP).length();
             // (Looking down, the arm and the height over the rider add up: the ceiling levels the broom out in
             // this run and the look then dips below level.)
-            let reach = if pitch < 0.0 { ARM + LOOK_UP } else { full };
+            let reach = if pitch < 0.0 { ARM + CAM_UP } else { full };
             assert!(d <= reach + 1e-2, "{d} is farther than the arm");
-            assert!(d >= full * MIN_SCALE - CUSHION - 1e-2, "{d} is inside the rider");
-            // And it looks at Harry: it aims exactly at the point over him, and he is well inside the view.
+            assert!(d >= 40.0, "{d} is inside the rider");
+            // And it looks at Harry: it aims exactly at the point over him, and he is well inside the view
+            // (a little lower in it than the aim, which is the rise).
             assert!(pitch.abs() <= MAX_CAM_PITCH + 1e-3, "camera pitch {pitch}");
             let look = Vec3::new(pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), pitch.sin());
-            let to_at = arena::clamp_into(&volume(), s.pos + Vec3::Z * LOOK_UP * (c.arm / ARM)) - c.pos;
+            let to_at = arena::clamp_into(&volume(), s.pos + Vec3::Z * AIM_UP * (c.arm / ARM)) - c.pos;
             assert!(to_at.normalize().dot(look) > 0.999, "the camera does not look at the point over the broom");
-            assert!((s.pos - c.pos).normalize().dot(look) > 0.88, "the broom is out of the picture");
-            assert!(c.fov >= FOV && c.fov <= FOV + FOV_SPEED, "fov {}", c.fov);
+            assert!((s.pos - c.pos).normalize().dot(look) > 0.80, "the broom is out of the picture: {} at pitch {pitch}", (s.pos - c.pos).normalize().dot(look).acos());
+            assert!(c.fov >= FOV && c.fov <= FOV + FOV_BOOST, "fov {}", c.fov);
         }
     }
 
@@ -274,6 +322,85 @@ mod tests {
         assert!((c.arm - ARM).abs() < 1.0, "the arm never came back: {}", c.arm);
     }
 
+    /// The camera sits over Harry's shoulder: `CAM_UP` over him in level flight (it was `AIM_UP`), looking
+    /// down at him rather than level, and the two numbers the rig is built from are what they claim to be.
+    #[test]
+    fn the_rig_is_raised_and_looks_down() {
+        let r = RISE / ARM;
+        assert!((TILT - r.atan()).abs() < 1e-5 && (SLANT - (1.0 + r * r).sqrt()).abs() < 1e-5);
+        let s = BroomState::new(Vec3::new(100.0, -200.0, 500.0), Vec3::ZERO, 0.4, 0.0);
+        let c = chase_camera(&s, &behind(&s), 1.0 / 60.0);
+        assert!((c.pos.z - s.pos.z - CAM_UP).abs() < 1.0, "the camera is {} over Harry, not {CAM_UP}", c.pos.z - s.pos.z);
+        assert!((c.arm - ARM).abs() < 1e-3, "{c:?}");
+        // Level flight, and the view still dips: about 8.5 deg, the rise over the arm.
+        assert!(cam_pitch(&c) < -0.13 && cam_pitch(&c) > -0.17, "the view does not look down: {}", cam_pitch(&c));
+        // A held look is held: the rig settles on it, `TILT` lower, instead of drifting off by the tilt every
+        // frame (which is what reading the look back out of the rotation wrongly would do).
+        for want in [-0.8_f32, -0.2, 0.0, 0.5, 1.0] {
+            let held = BroomState { want_pitch: want, ..flying() };
+            let mut c = behind(&flying());
+            for _ in 0..240 {
+                c = chase_camera(&held, &c, 1.0 / 60.0);
+            }
+            assert!((cam_pitch(&c) + TILT - want).abs() < 0.01, "the rig drifted to {} from a look of {want}", cam_pitch(&c) + TILT);
+            // and Harry keeps his place in the frame whatever the look is doing: always the same angle under
+            // the middle of the picture.
+            let look = Vec3::new(cam_pitch(&c).cos() * cam_yaw(&c).cos(), cam_pitch(&c).cos() * cam_yaw(&c).sin(), cam_pitch(&c).sin());
+            let under = (held.pos - c.pos).normalize().dot(look).acos();
+            assert!(under > 0.2 && under < 0.62, "Harry is {under} rad under the middle at a look of {want}");
+        }
+    }
+
+    /// The field of view opens with speed and closes again, and never jumps: it is a smoothstep between the
+    /// broom's own cruise and boost speeds, low-passed with `FOV_TAU`.
+    #[test]
+    fn fov_grows_with_speed_and_is_approached_gradually() {
+        let t = BroomTuning::default();
+        let dt = 1.0 / 60.0;
+        let at_speed = |v: f32| BroomState { vel: Vec3::new(v, 0.0, 0.0), ..flying() };
+        // Monotonic in speed, from one and the same frame before.
+        let seed = behind(&flying());
+        let mut was = 0.0;
+        for v in [0.0, 100.0, t.speed, 700.0, 900.0, 1100.0, t.boost_speed, 2000.0] {
+            let f = chase_camera(&at_speed(v), &seed, dt).fov;
+            assert!(f >= was - 1e-6, "fov fell from {was} to {f} at {v} uu/s");
+            was = f;
+        }
+        // Cruising is the base; the boost's top speed is the base plus the whole extra, reached in a few
+        // seconds and not before.
+        let mut c = seed;
+        for _ in 0..600 {
+            c = chase_camera(&at_speed(t.speed), &c, dt);
+        }
+        assert!((c.fov - FOV).abs() < 1e-3, "cruising opened the view to {}", c.fov);
+        let mut steps = Vec::new();
+        for _ in 0..180 {
+            let next = chase_camera(&at_speed(t.boost_speed), &c, dt);
+            steps.push(next.fov - c.fov);
+            c = next;
+        }
+        assert!(steps[0] < 1.0, "the field of view jumped {} deg in one frame", steps[0]);
+        assert!(steps.iter().all(|s| *s >= -1e-6 && *s < 1.0), "a step out of bounds: {steps:?}");
+        assert!((c.fov - (FOV + FOV_BOOST)).abs() < 0.2, "three seconds of boost only reached {}", c.fov);
+        // Half a second in, it is well on its way but not there (a time constant of about a third of a second).
+        let mut half = seed;
+        for _ in 0..30 {
+            half = chase_camera(&at_speed(t.boost_speed), &half, dt);
+        }
+        assert!(half.fov > FOV + FOV_BOOST * 0.5 && half.fov < FOV + FOV_BOOST * 0.95, "{}", half.fov);
+        // Frame-rate independent: two small steps land where one big one does, and dt = 0 moves nothing.
+        let one = chase_camera(&at_speed(t.boost_speed), &seed, 0.1).fov;
+        let a = chase_camera(&at_speed(t.boost_speed), &seed, 0.05);
+        let two = chase_camera(&at_speed(t.boost_speed), &a, 0.05).fov;
+        assert!((one - two).abs() < 0.05, "{one} vs {two}");
+        assert_eq!(chase_camera(&at_speed(t.boost_speed), &seed, 0.0).fov, seed.fov);
+        // And it comes back down when the boost stops.
+        for _ in 0..180 {
+            c = chase_camera(&at_speed(t.speed), &c, dt);
+        }
+        assert!((c.fov - FOV).abs() < 0.2, "the view never closed again: {}", c.fov);
+    }
+
     #[test]
     fn chase_camera_survives_rubbish() {
         let bad = BroomState {
@@ -301,7 +428,7 @@ mod tests {
         let at = |f: f32, a: f32, z: f32| a + (z - a) * f;
         // What the camera is held to: the flight volume's walls, the turf, and the rig's height of sky.
         let cam_lo = Vec3::new(lo.x, lo.y, arena::GROUND_Z + FLOOR_CLEARANCE);
-        let cam_hi = Vec3::new(hi.x, hi.y, hi.z + ARM + LOOK_UP);
+        let cam_hi = Vec3::new(hi.x, hi.y, hi.z + ARM + CAM_UP);
         assert!(cam_lo.z > arena::GROUND_Z && cam_lo.z <= lo.z);
         // Skimming the ceiling and looking a little down -- the commonest thing a player does up there -- the
         // camera keeps its whole arm instead of collapsing into the rider.

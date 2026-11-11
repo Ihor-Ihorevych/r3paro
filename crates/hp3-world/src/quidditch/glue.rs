@@ -735,7 +735,7 @@ fn tick_match(vm: &mut Vm<'_>, m: &mut QuidditchMatch, dt: f32) {
             (m.arena.ceiling - flown.pos.z).min(flown.pos.z - (m.arena.center.z - m.arena.half.z)),
         );
         println!(
-            "quidditch: tick {} broom ({:.0}, {:.0}, {:.0}) pawn ({:.0}, {:.0}, {:.0}) speed {:.0} yaw {:.2} pitch {:.2} look ({:.2}, {:.2}) boost {} camera ({:.0}, {:.0}, {:.0}) arm {:.0} flown ({:.0}, {:.0}, {:.0}) room ({:.0}, {:.0}, {:.0})",
+            "quidditch: tick {} broom ({:.0}, {:.0}, {:.0}) pawn ({:.0}, {:.0}, {:.0}) speed {:.0} yaw {:.2} pitch {:.2} look ({:.2}, {:.2}) boost {} camera ({:.0}, {:.0}, {:.0}) arm {:.0} fov {:.1} flown ({:.0}, {:.0}, {:.0}) room ({:.0}, {:.0}, {:.0})",
             m.frames,
             m.broom.pos.x, m.broom.pos.y, m.broom.pos.z,
             h.x, h.y, h.z,
@@ -747,6 +747,7 @@ fn tick_match(vm: &mut Vm<'_>, m: &mut QuidditchMatch, dt: f32) {
             m.boost,
             m.cam.pos.x, m.cam.pos.y, m.cam.pos.z,
             m.cam.arm,
+            m.cam.fov,
             flown.pos.x, flown.pos.y, flown.pos.z,
             room.x, room.y, room.z,
         );
