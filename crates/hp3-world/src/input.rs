@@ -119,6 +119,12 @@ impl Input {
     }
 }
 
+/// The keys a Quidditch match takes over whole: while one runs they fly the broom and run none of their own
+/// bindings' buttons or commands. The arrow keys are not among them, because all they are ever bound to is
+/// axes (turn and look), which the broom and the controller can both have. In lower case, as the held and
+/// pressed sets keep them.
+const BROOM_KEYS: [&str; 4] = ["leftmouse", "rightmouse", "a", "z"];
+
 /// The broom keys of this frame, for a Quidditch match: the arrow keys steer, `RightMouse` or `A` taps the
 /// boost and `LeftMouse` or `Z` holds the brake. Keys are named as the ini names them, in lower case (as
 /// `key_down` keeps them); the boost is a press of this frame, because it is a toggle.
@@ -160,18 +166,24 @@ pub fn apply(vm: &mut Vm<'_>, pc: ObjId, dt: f32) {
             keys.push((k.clone(), 1.0));
         }
     }
-    // A Quidditch match flies the broom from the same keys and mouse motion, before the axes below are made:
-    // it reads them, nothing more, so a level with no match (every level but a match) is untouched.
-    if world(vm).quidditch.is_some() {
+    // A Quidditch match flies the broom from the same keys and mouse motion, before the axes below are made.
+    // While one runs, the four keys that fly it do only that: their own bindings' buttons and commands
+    // (`LeftMouse=Fire`, `RightMouse=Jump|WingFlap|bWingFlap`) would cast spells and flap from the broom, so
+    // they are not run. Their axis commands still are, and every other key (Escape, the menus, the pause) is
+    // untouched -- as is the whole path on a level with no match, which is every level but a match.
+    let flying = world(vm).quidditch.is_some();
+    if flying {
         let broom = broom_keys(&input);
         crate::quidditch::glue::feed_input(vm, broom, input.mouse);
     }
+    let flies_the_broom = |key: &str| flying && BROOM_KEYS.contains(&key);
     // The options menu's mouse speed and invert (`PlayerInput`); the engine's own default of 3 is the speed the axes were tuned for.
     let (speed, invert_y) = crate::settings::mouse_look(vm, pc);
     keys.push(("mousex".into(), input.mouse.0 * speed));
     keys.push(("mousey".into(), if invert_y { input.mouse.1 } else { -input.mouse.1 } * speed));
     for (key, amount) in &keys {
         let mouse = key == "mousex" || key == "mousey";
+        let broom = flies_the_broom(key);
         for cmd in input.commands(key) {
             let words: Vec<&str> = cmd.split_whitespace().collect();
             match words.first().map(|w| w.to_ascii_lowercase()).as_deref() {
@@ -188,10 +200,10 @@ pub fn apply(vm: &mut Vm<'_>, pc: ObjId, dt: f32) {
                     };
                     *axes.entry(words[1].to_string()).or_default() += value * invert;
                 }
-                Some("button") if words.len() >= 2 && *amount != 0.0 => {
+                Some("button") if !broom && words.len() >= 2 && *amount != 0.0 => {
                     buttons.insert(words[1].to_string());
                 }
-                Some("count") if words.len() >= 2 && *amount != 0.0 => {
+                Some("count") if !broom && words.len() >= 2 && *amount != 0.0 => {
                     counts.insert(words[1].to_string());
                 }
                 _ => {}
@@ -199,6 +211,16 @@ pub fn apply(vm: &mut Vm<'_>, pc: ObjId, dt: f32) {
         }
     }
     for key in &input.pressed {
+        if flies_the_broom(key) {
+            if crate::envc::var_os("HP3_QUID_DEBUG").is_some() {
+                // The axis commands are not among the dropped ones: they are made in the loop above, as they
+                // are with no match. Everything else this key binds is what the match takes over.
+                let mut dropped: Vec<String> = input.commands(key).into_iter().filter(|c| !c.split_whitespace().next().is_some_and(|w| w.eq_ignore_ascii_case("axis"))).collect();
+                dropped.dedup();
+                println!("quidditch: {key} flies the broom; its own commands {dropped:?} were not run");
+            }
+            continue;
+        }
         for cmd in input.commands(key) {
             let words: Vec<&str> = cmd.split_whitespace().collect();
             match words.first().map(|w| w.to_ascii_lowercase()).as_deref() {

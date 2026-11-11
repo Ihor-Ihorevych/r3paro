@@ -258,18 +258,70 @@ fn possess(vm: &mut Vm<'_>, harry: ObjId) -> Option<ObjId> {
     crate::set(vm, harry, "bCollideWorld", Value::Bool(false));
     crate::set(vm, harry, "bIgnoreOutOfWorld", Value::Bool(true));
     crate::set(vm, harry, "bHidden", Value::Bool(false));
+    // A controller and its pawn point at each other, so the pawn that was being played lets go of it first:
+    // two pawns claiming the player would make every `Controller.Pawn` answer about the broom instead.
+    if let Some(p) = had {
+        crate::set(vm, p, "Controller", Value::Object(None));
+    }
     crate::set(vm, harry, "Controller", Value::Object(Some(pc)));
     crate::set(vm, pc, "Pawn", Value::Object(Some(harry)));
     had
 }
 
-/// Gives the controller back the pawn it was playing before the match.
-fn unpossess(vm: &mut Vm<'_>, had: Option<ObjId>) {
-    let Some(pc) = crate::world(vm).player else { return };
-    if let Some(p) = had.filter(|&p| !vm.db.objects.get(p).deleted) {
-        crate::set(vm, p, "Controller", Value::Object(Some(pc)));
-        crate::set(vm, pc, "Pawn", Value::Object(Some(p)));
+/// What the controller is to play once the match lets go of the broom pawn, as a decision on its own because
+/// it is the one thing that must never be got wrong: `stop` destroys the broom pawn straight afterwards and
+/// nothing in the engine clears references to a destroyed actor, so the controller must not be left holding
+/// it. `None` means "leave the controller alone" (something else took the player over meanwhile);
+/// `Some(pawn)` is what to play, and `Some(None)` is no pawn at all, which is what a controller that had
+/// none before the match goes back to.
+fn give_back(playing: Option<ObjId>, broom: Option<ObjId>, had: Option<ObjId>, had_alive: bool) -> Option<Option<ObjId>> {
+    if broom.is_some() && playing != broom {
+        return None;
     }
+    Some(had.filter(|p| had_alive && Some(*p) != broom))
+}
+
+/// Gives the controller back the pawn it was playing before the match and takes the broom pawn off it, so
+/// nothing points at the pawn `stop` is about to destroy. `harry` is the broom pawn, `had` the pawn the match
+/// took the controller from.
+fn unpossess(vm: &mut Vm<'_>, had: Option<ObjId>, harry: Option<ObjId>) {
+    let Some(pc) = crate::world(vm).player else { return };
+    let playing = crate::get(vm, pc, "Pawn").as_obj();
+    let alive = had.is_some_and(|p| !vm.db.objects.get(p).deleted);
+    // The broom pawn lets go of the controller whoever is playing now.
+    if let Some(h) = harry.filter(|&h| crate::get(vm, h, "Controller").as_obj() == Some(pc)) {
+        crate::set(vm, h, "Controller", Value::Object(None));
+    }
+    let Some(back) = give_back(playing, harry, had, alive) else {
+        vm.log.push("quidditch: the player was taken over during the match, the broom pawn was only let go".into());
+        return;
+    };
+    crate::set(vm, pc, "Pawn", Value::Object(back));
+    if let Some(p) = back {
+        crate::set(vm, p, "Controller", Value::Object(Some(pc)));
+    }
+}
+
+/// `HP3_QUID_DEBUG`: who the player plays now the match is over and its actors are gone. It is printed after
+/// the broom pawn has been destroyed, because that is when the answer matters: the controller must hold the
+/// pawn it held before the match (or none), never the deleted one.
+fn log_handover(vm: &mut Vm<'_>, harry: Option<ObjId>) {
+    if crate::envc::var_os("HP3_QUID_DEBUG").is_none() {
+        return;
+    }
+    let Some(pc) = crate::world(vm).player else { return };
+    let pawn = crate::get(vm, pc, "Pawn").as_obj();
+    let its_controller = pawn.and_then(|p| crate::get(vm, p, "Controller").as_obj());
+    let gone = pawn.is_some_and(|p| vm.db.objects.get(p).deleted);
+    let broom_gone = harry.is_some_and(|h| vm.db.objects.get(h).deleted);
+    let name = |o: Option<ObjId>| o.map(|o| hp3_script::natives::object_path(vm, o)).unwrap_or_else(|| "none".into());
+    println!(
+        "quidditch: after the stop the player plays {} (deleted {gone}), whose controller is {} (the player controller is {}); the broom pawn {} is deleted {broom_gone}",
+        name(pawn),
+        name(its_controller),
+        name(Some(pc)),
+        name(harry),
+    );
 }
 
 /// Puts the rider in a flying pose, if his animation set has one of `FLY_ANIMS`. Looping and on the main
@@ -372,7 +424,7 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
     }
     // The Snitch actor is only a marker the pure snitch drives; `tick` writes its `Location` every frame.
     let snitch = Snitch::new(seed, &bounds);
-    let snitch_actor = spawn_class(vm, SNITCH_CLASS, arena::actor_location(&bounds, snitch.pos()), 0);
+    let snitch_actor = spawn_class(vm, SNITCH_CLASS, arena::clamp_into(&bounds, snitch.pos()), 0);
     if let Some(s) = snitch_actor {
         crate::set(vm, s, "Physics", Value::Byte(crate::physics::PHYS_NONE));
         actors.push(s);
@@ -432,7 +484,7 @@ pub fn stop(vm: &mut Vm<'_>) {
     let Some(m) = crate::world(vm).quidditch.take() else { return };
     // The pawn goes back to the player before the broom pawn is destroyed: a controller must never be left
     // holding a deleted pawn.
-    unpossess(vm, m.was_playing);
+    unpossess(vm, m.was_playing, m.harry);
     let mut gone = 0;
     // Backwards, so a child goes before what it rides on (the broom before Harry).
     for a in m.actors.iter().rev() {
@@ -443,6 +495,7 @@ pub fn stop(vm: &mut Vm<'_>) {
             gone += 1;
         }
     }
+    log_handover(vm, m.harry);
     let line = format!(
         "quidditch: match against {} stopped, phase {:?}, score {}-{}, {gone} of {} actors destroyed",
         m.opponent,
@@ -482,12 +535,13 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     let soft = inset(&m.arena, SOFT_MARGIN);
     let turn = flight::boundary_turn(m.broom.pos, m.broom.yaw, &soft);
     i.yaw = (i.yaw + turn * BOUNDARY_WEIGHT).clamp(-1.0, 1.0);
-    m.broom = flight::confine(&flight::step(&m.broom, &i, &m.tuning, dt), &m.arena);
+    let flown = flight::step(&m.broom, &i, &m.tuning, dt);
+    m.broom = flight::confine(&flown, &m.arena);
     m.cam = camera::chase_camera(&m.broom, &m.cam, dt);
     // Harry's pawn shows where the broom is. Its `Location` is the clamped one, so nothing the match does can
     // put the player outside the arena, let alone out of the world.
     if let Some(h) = m.harry.filter(|&h| !vm.db.objects.get(h).deleted) {
-        crate::set(vm, h, "Location", v3(arena::actor_location(&m.arena, m.broom.pos)));
+        crate::set(vm, h, "Location", v3(arena::clamp_into(&m.arena, m.broom.pos)));
         crate::set(vm, h, "Rotation", rot(camera::rotator(m.broom.pitch, m.broom.yaw)));
         crate::set(vm, h, "Velocity", v3(m.broom.vel));
         crate::set(vm, h, "Acceleration", v3(Vec3::ZERO));
@@ -507,7 +561,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         }
     }
     if let Some(s) = m.snitch_actor.filter(|&s| !vm.db.objects.get(s).deleted) {
-        let at = arena::actor_location(&m.arena, m.snitch.pos());
+        let at = arena::clamp_into(&m.arena, m.snitch.pos());
         crate::set(vm, s, "Location", v3(at));
     }
     // `HP3_QUID_DEBUG`: a sample of the match state now and then, to see that it is running at all, and where
@@ -524,9 +578,16 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
             m.bludgers.bumps()
         );
         let h = m.harry.filter(|&h| !vm.db.objects.get(h).deleted).map(|h| crate::rd_vec(vm, h, "Location")).unwrap_or(Vec3::ZERO);
-        let inside = m.broom.pos == arena::actor_location(&m.arena, m.broom.pos);
+        // `flown` is where the flight model wanted to be before `confine` had its say, and `room` is how far
+        // that was from each face of the volume: negative on an axis means the broom pushed through it there
+        // and was brought back, which is the only evidence that the boundary is doing anything.
+        let room = Vec3::new(
+            m.arena.half.x - (flown.pos.x - m.arena.center.x).abs(),
+            m.arena.half.y - (flown.pos.y - m.arena.center.y).abs(),
+            (m.arena.ceiling - flown.pos.z).min(flown.pos.z - (m.arena.center.z - m.arena.half.z)),
+        );
         println!(
-            "quidditch: tick {} broom ({:.0}, {:.0}, {:.0}) pawn ({:.0}, {:.0}, {:.0}) speed {:.0} yaw {:.2} pitch {:.2} boost {} inside {inside} camera ({:.0}, {:.0}, {:.0})",
+            "quidditch: tick {} broom ({:.0}, {:.0}, {:.0}) pawn ({:.0}, {:.0}, {:.0}) speed {:.0} yaw {:.2} pitch {:.2} boost {} camera ({:.0}, {:.0}, {:.0}) flown ({:.0}, {:.0}, {:.0}) room ({:.0}, {:.0}, {:.0})",
             m.frames,
             m.broom.pos.x, m.broom.pos.y, m.broom.pos.z,
             h.x, h.y, h.z,
@@ -535,6 +596,8 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
             m.broom.pitch,
             m.boost,
             m.cam.pos.x, m.cam.pos.y, m.cam.pos.z,
+            flown.pos.x, flown.pos.y, flown.pos.z,
+            room.x, room.y, room.z,
         );
     }
     if !m.reported
@@ -642,6 +705,31 @@ mod tests {
         assert!(g.defer(Request::Start("Slytherin".into())));
         assert!(g.defer(Request::Stop));
         assert_eq!(g.end(), Some(Request::Stop));
+    }
+
+    /// Letting the broom pawn go: the controller must come out of a match playing the pawn it played before
+    /// (or nothing), and never the broom pawn, which `stop` destroys right afterwards.
+    #[test]
+    fn give_back_never_leaves_the_controller_on_the_broom_pawn() {
+        let (broom, walking) = (ObjId(10), ObjId(11));
+        // The usual way round: the match has the player, the old pawn is still there.
+        assert_eq!(give_back(Some(broom), Some(broom), Some(walking), true), Some(Some(walking)));
+        // Nothing was being played when the match started: nothing is played after it.
+        assert_eq!(give_back(Some(broom), Some(broom), None, false), Some(None));
+        // The old pawn was destroyed while the match ran: no pawn rather than a deleted one.
+        assert_eq!(give_back(Some(broom), Some(broom), Some(walking), false), Some(None));
+        // Something else took the player over (a cutscene): it is left alone, and only the broom pawn is let
+        // go. Whatever the answer, it is never the broom pawn.
+        assert_eq!(give_back(Some(ObjId(12)), Some(broom), Some(walking), true), None);
+        for playing in [None, Some(broom), Some(ObjId(12))] {
+            for had in [None, Some(walking), Some(broom)] {
+                for alive in [false, true] {
+                    assert_ne!(give_back(playing, Some(broom), had, alive), Some(Some(broom)), "{playing:?} {had:?} {alive}");
+                }
+            }
+        }
+        // A match that never got a broom pawn still hands the controller back what it had.
+        assert_eq!(give_back(Some(walking), None, Some(walking), true), Some(Some(walking)));
     }
 
     /// The soft boundary's band lies inside the arena, is never inverted, and leaves the arena centre where

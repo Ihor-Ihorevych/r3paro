@@ -111,9 +111,10 @@ pub fn bludger_home(b: &ArenaBounds) -> Vec3 {
     b.center
 }
 
-/// A pure-side position made safe to write to an actor's `Location`: clamped into the flight volume, and the
-/// arena centre when it is not a finite vector.
-pub fn actor_location(b: &ArenaBounds, p: Vec3) -> Vec3 {
+/// `p` brought inside the flight volume (`x`/`y` within `center +- half`, `z` from the volume's floor up to
+/// its ceiling), and the arena centre when it is not a finite vector. It is both what `flight::confine` holds
+/// the broom to and what makes a pure-side position safe to write to an actor's `Location`.
+pub fn clamp_into(b: &ArenaBounds, p: Vec3) -> Vec3 {
     if !p.is_finite() {
         return b.center;
     }
@@ -199,14 +200,14 @@ mod tests {
     }
 
     #[test]
-    fn actor_location_clamps_into_the_volume_and_is_always_finite() {
+    fn clamp_into_brings_a_point_into_the_volume_and_is_always_finite() {
         let b = bounds();
         let inside = Vec3::new(b.center.x, 1000.0, 500.0);
-        assert_eq!(actor_location(&b, inside), inside);
-        let far = actor_location(&b, Vec3::new(1e9, -1e9, 1e9));
+        assert_eq!(clamp_into(&b, inside), inside);
+        let far = clamp_into(&b, Vec3::new(1e9, -1e9, 1e9));
         assert_eq!(far, Vec3::new(b.center.x + b.half.x, b.center.y - b.half.y, b.ceiling));
         for bad in [Vec3::new(f32::NAN, 0.0, 0.0), Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)] {
-            let p = actor_location(&b, bad);
+            let p = clamp_into(&b, bad);
             assert!(p.is_finite(), "{bad:?} -> {p:?}");
             assert!((p.x - b.center.x).abs() <= b.half.x && (p.y - b.center.y).abs() <= b.half.y);
         }

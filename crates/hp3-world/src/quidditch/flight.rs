@@ -5,7 +5,7 @@
 
 use glam::Vec3;
 
-use super::arena::ArenaBounds;
+use super::arena::{self, ArenaBounds};
 
 /// Player steering for one tick. `yaw` and `pitch` are stick deflections in -1..1.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -109,22 +109,11 @@ pub fn boundary_turn(pos: Vec3, yaw: f32, b: &ArenaBounds) -> f32 {
     if !pos.is_finite() || !yaw.is_finite() {
         return 0.0;
     }
-    let back = (clamp_into(pos, b) - pos).truncate();
+    let back = (arena::clamp_into(b, pos) - pos).truncate();
     if back.length_squared() <= 1e-6 {
         return 0.0;
     }
     (wrap_pi(back.y.atan2(back.x) - yaw) / std::f32::consts::PI).clamp(-1.0, 1.0)
-}
-
-/// `p` brought inside the flight volume (`x`/`y` within `center +- half`, `z` from the volume's floor up to
-/// its ceiling); the arena centre when `p` is not a finite vector.
-fn clamp_into(p: Vec3, b: &ArenaBounds) -> Vec3 {
-    if !p.is_finite() {
-        return b.center;
-    }
-    let lo = b.center - b.half;
-    let hi = Vec3::new(b.center.x + b.half.x, b.center.y + b.half.y, b.ceiling.max(lo.z));
-    p.clamp(lo, hi)
 }
 
 /// Keeps the broom in the flight volume, which is all the collision a Quidditch match has (the stadium is
@@ -134,7 +123,7 @@ fn clamp_into(p: Vec3, b: &ArenaBounds) -> Vec3 {
 /// rather than grinding nose-first. Nothing here ever moves the broom out of the world.
 pub fn confine(s: &BroomState, b: &ArenaBounds) -> BroomState {
     let mut out = *s;
-    out.pos = clamp_into(s.pos, b);
+    out.pos = arena::clamp_into(b, s.pos);
     if !out.vel.is_finite() {
         out.vel = Vec3::ZERO;
     }
