@@ -73,9 +73,27 @@ pub fn behind(s: &BroomState) -> CamState {
     chase_camera(s, &seed, 0.0)
 }
 
+/// How near the turf the camera may come (uu over `arena::GROUND_Z`).
+const FLOOR_CLEARANCE: f32 = 30.0;
+
+/// The volume the camera is kept in. Its walls are the flight volume's own (the stands start there, and a
+/// camera in the stands looks at the back of a wall). Its floor is the turf rather than the flight floor
+/// 150 uu over it, and its top is the rig's own height over the flight ceiling: there is only sky up there,
+/// and a camera held under the flight ceiling would have nowhere to be while the broom skims it and the rider
+/// looks down -- it would end up inside his head.
+fn volume() -> ArenaBounds {
+    let b = arena::bounds();
+    let floor = (arena::GROUND_Z + FLOOR_CLEARANCE).min(b.center.z - b.half.z);
+    ArenaBounds {
+        center: b.center,
+        half: Vec3::new(b.half.x, b.half.y, b.center.z - floor),
+        ceiling: b.ceiling + ARM + LOOK_UP,
+    }
+}
+
 /// How far the camera may go from `from` along `dir` before it leaves `b`, less the cushion: the mod traces
 /// look-at to camera against the world and pulls the camera in to the first hit. The arena is all the
-/// collision a match has, so the wall it stops at is the flight volume's.
+/// collision a match has, so the wall it stops at is the camera volume's (`volume`).
 fn room_along(from: Vec3, dir: Vec3, b: &ArenaBounds) -> f32 {
     if !from.is_finite() || !dir.is_finite() {
         return ARM;
@@ -125,11 +143,19 @@ pub fn chase_camera(s: &BroomState, prev: &CamState, dt: f32) -> CamState {
     let rider = if s.pos.is_finite() { s.pos } else { prev.pos };
     let rider = if rider.is_finite() { rider } else { Vec3::ZERO };
     let fwd = Vec3::new(pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), pitch.sin());
-    let arm = arm.min(room_along(rider + Vec3::Z * LOOK_UP * (arm / ARM), -fwd, &arena::bounds()));
-    let at = rider + Vec3::Z * LOOK_UP * (arm / ARM);
+    //
+    // The whole rig is confined, not only the arm: the look-at point is itself kept inside the volume (a ray
+    // cast from outside it finds no wall to stop at), the arm is measured twice (shortening it lowers the look-at point, which moves the ray), and whatever
+    // rounding is left is clamped away, so the camera is never outside the walls, under the floor or over the
+    // top whatever the broom and the look are doing.
+    let bounds = volume();
+    let look_at = |arm: f32| arena::clamp_into(&bounds, rider + Vec3::Z * LOOK_UP * (arm / ARM));
+    let arm = arm.min(room_along(look_at(arm), -fwd, &bounds));
+    let arm = arm.min(room_along(look_at(arm), -fwd, &bounds));
+    let at = look_at(arm);
     let speed = if s.vel.is_finite() { s.vel.length() } else { 0.0 };
     CamState {
-        pos: at - fwd * arm,
+        pos: arena::clamp_into(&bounds, at - fwd * arm),
         rot: rotator(pitch, yaw),
         fov: FOV + (speed / FAST).clamp(0.0, 1.0) * FOV_SPEED,
         arm,
@@ -167,7 +193,9 @@ mod tests {
                 boost: n % 120 < 60,
                 ..BroomInput::default()
             };
-            s = flight::step(&s, &i, &t, 1.0 / 60.0);
+            // Confined as the match confines it: the camera is, so a broom let out of the volume would be
+            // watched from inside it and none of the below would hold.
+            s = flight::confine(&flight::step(&s, &i, &t, 1.0 / 60.0), &arena::bounds());
             c = chase_camera(&s, &c, 1.0 / 60.0);
             assert!(c.pos.is_finite(), "{:?}", c.pos);
             // Behind: the way from the camera to Harry points the way the camera looks.
@@ -184,12 +212,15 @@ mod tests {
             // than the whole rig.
             let d = (c.pos - s.pos).length();
             let full = Vec3::new(ARM, 0.0, LOOK_UP).length();
-            assert!(d <= full + 1e-2, "{d} is farther than the arm");
+            // (Looking down, the arm and the height over the rider add up: the ceiling levels the broom out in
+            // this run and the look then dips below level.)
+            let reach = if pitch < 0.0 { ARM + LOOK_UP } else { full };
+            assert!(d <= reach + 1e-2, "{d} is farther than the arm");
             assert!(d >= full * MIN_SCALE - CUSHION - 1e-2, "{d} is inside the rider");
             // And it looks at Harry: it aims exactly at the point over him, and he is well inside the view.
             assert!(pitch.abs() <= MAX_CAM_PITCH + 1e-3, "camera pitch {pitch}");
             let look = Vec3::new(pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), pitch.sin());
-            let to_at = (s.pos + Vec3::Z * LOOK_UP * (c.arm / ARM)) - c.pos;
+            let to_at = arena::clamp_into(&volume(), s.pos + Vec3::Z * LOOK_UP * (c.arm / ARM)) - c.pos;
             assert!(to_at.normalize().dot(look) > 0.999, "the camera does not look at the point over the broom");
             assert!((s.pos - c.pos).normalize().dot(look) > 0.88, "the broom is out of the picture");
             assert!(c.fov >= FOV && c.fov <= FOV + FOV_SPEED, "fov {}", c.fov);
@@ -254,5 +285,46 @@ mod tests {
         assert!(c.pos.is_finite() && c.fov.is_finite() && c.arm.is_finite(), "{c:?}");
         let worse = chase_camera(&flying(), &CamState { pos: Vec3::splat(f32::NAN), rot: [0, 0, 0], fov: f32::NAN, arm: f32::NAN }, 1.0 / 60.0);
         assert!(worse.pos.is_finite() && worse.arm.is_finite(), "{worse:?}");
+    }
+
+    /// Wherever the broom is in the flight volume -- on a wall, in a corner, on the floor, under the ceiling --
+    /// and wherever the rider looks, the camera stays inside the stadium: never past a wall of the flight
+    /// volume (the stands), never under the turf, and no higher over the flight ceiling than its own rig.
+    #[test]
+    fn chase_camera_never_leaves_the_flight_volume() {
+        let b = arena::bounds();
+        let lo = Vec3::new(b.center.x - b.half.x, b.center.y - b.half.y, b.center.z - b.half.z);
+        let hi = Vec3::new(b.center.x + b.half.x, b.center.y + b.half.y, b.ceiling);
+        let at = |f: f32, a: f32, z: f32| a + (z - a) * f;
+        // What the camera is held to: the flight volume's walls, the turf, and the rig's height of sky.
+        let cam_lo = Vec3::new(lo.x, lo.y, arena::GROUND_Z + FLOOR_CLEARANCE);
+        let cam_hi = Vec3::new(hi.x, hi.y, hi.z + ARM + LOOK_UP);
+        assert!(cam_lo.z > arena::GROUND_Z && cam_lo.z <= lo.z);
+        // Skimming the ceiling and looking a little down -- the commonest thing a player does up there -- the
+        // camera keeps its whole arm instead of collapsing into the rider.
+        let top = BroomState::new(Vec3::new(b.center.x, b.center.y, b.ceiling), Vec3::ZERO, 0.0, -0.3);
+        let c = chase_camera(&top, &behind(&top), 1.0 / 60.0);
+        assert!((c.arm - ARM).abs() < 1e-3 && c.pos.distance(top.pos) > ARM * 0.9, "{c:?}");
+        let (lo, hi) = (cam_lo, cam_hi);
+        for fx in [0.0, 0.003, 0.5, 0.997, 1.0] {
+            for fy in [0.0, 0.003, 0.5, 0.997, 1.0] {
+                for fz in [0.0, 0.01, 0.5, 0.99, 1.0] {
+                    let pos = Vec3::new(at(fx, lo.x, hi.x), at(fy, lo.y, hi.y), at(fz, lo.z, hi.z));
+                    for yaw_n in 0..16 {
+                        for pitch in [-1.342, -0.7, 0.0, 0.3, 0.7, 1.342] {
+                            let yaw = wrap_pi(yaw_n as f32 * std::f32::consts::TAU / 16.0);
+                            let s = BroomState::new(pos, Vec3::ZERO, yaw, pitch);
+                            let mut c = behind(&s);
+                            for _ in 0..3 {
+                                c = chase_camera(&s, &c, 1.0 / 60.0);
+                            }
+                            let out = (lo - c.pos).max(c.pos - hi).max_element();
+                            assert!(out <= 1e-2, "broom {pos:?} yaw {yaw} pitch {pitch}: camera {:?} is {out} outside", c.pos);
+                            assert!(c.arm >= 0.0 && c.arm <= ARM, "{c:?}");
+                        }
+                    }
+                }
+            }
+        }
     }
 }
