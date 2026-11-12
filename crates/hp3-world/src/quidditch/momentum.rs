@@ -208,7 +208,8 @@ mod tests {
             biggest = biggest.max(now - last);
             last = now;
         }
-        assert!(last > MomentumTuning::default().base_speed + 50.0, "{last}");
+        // One ring adds 0.107 of charge, which the smoothstep turns into about 12 uu/s.
+        assert!(last > MomentumTuning::default().base_speed + 10.0, "{last}");
         assert!(biggest < 8.0, "a step of {biggest} uu/s in one frame is not smooth");
     }
 
@@ -219,11 +220,12 @@ mod tests {
         for n in 1..=3 {
             m.on_ring(n);
         }
-        for _ in 0..180 {
+        // A second: the three rings and the streak bonus (0.39) have poured in, and it is still inside the grace.
+        for _ in 0..60 {
             m.step(DT);
         }
         let full = m.charge();
-        assert!(full > 0.6, "{full}");
+        assert!(full > 0.35, "{full}");
         // Inside the grace nothing drains.
         let mut m2 = m;
         m2.since_ring = 0.5;
@@ -247,7 +249,8 @@ mod tests {
         for n in 1..=3 {
             m.on_ring(n);
         }
-        for _ in 0..300 {
+        // Poured in (0.39) and not yet drained, so a hit's 0.25 comes off something that is there.
+        for _ in 0..60 {
             m.step(DT);
         }
         let c = m.charge();

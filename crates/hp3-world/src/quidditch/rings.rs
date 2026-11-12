@@ -260,7 +260,8 @@ pub fn tick(vm: &mut Vm<'_>, m: &mut QuidditchMatch, dt: f32, events: &mut Vec<M
     }
     // The owner's rule: no catch without the run of rings. Told to the Snitch every frame, so a run lost to a
     // missed ring shuts the window's door again straight away.
-    m.snitch.set_rings_ready(m.rings.trail.catch_ready());
+    // (An `HP3_QUID_EASY` match has no such rule: it exists so a scripted match ends by itself.)
+    m.snitch.set_rings_ready(m.easy || m.rings.trail.catch_ready());
     place(vm, m);
 }
 

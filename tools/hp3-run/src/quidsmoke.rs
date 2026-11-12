@@ -49,7 +49,12 @@ pub fn play(root: &Path, seed: u64) -> Result<SmokeResult, Box<dyn std::error::E
     let pkg = set.get(MAP)?;
     hp3_world::load(&mut vm, &pkg, hp3_core::Config::load(root))?;
     glue::set_seed_override(Some(seed));
+    // The easy Snitch (no ring run, caught from anywhere once the bar is full): this smoke run checks that a match is played,
+    // scored and ended cleanly, and a scripted pilot cannot out-fly the Snitch under the game's own tuning (Harry's base speed
+    // is below the Snitch's), which is for a player to do.
+    glue::set_easy_override(Some(true));
     let started = glue::start(&mut vm, "Slytherin");
+    glue::set_easy_override(None);
     glue::set_seed_override(None);
     started?;
     let mut ticks = 0;

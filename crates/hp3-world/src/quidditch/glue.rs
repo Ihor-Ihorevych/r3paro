@@ -137,9 +137,9 @@ pub struct QuidditchMatch {
     /// then (`menu::LINGER_TICKS`). Only ever set for a `from_menu` match.
     leave_at: Option<u64>,
     /// `HP3_QUID_EASY=1` (debugging, off by default): the snitch is caught the moment Harry is anywhere near
-    /// it and the catch key is held for him, so a headless smoke run reaches a result in a few hundred ticks.
-    /// Nothing in the game sets it.
-    easy: bool,
+    /// it and the catch key is held for him, with no run of rings needed first, so a headless smoke run reaches a
+    /// result in a few hundred ticks. Nothing in the game sets it (`set_easy_override` is the smoke test's way).
+    pub(super) easy: bool,
 }
 
 /// The end of a match: Harry glides to a hover and the camera orbits him. `t` is seconds since it began.
@@ -231,6 +231,8 @@ thread_local! {
     /// A seed the headless smoke driver (`hp3-run quid-smoke`) picks per match; the environment is read once per
     /// thread, so it cannot vary the seed between matches. Never set by the game.
     static SEED_OVERRIDE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    /// Forces `HP3_QUID_EASY` on or off for the next matches started on this thread (`None`: as the environment says).
+    static EASY_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 thread_local! {
@@ -241,6 +243,13 @@ thread_local! {
 /// Pins (or, with `None`, releases) the seed of the next matches started on this thread. Debug driver only.
 pub fn set_seed_override(seed: Option<u64>) {
     SEED_OVERRIDE.with(|c| c.set(seed));
+}
+
+/// Forces the easy snitch (see `QuidditchMatch::easy`) on or off for the next matches started on this thread; `None`
+/// leaves it to `HP3_QUID_EASY`. Debug driver only: the headless smoke run uses it, because its scripted pilot cannot catch
+/// a Snitch that is faster than the broom's base speed under the game's own, deliberately hard, tuning.
+pub fn set_easy_override(easy: Option<bool>) {
+    EASY_OVERRIDE.with(|c| c.set(easy));
 }
 
 /// Flies this frame's broom with `input` and holds the catch key if `catch` (a scripted pilot, for the headless
@@ -487,7 +496,7 @@ pub fn start(vm: &mut Vm<'_>, opponent: &str) -> Result<(), VmError> {
     }
     // The Snitch actor is driven by the pure snitch; `tick` writes its `Location` every frame and
     // `presentation::start` gives it its mesh and its loop.
-    let easy = crate::envc::var_os("HP3_QUID_EASY").is_some();
+    let easy = EASY_OVERRIDE.with(|c| c.get()).unwrap_or_else(|| crate::envc::var_os("HP3_QUID_EASY").is_some());
     let snitch = if easy { Snitch::with_tuning(seed, &bounds, easy_snitch_tuning()) } else { Snitch::new(seed, &bounds) };
     let snitch_actor = spawn_class(vm, SNITCH_CLASS, arena::clamp_into(&bounds, snitch.pos()), 0);
     if let Some(s) = snitch_actor {
