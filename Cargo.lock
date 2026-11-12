@@ -58,7 +58,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bit-set"
-version = "0.8.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08807e080ed7f9d5433fa9b275196cfc35414f66a0c79d864dc51a0d825231a3"
 dependencies = [
@@ -67,7 +67,7 @@ dependencies = [
 
 [[package]]
 name = "bit-vec"
-version = "0.8.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
 
@@ -475,7 +475,7 @@ checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 
 [[package]]
 name = "hp3"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "glam",
  "hp3-assets",
@@ -496,7 +496,7 @@ dependencies = [
 
 [[package]]
 name = "hp3-anim"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "glam",
  "hp3-assets",
@@ -505,7 +505,7 @@ dependencies = [
 
 [[package]]
 name = "hp3-assets"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "hp3-package",
  "log",
@@ -514,18 +514,18 @@ dependencies = [
 
 [[package]]
 name = "hp3-audio"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "lewton",
 ]
 
 [[package]]
 name = "hp3-core"
-version = "0.8.0"
+version = "0.8.1"
 
 [[package]]
 name = "hp3-engine"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "glam",
  "hp3-anim",
@@ -539,23 +539,23 @@ dependencies = [
 
 [[package]]
 name = "hp3-ffi"
-version = "0.8.0"
+version = "0.8.1"
 
 [[package]]
 name = "hp3-game"
-version = "0.8.0"
+version = "0.8.1"
 
 [[package]]
 name = "hp3-gui"
-version = "0.8.0"
+version = "0.8.1"
 
 [[package]]
 name = "hp3-movie"
-version = "0.8.0"
+version = "0.8.1"
 
 [[package]]
 name = "hp3-package"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "hp3-core",
  "log",
@@ -565,7 +565,7 @@ dependencies = [
 
 [[package]]
 name = "hp3-pkg"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "hp3-assets",
  "hp3-audio",
@@ -575,11 +575,11 @@ dependencies = [
 
 [[package]]
 name = "hp3-platform"
-version = "0.8.0"
+version = "0.8.1"
 
 [[package]]
 name = "hp3-render"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "bytemuck",
  "glam",
@@ -592,7 +592,7 @@ dependencies = [
 
 [[package]]
 name = "hp3-run"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "glam",
  "hp3-assets",
@@ -606,7 +606,7 @@ dependencies = [
 
 [[package]]
 name = "hp3-script"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "hp3-package",
  "log",
@@ -615,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "hp3-view"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "glam",
  "hp3-anim",
@@ -632,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "hp3-world"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "fontdue",
  "glam",
@@ -925,7 +925,7 @@ checksum = "ef25abbcd74fb2609453eb695bd2f860d389e457f67dc17cafc8b8cbc89d0c33"
 
 [[package]]
 name = "ogg"
-version = "0.8.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6951b4e8bf21c8193da321bcce9c9dd2e13c858fe078bf9054a288b419ae5d6e"
 dependencies = [

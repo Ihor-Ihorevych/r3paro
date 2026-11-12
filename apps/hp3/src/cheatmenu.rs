@@ -14,7 +14,7 @@ pub enum Pick {
 }
 
 /// The entries, in the phone menu's order. The font has no comma, so the labels avoid it.
-const ENTRIES: [(&str, Option<&str>); 15] = [
+const ENTRIES: [(&str, Option<&str>); 18] = [
     ("GO TO LEVEL...", None),
     // The Quidditch cup: the next fixture of the league, and the way out of a match again.
     ("QUIDDITCH: PLAY THE NEXT MATCH", Some("quidditch")),
