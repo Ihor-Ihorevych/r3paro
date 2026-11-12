@@ -22,8 +22,9 @@ pub fn take() -> Vec<String> {
     QUEUE.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
 }
 
-/// Runs one command: `quicksave`, `quickload`, `level <map>` (sets `level`, which the loop opens), or
-/// `cheat <god|ghost|fly|walk|giveall|beans|cakes|pasties|beatboss|defeatpeeves|heal|carpecrab>`.
+/// Runs one command: `quicksave`, `quickload`, `level <map>` (sets `level`, which the loop opens),
+/// `cheat <god|ghost|fly|walk|giveall|beans|cakes|pasties|beatboss|defeatpeeves|heal|carpecrab>`, `gfx shadows [on|off]`, or
+/// `quidditch [next|<house>|stop|league]` (see `quidditch`).
 pub fn run(vm: &mut Vm<'_>, command: &str, level: &mut Option<String>) {
     let mut words = command.split_whitespace();
     let (Some(verb), arg) = (words.next(), words.next()) else { return };
@@ -48,8 +49,31 @@ pub fn run(vm: &mut Vm<'_>, command: &str, level: &mut Option<String>) {
             eprintln!("settings: gamma, brightness and contrast are back to the defaults");
         }
         "dumpnear" => dump_near(vm, arg.and_then(|a| a.parse().ok()).unwrap_or(400.0)),
+        // `trigger <event>` (debugging): fires an event as a script's TriggerEvent would, from the player's controller.
+        "trigger" => match (hp3_world::world(vm).player, arg) {
+            (Some(pc), Some(event)) => {
+                let name = vm.db.names.intern(event);
+                hp3_world::fire(vm, pc, "TriggerEvent", &mut [Value::Name(name), Value::Object(Some(pc)), Value::Object(None)]);
+                eprintln!("trigger: {event}");
+            }
+            _ => eprintln!("trigger: needs an event name and a player controller"),
+        },
+        // `anim <actor name> <sequence>` (debugging): plays a sequence on the actor, as `PlayAnim` does (see HP3_ANIM_TRACE).
+        "anim" => {
+            let (Some(who), Some(seq)) = (arg, words.next()) else { return eprintln!("anim: needs an actor name and a sequence") };
+            let found = hp3_world::world(vm).actors.clone().into_iter().find(|&a| hp3_script::natives::object_path(vm, a).ends_with(&format!(".{who}")));
+            match found {
+                Some(a) => {
+                    let name = vm.db.names.intern(seq);
+                    hp3_world::fire(vm, a, "PlayAnim", &mut [Value::Name(name), Value::Float(1.0), Value::Float(0.0)]);
+                    eprintln!("anim: {who} {seq}");
+                }
+                None => eprintln!("anim: no actor named {who}"),
+            }
+        }
         "level" => *level = arg.map(str::to_string),
         "cheat" => cheat(vm, arg.unwrap_or("")),
+        "quidditch" => quidditch(vm, arg.unwrap_or(""), level),
         _ => eprintln!("command: unknown '{command}'"),
     }
 }
@@ -151,6 +175,46 @@ pub fn load_graphics(vm: &Vm<'_>) {
     use hp3_render::quality;
     if hp3_world::settings::text(vm, "hp3.app", "ActorShadows").is_some() {
         quality::set_actor_shadows(hp3_world::settings::flag(vm, "hp3.app", "ActorShadows", true));
+    }
+}
+
+/// `quidditch [next]` starts a match against the house the league says is next and sends the game to the
+/// Quidditch map; `quidditch <house>` picks the house by hand (Slytherin, Ravenclaw or Hufflepuff, or the
+/// start of one); `quidditch stop` leaves a running match and goes back to the front end; `quidditch league`
+/// prints the table. This is the in-game entry: the F12 debug list has both an entry for the next fixture and
+/// one for leaving, so no environment variable is needed to play a match.
+fn quidditch(vm: &mut Vm<'_>, what: &str, level: &mut Option<String>) {
+    use hp3_world::quidditch::league::Opponent;
+    use hp3_world::quidditch::menu;
+    match what {
+        "" | "next" => match menu::request_next(vm) {
+            Some(o) => {
+                eprintln!("quidditch: next match against {}", o.name());
+                *level = Some(menu::MATCH_MAP.to_string());
+            }
+            None => eprintln!("quidditch: the season is over, nothing left to play (see 'quidditch league')"),
+        },
+        "stop" | "leave" | "exit" if hp3_world::world(vm).quidditch.is_none() => {
+            eprintln!("quidditch: no match is being played, nothing to leave");
+        }
+        "stop" | "leave" | "exit" => {
+            let map = menu::leave(vm);
+            eprintln!("quidditch: back to {map}");
+            *level = Some(map);
+        }
+        "league" | "table" => {
+            for line in menu::report(vm) {
+                eprintln!("quidditch: {line}");
+            }
+        }
+        house => match Opponent::parse(house) {
+            Some(o) => {
+                menu::request(vm, o);
+                eprintln!("quidditch: match against {}", o.name());
+                *level = Some(menu::MATCH_MAP.to_string());
+            }
+            None => eprintln!("quidditch: unknown '{house}' (next, Slytherin, Ravenclaw, Hufflepuff, stop, league)"),
+        },
     }
 }
 

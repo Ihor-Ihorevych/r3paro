@@ -678,7 +678,11 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
             };
             let name = vm.db.objects.get(a).name;
             let name = vm.db.names.get(name).to_string();
-            if std::env::var_os("HP3_PARTICLE_DEBUG").is_some() && name.starts_with("ChallengeShield") && world(vm).frame % 120 == 0 {
+            // `HP3_PARTICLE_DEBUG_NAME=<prefix>` picks which actors' emitters are described (the shield's by default).
+            if std::env::var_os("HP3_PARTICLE_DEBUG").is_some()
+                && name.starts_with(std::env::var("HP3_PARTICLE_DEBUG_NAME").as_deref().unwrap_or("ChallengeShield"))
+                && world(vm).frame % 120 == 0
+            {
                 let mat = world(vm).particles.states.get(&key).and_then(|s| s.config.material).map(|m| hp3_script::natives::object_path(vm, m));
                 eprintln!("emitter-material {name} #{i} {mat:?}");
                 if let Some(s) = world(vm).particles.states.get(&key) {

@@ -81,6 +81,46 @@ pub struct VertMesh {
     pub frame_spheres: Vec<Sphere>,
 }
 
+/// A packed vertex of a vertex-animated mesh: three signed fields of 11, 11 and 10 bits (the original's `FMeshVert`).
+pub fn unpack_vert(v: u32) -> [f32; 3] {
+    let x = ((v & 0x7FF) as i32) << 21 >> 21;
+    let y = (((v >> 11) & 0x7FF) as i32) << 21 >> 21;
+    let z = (((v >> 22) & 0x3FF) as i32) << 22 >> 22;
+    [x as f32, y as f32, z as f32]
+}
+
+impl VertMesh {
+    /// The packed positions of every frame, `header.vertex_count` to a frame: the lod header's array when it holds all the frames,
+    /// else the mesh's own.
+    fn frame_data(&self) -> &[u32] {
+        let need = self.header.vertex_count.max(0) as usize * self.anim_frames.max(1) as usize;
+        if self.header.verts.len() >= need || self.header.verts.len() >= self.anim_verts.len() { &self.header.verts } else { &self.anim_verts }
+    }
+
+    /// The positions of one animation frame (in mesh units, before the mesh's scale and origin); empty when the frame is not there.
+    pub fn frame_points(&self, frame: usize) -> Vec<[f32; 3]> {
+        let count = self.header.vertex_count.max(0) as usize;
+        self.frame_data().get(frame * count..(frame + 1) * count).map(|f| f.iter().map(|&v| unpack_vert(v)).collect()).unwrap_or_default()
+    }
+
+    /// The positions a sequence shows at `frame` (frames into it, fractions blending with the next, wrapping round), as the
+    /// original's `UVertMeshInstance::GetFrame` does.
+    pub fn sequence_points(&self, sequence: usize, frame: f32) -> Vec<[f32; 3]> {
+        let Some(s) = self.sequences.get(sequence) else { return self.frame_points(0) };
+        let n = s.num_frames.max(1) as usize;
+        let f = frame.max(0.0);
+        let whole = f.floor();
+        let alpha = f - whole;
+        let first = s.start_frame.max(0) as usize + whole as usize % n;
+        let a = self.frame_points(first);
+        if alpha <= 0.0 {
+            return a;
+        }
+        let b = self.frame_points(s.start_frame.max(0) as usize + (whole as usize + 1) % n);
+        a.iter().zip(&b).map(|(p, q)| [p[0] + (q[0] - p[0]) * alpha, p[1] + (q[1] - p[1]) * alpha, p[2] + (q[2] - p[2]) * alpha]).collect()
+    }
+}
+
 pub fn read_vert_mesh(r: &mut Reader<'_>) -> Result<VertMesh> {
     let header = read_lod_header(r)?;
     let _ = r.array(|r| r.u32())?;

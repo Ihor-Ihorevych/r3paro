@@ -89,9 +89,11 @@ impl Vm<'_> {
         };
         let new_state = if state_name == Name::NONE { None } else { self.find_state(class, state_name) };
         if state_name != Name::NONE && new_state.is_none() {
+            // A state the class does not have means no state, as in the original's `UObject::GotoState` ("If state is NAME_None or was
+            // not found, goes to no state"): the object leaves the state it was in. (PopupTrigger ends its popup with
+            // GotoState('StateIdle') and has no such state; staying in the popup made its Tick run forever.)
             let s = format!("{}: no state {}", self.db.names.get(self.db.objects.get(obj).name), self.db.names.get(state_name));
             self.warn(s);
-            return Ok(());
         }
         let old = self.state_of(obj);
         if self.trace_states {

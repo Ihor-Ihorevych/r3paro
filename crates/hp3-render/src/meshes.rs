@@ -19,6 +19,8 @@ pub struct MeshBatch {
     pub indices: Vec<u32>,
     /// Skeletal meshes: the mesh point each vertex is placed at, for re-posing.
     pub points: Vec<u32>,
+    /// The section's skin is a video that is not there to play: it is drawn in a plain stand-in grey, darker than the usual one.
+    pub placeholder: bool,
 }
 
 pub struct MeshGeom {
@@ -31,6 +33,11 @@ pub struct MeshGeom {
 
 fn texture(loader: &Loader<'_>, pkg: &Rc<Package>, material: ObjRef) -> Option<(ObjKey, MaterialBlend)> {
     let (tp, ti) = loader.base_texture(pkg, material)?;
+    // A `MovieTexture` is a buffer the game fills by playing a Bink video (the animals' fur, the newspaper's photo). Without the
+    // video it is blank, which would draw black: it counts as no texture, and the mesh takes the plain grey instead.
+    if tp.export_class_name(ti).eq_ignore_ascii_case("MovieTexture") && loader.image(&tp, ti).is_none_or(|i| i.rgba.chunks_exact(4).all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0)) {
+        return None;
+    }
     // A material that uses the texture's alpha channel (Harry's hair, the salamanders' flames) keeps it.
     let blend = loader.material_blend(pkg, material);
     // A shader with an opacity map blends by that map: its own combined picture.
@@ -98,7 +105,7 @@ pub fn build_posed(
                     eprintln!("mesh section {si}: faces {} skin override {} material {name:?} resolved {resolved}", section.num_faces, skins.get(si).is_some_and(|(_, r)| !r.is_none()));
                 }
                 let (tex, blend) = skin(si).or_else(|| materials.get(si).copied().and_then(|m| texture(loader, pkg, m))).unzip();
-                batches.push(MeshBatch { texture: tex, blend: blend.unwrap_or_default(), vertices, indices, points: Vec::new() });
+                batches.push(MeshBatch { texture: tex, blend: blend.unwrap_or_default(), vertices, indices, points: Vec::new(), placeholder: false });
             }
             Some(MeshGeom { batches, local: Mat4::IDENTITY, normal_flip: 1.0 })
         }
@@ -138,7 +145,7 @@ pub fn build_posed(
                 // slots and nine textures; the last is the hair). A heuristic, not checked against HP3.
                 let tex_index = h.materials.get(mi).map(|m| m.1 as usize).unwrap_or(mi).min(h.textures.len().saturating_sub(1));
                 let (tex, blend) = skin(mi).or_else(|| h.textures.get(tex_index).and_then(|t| texture(loader, pkg, *t))).unzip();
-                batches.push(MeshBatch { texture: tex, blend: blend.unwrap_or_default(), vertices, indices, points });
+                batches.push(MeshBatch { texture: tex, blend: blend.unwrap_or_default(), vertices, indices, points, placeholder: false });
             }
             let scale = Vec3::new(h.mesh_scale.x, h.mesh_scale.y, h.mesh_scale.z);
             let origin = Vec3::new(h.mesh_origin.x, h.mesh_origin.y, h.mesh_origin.z);
@@ -154,6 +161,70 @@ pub fn build_posed(
                 for (v, &p) in b.vertices.iter_mut().zip(&b.points) {
                     v.color = normals.get(p as usize).copied().unwrap_or(Vec3::Z).to_array();
                 }
+            }
+            Some(geom)
+        }
+        // A vertex-animated mesh: the faces and wedges of its lod header, with each point taken from an animation frame.
+        Asset::VertMesh(m) => {
+            let h = &m.header;
+            let rest: Vec<Vec3> = match points {
+                Some(pts) => pts.to_vec(),
+                None => m.frame_points(0).into_iter().map(Vec3::from).collect(),
+            };
+            let mut per_material: Vec<(Vec<Vertex>, Vec<u32>, std::collections::HashMap<u16, u32>, Vec<u32>)> = Vec::new();
+            for f in &h.faces {
+                let mi = f.material as usize;
+                while per_material.len() <= mi {
+                    per_material.push(Default::default());
+                }
+                let (verts, idx, remap, src) = &mut per_material[mi];
+                for &w in &f.wedges {
+                    let next = verts.len() as u32;
+                    let out = *remap.entry(w).or_insert_with(|| {
+                        let wedge = h.wedges.get(w as usize);
+                        let vi = wedge.map(|w| w.vertex as usize).unwrap_or(0);
+                        let p = rest.get(vi).copied().unwrap_or(Vec3::ZERO);
+                        let uv = wedge.map(|w| [w.u, w.v]).unwrap_or([0.0, 0.0]);
+                        verts.push(Vertex::unlit(p.to_array(), uv));
+                        src.push(vi as u32);
+                        next
+                    });
+                    idx.push(out);
+                }
+            }
+            let mut batches = Vec::new();
+            for (mi, (vertices, indices, _, points)) in per_material.into_iter().enumerate() {
+                if indices.is_empty() {
+                    continue;
+                }
+                let tex_index = h.materials.get(mi).map(|m| m.1 as usize).unwrap_or(mi).min(h.textures.len().saturating_sub(1));
+                let (tex, blend) = skin(mi).or_else(|| h.textures.get(tex_index).and_then(|t| texture(loader, pkg, *t))).unzip();
+                // A skin that was given but is a video the install lacks (the animals' fur) leaves a plain stand-in colour.
+                let placeholder = tex.is_none() && skins.get(mi).is_some_and(|(_, r)| !r.is_none());
+                batches.push(MeshBatch { texture: tex, blend: blend.unwrap_or_default(), vertices, indices, points, placeholder });
+            }
+            let scale = Vec3::new(h.mesh_scale.x, h.mesh_scale.y, h.mesh_scale.z);
+            let origin = Vec3::new(h.mesh_origin.x, h.mesh_origin.y, h.mesh_origin.z);
+            let local = rotation_matrix(h.rot_origin) * Mat4::from_scale(scale) * Mat4::from_translation(-origin);
+            let mut geom = MeshGeom { batches, local, normal_flip: 1.0 };
+            geom.normal_flip = normal_flip(&geom, &rest);
+            let normals = point_normals(&geom, &rest);
+            for b in &mut geom.batches {
+                for (v, &p) in b.vertices.iter_mut().zip(&b.points) {
+                    v.color = normals.get(p as usize).copied().unwrap_or(Vec3::Z).to_array();
+                }
+            }
+            if std::env::var_os("HP3_MESH_DEBUG").is_some() {
+                eprintln!(
+                    "vertmesh: {} vertices, {} frames, header verts {} anim verts {}, {} faces, textures {}, scale {scale} origin {origin}",
+                    h.vertex_count, m.anim_frames, h.verts.len(), m.anim_verts.len(), h.faces.len(), h.textures.len()
+                );
+                let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+                for w in &h.wedges {
+                    lo = [lo[0].min(w.u), lo[1].min(w.v)];
+                    hi = [hi[0].max(w.u), hi[1].max(w.v)];
+                }
+                eprintln!("vertmesh: wedge uv from {lo:?} to {hi:?} ({} wedges)", h.wedges.len());
             }
             Some(geom)
         }

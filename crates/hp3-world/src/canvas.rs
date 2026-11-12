@@ -310,6 +310,9 @@ pub fn render(vm: &mut Vm<'_>, width: u32, height: u32) -> Vec<Tile> {
             t.h *= scale;
         }
     }
+    // A Quidditch match draws its own HUD over the game's, in screen pixels (so it is not laid out small and
+    // scaled up like the game's). Nothing happens on any other level.
+    crate::quidditch::presentation::draw_hud(vm, width, height);
     set(vm, canvas, "SizeX", Value::Int(width as i32));
     set(vm, canvas, "SizeY", Value::Int(height as i32));
     // Interactions (the GUI's menus, the console) draw over the HUD.

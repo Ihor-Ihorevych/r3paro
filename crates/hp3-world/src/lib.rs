@@ -23,6 +23,7 @@ pub mod memo;
 pub mod natives;
 pub mod particles;
 mod perception;
+pub mod quidditch;
 pub mod physics;
 pub mod save;
 pub mod shadows;
@@ -144,6 +145,15 @@ pub struct World {
     pub memo_projectors: memo::Memo,
     /// Per-actor answer of the particle tick (1: not an emitter).
     pub memo_emitters: memo::Memo,
+    /// The Quidditch match being played in this level, if any (`quidditch::glue`). None on every other level,
+    /// and gone with the level itself.
+    pub quidditch: Option<quidditch::glue::QuidditchMatch>,
+    /// Holds a `quidditch::glue::start` or `stop` asked for while the match is being ticked until the tick is
+    /// over (see `quidditch::glue::Gate`).
+    pub quidditch_gate: quidditch::glue::Gate,
+    /// Whether a level switch has already been refused for the running match, so it is logged once
+    /// (`count_down_travel`). Never set on a level with no match.
+    pub quidditch_travel_blocked: bool,
 }
 
 /// The world stored in the VM. Panics if no level is loaded.
@@ -489,6 +499,10 @@ pub fn url_map(url: &str) -> String {
 pub fn travel(vm: &mut Vm<'_>, url: &str) -> Result<Rc<Package>, VmError> {
     let map_name = url_map(url);
     let map = vm.db.set.get(&map_name).map_err(|e| VmError::Runtime(format!("travel to {map_name}: {e}")))?;
+    // A Quidditch match does not outlive its level, however the level is left (the level list, a quick load):
+    // it is stopped first, so the player travels as the pawn he walked in as and not as the broom pawn, and
+    // the match's music stops. A no-op on every level with no match.
+    quidditch::glue::stop(vm);
     // What goes with the player: a restart keeps what came in with the level; otherwise, when the level asked
     // for items to travel (`bNextItems`), the player's pawn and its inventory are described.
     let restart = url.trim_start().to_ascii_uppercase().starts_with("?RESTART");
@@ -686,6 +700,9 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         memo_emitters: Default::default(),
         tick_skipped: Default::default(),
         actor_slots: Default::default(),
+        quidditch: None,
+        quidditch_gate: Default::default(),
+        quidditch_travel_blocked: false,
         config,
     }));
     memprobe("world made");
@@ -766,6 +783,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
     for &a in &actors {
         fire(vm, a, "PreBeginPlay", &mut []);
     }
+    widen_flight_corridor(vm, &actors);
     for &a in &actors {
         fire(vm, a, "BeginPlay", &mut []);
     }
@@ -868,6 +886,9 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
             }
         }
     }
+    // `HP3_MATCH=<opponent>` (debugging): the level is loaded and the player is logged in, so a Quidditch
+    // match can build its arena and spawn into it. Every other level leaves the match state empty.
+    quidditch::glue::start_from_env(vm)?;
     Ok(())
 }
 
@@ -917,6 +938,11 @@ fn arrive_from(vm: &mut Vm<'_>, pawn: ObjId) {
 /// The player's view this frame from the game's `PlayerCalcView`: location, rotation (pitch, yaw, roll) and
 /// horizontal field of view. `None` when the game gives no view (location at the origin).
 pub fn player_view(vm: &mut Vm<'_>) -> Option<(glam::Vec3, [i32; 3], f32)> {
+    // A Quidditch match is watched from its own chase camera, not from the game's camera actor (which knows
+    // nothing about brooms). Every other level takes the view from the script, as before.
+    if let Some(view) = quidditch::glue::view(vm) {
+        return Some(view);
+    }
     let pc = world(vm).player?;
     // The view is asked for once per drawn frame, with the controller as the view actor and its own location and
     // rotation as the starting values. HP3's script computes a new view only when `bTicked` differs from
@@ -1081,6 +1107,27 @@ pub fn fill_level_enter_text(vm: &mut Vm<'_>) {
 fn count_down_travel(vm: &mut Vm<'_>, li: ObjId, dt: f32) {
     let next = get(vm, li, "NextURL").as_str().to_string();
     if !next.is_empty() {
+        // A Quidditch match is played on a map whose own scripts switch the level when they are done
+        // (`quidditch::stage` clears the cutscene that does it, this is the backstop): while a match runs the
+        // switch is refused, so the pitch cannot be taken away from under the player. Said once per level.
+        // A switch asked for while the game is paused is the player's own (a pause page's "leave"), not the
+        // level's: the match is ended for it instead, or there would be no way out of a match by the menu.
+        if world(vm).quidditch.is_some() && get(vm, li, "Pauser").as_obj().is_some() {
+            let line = format!("quidditch: the player left by the menu ({next}), the match is stopped");
+            println!("{line}");
+            vm.log.push(line);
+            quidditch::glue::stop(vm);
+        }
+        if world(vm).quidditch.is_some() {
+            set(vm, li, "NextURL", Value::Str(String::new()));
+            if !world(vm).quidditch_travel_blocked {
+                world(vm).quidditch_travel_blocked = true;
+                let line = format!("quidditch: level travel blocked ({next})");
+                println!("{line}");
+                vm.log.push(line);
+            }
+            return;
+        }
         let countdown = get(vm, li, "NextSwitchCountdown").as_float() - dt;
         set(vm, li, "NextSwitchCountdown", Value::Float(countdown));
         if countdown <= 0.0 {
@@ -1269,6 +1316,10 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
     }
     world(vm).memo_tick = memo;
     mark(vm, "actors");
+    // The Quidditch match, after the actors have moved: it reads Harry's pawn and puts the snitch where its
+    // own simulation has it. A no-op on every level where no match is running.
+    quidditch::glue::tick(vm, dt);
+    mark(vm, "quidditch");
     touch::frame_pass(vm);
     mark(vm, "touching");
     anim::update_movement(vm, dt);
@@ -1490,7 +1541,9 @@ pub fn mesh_offset(vm: &mut Vm<'_>, a: ObjId) -> glam::Vec3 {
         let height = get(vm, a, "CollisionHeight").as_float();
         offset.z -= height - keep;
         if get(vm, a, "Physics").as_byte() != 0 {
-            offset.z -= 5.0;
+            // The extra drop (fitted on human-sized characters at 5; the original's own is 2.5) is a quarter of the collision height
+            // up to that: a cat 10 high that sat 5 too low sank into the train seat it lay on.
+            offset.z -= (height * 0.25).min(5.0);
         }
     }
     offset
@@ -1535,6 +1588,46 @@ fn vec_of(v: &Value) -> glam::Vec3 {
 }
 
 /// Collision geometry of a level: its BSP, the triangles of blocking static meshes, and terrain.
+/// The Buckbeak flight is bounded by a corridor along its path: past the `PathMarker`s' tether (their `fTetherWidth` and
+/// `fTetherHeight`, which `PreBeginPlay` takes from the marker's collision size) the rider is turned back toward the path by the
+/// script, fast enough to override the player's steering, so a ring near the edge is hard to line up. On a level that has the flight
+/// game the tethers are widened by `HP3_BUCKBEAK_WALL` (1.5 by default; 1 leaves the original corridor), before `BeginPlay` builds the
+/// perimeter from them.
+fn widen_flight_corridor(vm: &mut Vm<'_>, actors: &[ObjId]) {
+    let factor: f32 = std::env::var("HP3_BUCKBEAK_WALL").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5);
+    if (factor - 1.0).abs() < 1e-3 {
+        return;
+    }
+    let (Some(marker), Some(game)) = (vm.db.find("PathMarker"), vm.db.find("HippoFlyGame")) else {
+        if std::env::var_os("HP3_FLIGHT_DEBUG").is_some() {
+            eprintln!("flight corridor: classes PathMarker {:?} HippoFlyGame {:?}", vm.db.find("PathMarker"), vm.db.find("HippoFlyGame"));
+        }
+        return;
+    };
+    if std::env::var_os("HP3_FLIGHT_DEBUG").is_some() {
+        let g = actors.iter().filter(|&&a| vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, game))).count();
+        eprintln!("flight corridor: {g} flight games in {} actors", actors.len());
+    }
+    let is = |vm: &Vm<'_>, a: ObjId, class: hp3_script::class_db::StructId| vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, class));
+    if !actors.iter().any(|&a| is(vm, a, game)) {
+        return;
+    }
+    let mut widened = 0;
+    for &a in actors {
+        if is(vm, a, marker) {
+            for prop in ["fTetherWidth", "fTetherHeight"] {
+                let v = get(vm, a, prop).as_float();
+                set(vm, a, prop, Value::Float(v * factor));
+            }
+            widened += 1;
+        }
+    }
+    if std::env::var_os("HP3_FLIGHT_DEBUG").is_some() {
+        eprintln!("flight corridor: {widened} path markers widened by {factor}");
+    }
+    vm.log.push(format!("flight corridor: {widened} path markers widened by {factor}"));
+}
+
 /// A mover's collision triangles in its own space (scaled, around its pivot): its static mesh's, or its
 /// brush's polygons.
 fn mover_shape(vm: &mut Vm<'_>, a: ObjId) -> Option<collision::MoverShape> {

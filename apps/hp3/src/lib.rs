@@ -26,12 +26,14 @@ use sdl3::mouse::MouseButton;
 #[cfg(target_os = "android")]
 pub mod android;
 mod audio;
+pub mod broom;
 mod cheatmenu;
 pub mod commands;
 mod gamelog;
 mod gamepad;
 mod levelmenu;
 mod present;
+mod quidbutton;
 use hp3_script::Value;
 
 /// What the platform layer needs to know about the game and tells it: on Android Flipendo's touch controls ask through JNI
@@ -94,6 +96,8 @@ mod platform {
         1.0
     }
     pub fn note_saved() {}
+    /// Buckbeak's flight (the phone's touch layout can swap its halves; the desktop has nothing to swap).
+    pub fn set_flight(_on: bool) {}
 }
 
 /// The ini's name for a key.
@@ -235,6 +239,12 @@ fn player_flying(vm: &mut Vm<'_>) -> bool {
     vm.state_of(pc).is_some_and(|st| vm.db.names.get(vm.db.get(st).name).starts_with("PlayerFlapping"))
 }
 
+/// Whether the player rides Buckbeak (the controller is in `PlayerFlappingHippo`, which a flying creature like the chicken does not use).
+fn player_on_hippogriff(vm: &mut Vm<'_>) -> bool {
+    let Some(pc) = hp3_world::world(vm).player else { return false };
+    vm.state_of(pc).is_some_and(|st| vm.db.names.get(vm.db.get(st).name).starts_with("PlayerFlappingHippo"))
+}
+
 /// Whether the player is in a cutscene: something other than the player's own controller holds the pawn (a cutscene's
 /// controller), or the player has no pawn at all while no menu is open (the opening of a new game is played that way).
 fn player_in_cutscene(vm: &mut Vm<'_>, menu_open: bool) -> bool {
@@ -258,11 +268,16 @@ thread_local! {
 
 /// Dynamic field of view: the faster the hero slides, the wider the view (up to `HP3_DYN_FOV_MAX` degrees, 16 by default, 0 turns
 /// it off), eased in and out so it neither jumps nor lags.
+///
+/// The *slide* is all this is for. A Quidditch match opens the view with speed too, and does it in the chase
+/// camera itself (`quidditch::camera`, which has the broom's speed to hand and smooths it there); while one
+/// runs this adds nothing, so the two never stack.
 fn dynamic_fov(vm: &mut Vm<'_>) -> f32 {
     let max: f32 = std::env::var("HP3_DYN_FOV_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(16.0);
+    let playing_quidditch = hp3_world::world(vm).quidditch.is_some();
     let pawn = hp3_world::world(vm).player.and_then(|pc| hp3_world::get(vm, pc, "Pawn").as_obj());
     let target = match pawn {
-        Some(p) if max > 0.0 && hp3_world::get(vm, p, "bIsSliding").as_bool() => {
+        Some(p) if max > 0.0 && !playing_quidditch && hp3_world::get(vm, p, "bIsSliding").as_bool() => {
             let speed = hp3_world::physics::vec(&hp3_world::get(vm, p, "Velocity")).length();
             ((speed - 150.0) / 450.0).clamp(0.0, 1.0) * max
         }
@@ -281,11 +296,17 @@ fn dynamic_fov(vm: &mut Vm<'_>) -> f32 {
 fn game_camera(vm: &mut Vm<'_>) -> Option<Camera> {
     let extra_fov = dynamic_fov(vm);
     if let Some((mut position, rotation, fov)) = hp3_world::player_view(vm) {
-        if let Some(pawn) = hp3_world::world(vm).player.and_then(|pc| hp3_world::get(vm, pc, "Pawn").as_obj()) {
+        // The eye height the game's camera leaves out of its view; a match's chase camera is a whole view of
+        // its own and needs none of it.
+        if let Some(pawn) = hp3_world::world(vm).player.and_then(|pc| hp3_world::get(vm, pc, "Pawn").as_obj())
+            && hp3_world::world(vm).quidditch.is_none()
+        {
             position.z += hp3_world::physics::view_offset(vm, pawn);
         }
-        // In play (not in a cutscene) the camera stands a little further back from the character.
-        let playing = hp3_world::world(vm).player.is_some_and(|pc| vm.state_of(pc).is_some_and(|st| vm.db.names.get(vm.db.get(st).name).starts_with("Player")));
+        // In play (not in a cutscene) the camera stands a little further back from the character. A Quidditch
+        // match brings its own chase camera, already placed behind the broom: nothing is added to it.
+        let playing = hp3_world::world(vm).quidditch.is_none()
+            && hp3_world::world(vm).player.is_some_and(|pc| vm.state_of(pc).is_some_and(|st| vm.db.names.get(vm.db.get(st).name).starts_with("Player")));
         if playing {
             let k = std::f32::consts::TAU / 65536.0;
             let (pitch, yaw) = (rotation[0] as f32 * k, rotation[1] as f32 * k);
@@ -480,6 +501,9 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
     // When the limit was last changed (the window title says so for a few seconds).
     let mut fps_note: Option<(Instant, u32)> = None;
     let mut perf = PerfStats::default();
+    // How long a frame's work is taking, in milliseconds, smoothed over the last frames (0 before the first
+    // one). A Quidditch match's frame budget is chosen from it (`quidditch::lod`).
+    let mut avg_frame_ms = 0.0f32;
     let mut fps_timer = Instant::now();
     let mut free_camera = false;
     let mut in_menu = false;
@@ -525,6 +549,11 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             platform::set_in_menu(menu);
             sdl.mouse().set_relative_mouse_mode(&window, !menu);
         }
+        // The QUIDDITCH button is on the front-end menu only, while no match runs and no debug list is open.
+        let quid_button = in_menu && !levels.open && !cheats.open && hp3_world::world(&mut vm).quidditch.is_none() && {
+            let front = hp3_world::quidditch::menu::front_end_map(&mut vm);
+            front.eq_ignore_ascii_case(&current_map)
+        };
         for event in events.poll_iter() {
             if let Some(p) = &mut pad
                 && matches!(
@@ -548,6 +577,16 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                 Event::AudioDeviceAdded { iscapture: false, .. } | Event::AudioDeviceRemoved { iscapture: false, .. } => {
                     audio_reopen_at = Some(Instant::now() + std::time::Duration::from_millis(700));
                 }
+                Event::MouseButtonDown { mouse_btn: MouseButton::Left, x, y, .. } if quid_button && {
+                    let (ww, _) = window.size();
+                    let scale = width as f32 / ww.max(1) as f32;
+                    quidbutton::hit(x * scale, y * scale, width, height)
+                } => commands::push("quidditch"),
+                Event::MouseButtonUp { mouse_btn: MouseButton::Left, x, y, .. } if quid_button && {
+                    let (ww, _) = window.size();
+                    let scale = width as f32 / ww.max(1) as f32;
+                    quidbutton::hit(x * scale, y * scale, width, height)
+                } => {}
                 Event::KeyDown { scancode: Some(Scancode::F11), repeat: false, .. } if !cheats.open => levels.toggle(&current_map),
                 Event::KeyDown { scancode: Some(Scancode::F12), repeat: false, .. } if !levels.open => cheats.toggle(),
                 // F7: gamma, brightness and contrast back to the defaults (also while a menu is open).
@@ -770,10 +809,21 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         for command in commands::take() {
             commands::run(&mut vm, &command, &mut pending_level);
         }
+        // A Quidditch match: the phone's touch layout flies the broom (its stick and buttons come in through
+        // `broom`), and the frames it is taking set the match's budget. Both are nothing on every other
+        // level, where no match is running.
+        if hp3_world::world(&mut vm).quidditch.is_some() {
+            if let Some(t) = broom::take() {
+                hp3_world::quidditch::phone::feed_touch(&mut vm, t.stick, t.reach_tap);
+            }
+            hp3_world::quidditch::phone::feed_frame_ms(&mut vm, avg_frame_ms);
+        }
         if hp3_world::world(&mut vm).frame % 6 == 0 {
+            broom::set_on_broom(hp3_world::world(&mut vm).quidditch.is_some());
             platform::set_cutscene(player_in_cutscene(&mut vm, in_menu));
             platform::set_creature(player_controls_creature(&mut vm));
             FLYING.store(player_flying(&mut vm), std::sync::atomic::Ordering::Relaxed);
+            platform::set_flight(player_on_hippogriff(&mut vm));
             CREATURE.store(player_is_creature(&mut vm), std::sync::atomic::Ordering::Relaxed);
         }
         // The window's surface is gone (the app is in the background): nothing is drawn until it is back.
@@ -980,6 +1030,10 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         let particle_draw = particle_renderer.prepare(&renderer, &particle_quads, &particle_images);
         stages.push(("particle_upload", frame_start.elapsed().as_secs_f32() * 1000.0));
         renderer.animate_scene(&gpu_scene, hp3_world::world(&mut vm).frame as f32 / 60.0);
+        let fluids = renderer.fluid_actors(&gpu_scene);
+        if !fluids.is_empty() {
+            renderer.move_fluids(&gpu_scene, &hp3_engine::fluid_places(&mut vm, &fluids));
+        }
         // The off-screen image to draw into: waits only if the display is two frames behind.
         let slot = presenter.take();
         stages.push(("wait", frame_start.elapsed().as_secs_f32() * 1000.0));
@@ -1015,6 +1069,9 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             };
             quads.extend(cheatmenu::spell_indicator(&spell, mode, crab_option.then_some(picked), width, height));
         }
+        if quid_button {
+            quads.extend(quidbutton::quads(width, height));
+        }
         let images = |k: &hp3_assets::loader::ObjKey| hud_cache.image(&loader, k);
         let hud = overlay.draw(&renderer, &quads, &images, &view, width, height);
         stages.push(("hud", frame_start.elapsed().as_secs_f32() * 1000.0));
@@ -1032,7 +1089,11 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             loader.trim();
         }
         frames += 1;
-        perf.add(&stages, frame_start.elapsed().as_secs_f32() * 1000.0);
+        let took = frame_start.elapsed().as_secs_f32() * 1000.0;
+        perf.add(&stages, took);
+        // What a frame is costing, smoothed: the frame rate limiter's own wait is not in it (it is measured
+        // from `frame_start`), so this is the work a frame takes. A Quidditch match's budget follows it.
+        avg_frame_ms += (took - avg_frame_ms) * if avg_frame_ms > 0.0 { 0.1 } else { 1.0 };
         if fps_timer.elapsed().as_secs_f32() >= 1.0 {
             let fps = frames as f32 / fps_timer.elapsed().as_secs_f32();
             if std::env::var_os("HP3_PERF").is_some() || cfg!(target_os = "android") {

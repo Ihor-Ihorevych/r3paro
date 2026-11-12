@@ -16,3 +16,5 @@ glam = "0.30"
 hp3-anim = { path = "../hp3-anim" }
 hp3-audio = { path = "../hp3-audio" }
 fontdue = "0.9"
+# The Quidditch HUD's SVG art (no text, no system fonts: pure drawing).
+resvg = { version = "0.45", default-features = false }

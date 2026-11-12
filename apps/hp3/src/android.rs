@@ -96,6 +96,7 @@ pub extern "C" fn SDL_main(argc: c_int, argv: *mut *mut c_char) -> c_int {
 static IN_MENU: AtomicBool = AtomicBool::new(true);
 static CUTSCENE: AtomicBool = AtomicBool::new(false);
 static CREATURE: AtomicBool = AtomicBool::new(false);
+static FLIGHT: AtomicBool = AtomicBool::new(false);
 static SURFACE_ALIVE: AtomicBool = AtomicBool::new(true);
 static FRAMES: AtomicI32 = AtomicI32::new(0);
 static FPS_LIMIT: AtomicI32 = AtomicI32::new(60);
@@ -123,6 +124,16 @@ pub fn set_cutscene(on: bool) {
 /// The player steers a creature (rabbit, dragon): the touch controls offer an Exit button (the Enter key).
 pub fn set_creature(on: bool) {
     CREATURE.store(on, Ordering::Relaxed);
+}
+
+/// The player rides Buckbeak: the touch controls can swap their halves for a left-handed flight (`HP3_LEFTY_FLIGHT=1`, which the
+/// game folder's `env.flag` can set).
+pub fn set_flight(on: bool) {
+    FLIGHT.store(on, Ordering::Relaxed);
+}
+
+fn lefty_flight() -> bool {
+    std::env::var("HP3_LEFTY_FLIGHT").is_ok_and(|v| v != "0")
 }
 
 pub fn set_level(name: &str) {
@@ -185,9 +196,13 @@ macro_rules! native_unit {
 native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeMenuActive, IN_MENU.load(Ordering::Relaxed));
 native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeCutsceneActive, CUTSCENE.load(Ordering::Relaxed));
 native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeCreatureActive, CREATURE.load(Ordering::Relaxed));
+// Buckbeak's flight: the overlay swaps the stick and look halves while it lasts, for a left-handed player.
+native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeLeftyFlightActive, FLIGHT.load(Ordering::Relaxed) && lefty_flight());
 native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeLessonDrawing, false);
 native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeVendorActive, false);
-native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeOnBroom, false);
+// A Quidditch match is the broom the overlay knows: it shows its broom layout (a steering stick that presses
+// nothing, a boost button that toggles and a brake that is held; see `crate::broom`).
+native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeOnBroom, crate::broom::on_broom());
 
 native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetDebugMode, _on: u8);
 native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetAutoJump, _on: u8);

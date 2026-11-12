@@ -8,6 +8,9 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use hp3_world::casttest;
 mod itemcheck;
 mod langcheck;
+mod quidarena;
+mod quidleague;
+mod quidsmoke;
 mod mounttest;
 mod saveload;
 
@@ -152,8 +155,11 @@ fn main() -> ExitCode {
         Some("call") if args.len() >= 4 => call(Path::new(&args[1]), &args[2], &args[3], &args[4..]),
         Some("items") if args.len() >= 4 => itemcheck::run(Path::new(&args[1]), &args[2], &args[3]),
         Some("lang") if args.len() >= 3 => langcheck::check(Path::new(&args[1]), &args[2], args.get(3).map(Path::new)),
+        Some("quid-arena") if args.len() >= 2 => quidarena::run(&args[1..]).map(|()| ExitCode::SUCCESS).map_err(Into::into),
+        Some("quid-smoke") if args.len() >= 2 => quidsmoke::run(Path::new(&args[1]), args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1)),
+        Some("quid-league") if args.len() >= 2 => quidleague::run(Path::new(&args[1]), args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1)),
         _ => {
-            eprintln!("usage: hp3-run classes <HP3 folder> [class]");
+            eprintln!("usage: hp3-run classes <HP3 folder> [class] | quid-smoke <HP3 folder> [seed] | ...");
             return ExitCode::from(2);
         }
     };

@@ -278,9 +278,18 @@ fn notify_bump(vm: &mut Vm<'_>, who: ObjId, other: ObjId) {
     }
     if is_pawn(vm, who)
         && let Some(c) = get(vm, who, "Controller").as_obj()
-        && fire(vm, c, "NotifyBump", &mut [Value::Object(Some(other))]).as_bool()
     {
-        return;
+        let taken = fire(vm, c, "NotifyBump", &mut [Value::Object(Some(other))]).as_bool();
+        // HP3_BUMP_LOG: every bump between two pawns, with the bumped pawn's controller and whether it took the bump.
+        if crate::envc::var_os("HP3_BUMP_LOG").is_some() && is_pawn(vm, other) {
+            let state = vm.state_of(c).map(|s| vm.db.names.get(vm.db.get(s).name).to_string()).unwrap_or_default();
+            vm.log.push(format!("bump: {} bumped by {}: controller {} state '{state}' taken {taken}", hp3_script::natives::object_path(vm, who), hp3_script::natives::object_path(vm, other), hp3_script::natives::object_path(vm, c)));
+        }
+        if taken {
+            return;
+        }
+    } else if crate::envc::var_os("HP3_BUMP_LOG").is_some() && is_pawn(vm, who) && is_pawn(vm, other) {
+        vm.log.push(format!("bump: {} bumped by {}: no controller", hp3_script::natives::object_path(vm, who), hp3_script::natives::object_path(vm, other)));
     }
     fire(vm, who, "Bump", &mut [Value::Object(Some(other))]);
 }
@@ -1758,6 +1767,11 @@ fn can_be_encroached(vm: &mut Vm<'_>, mover: ObjId, other: ObjId) -> bool {
     if !get(vm, other, "bCollideActors").as_bool() || !get(vm, other, "bBlockActors").as_bool() {
         return false;
     }
+    // A mover passes through the world's own actors (the original's `ActorEncroachmentCheck` skips `bWorldGeometry` ones for an
+    // encroacher): the invisible `BlockingVolume`s that keep pawns out do not stop a door sliding open.
+    if get(vm, other, "bWorldGeometry").as_bool() {
+        return false;
+    }
     if stands_on(vm, other, mover) || stands_on(vm, mover, other) || world(vm).collision.mover(other).is_some() {
         return false;
     }
@@ -1801,6 +1815,14 @@ fn encroached_by_margin(vm: &mut Vm<'_>, a: ObjId, margin: f32) -> Vec<ObjId> {
     found
 }
 
+/// How far a pawn may rest inside a mover's triangles without being in its way: `move_actor` stops a box against a surface
+/// with a hair of up to 3 units to spare (its smaller-box sweeps), so the pawn that bumped a door open stands that far into
+/// the door's skin. Only a deeper overlap is pushed, refused or told `EncroachedBy`.
+const ENCROACH_SKIN: f32 = 3.0;
+
+/// How deep a step must put a pawn that was already leaning on the mover before it counts as pushed into.
+const ENCROACH_DEEP: f32 = 8.0;
+
 /// Whether the mover may take the step to `to`/`rot`: every actor in its way is first pushed along with it, and
 /// if one is still in the way the mover's own `EncroachingOn` decides (true: the step is refused). Actors it
 /// does end up overlapping are told with `EncroachedBy`.
@@ -1808,11 +1830,18 @@ fn clear_way(vm: &mut Vm<'_>, a: ObjId, from: Vec3, to: Vec3, rot: [i32; 3]) -> 
     let old_rot = rotator_ints(&get(vm, a, "Rotation"));
     // What the mover already overlaps where it stands was placed that way (a gargoyle in the niche behind a portrait): the
     // step neither pushes nor crushes it, the mover slides through.
-    let overlapping_now = slide_through(vm, a);
+    let mut overlapping_now = slide_through(vm, a);
+    // A pawn that leans on the mover (the player pressing into a door) already overlaps its triangles a little where it stands. A
+    // step along that face does not push into it, however far it sinks in: it only counts as in the way when the step puts it deep
+    // inside the mover.
+    let leaning = encroached_by_margin(vm, a, 0.0);
     set(vm, a, "Location", value(to));
     set(vm, a, "Rotation", rotator_value(rot));
     place_mover_shape(vm, a);
-    let in_way: Vec<ObjId> = encroached_by(vm, a).into_iter().filter(|o| !overlapping_now.contains(o)).collect();
+    let deep = encroached_by_margin(vm, a, ENCROACH_DEEP);
+    let grazed: Vec<ObjId> = leaning.into_iter().filter(|o| !deep.contains(o) && !overlapping_now.contains(o)).collect();
+    overlapping_now.extend(grazed);
+    let in_way: Vec<ObjId> = encroached_by_margin(vm, a, ENCROACH_SKIN).into_iter().filter(|o| !overlapping_now.contains(o)).collect();
     if crate::envc::var_os("HP3_TRACE_MOVER").is_some() {
         let names: Vec<String> = in_way.iter().map(|&o| hp3_script::natives::object_path(vm, o)).collect();
         let skipped: Vec<String> = overlapping_now.iter().map(|&o| hp3_script::natives::object_path(vm, o)).collect();
@@ -1830,7 +1859,7 @@ fn clear_way(vm: &mut Vm<'_>, a: ObjId, from: Vec3, to: Vec3, rot: [i32; 3]) -> 
     place_mover_shape(vm, a);
     let mut refused = false;
     for &o in &in_way {
-        if !encroached_by(vm, a).contains(&o) {
+        if !encroached_by_margin(vm, a, ENCROACH_SKIN).contains(&o) {
             continue;
         }
         if fire(vm, a, "EncroachingOn", &mut [Value::Object(Some(o))]).as_bool() {
@@ -1844,7 +1873,7 @@ fn clear_way(vm: &mut Vm<'_>, a: ObjId, from: Vec3, to: Vec3, rot: [i32; 3]) -> 
         place_mover_shape(vm, a);
         return false;
     }
-    for o in encroached_by(vm, a).into_iter().filter(|o| !overlapping_now.contains(o)) {
+    for o in encroached_by_margin(vm, a, ENCROACH_SKIN).into_iter().filter(|o| !overlapping_now.contains(o)) {
         fire(vm, o, "EncroachedBy", &mut [Value::Object(Some(a))]);
     }
     true

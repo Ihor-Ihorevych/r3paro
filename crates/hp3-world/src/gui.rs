@@ -794,6 +794,12 @@ pub fn dump(vm: &mut Vm<'_>) -> Vec<String> {
         let vis = get(vm, o, "bVisible").as_bool();
         let bound = get(vm, o, "bBoundToParent").as_bool();
         out.push(format!("{}{name} ({class}) vis={vis} bound={bound} win={w:.3?} bounds={b:.0?}", "  ".repeat(depth)));
+        if is_a(vm, o, "GUIImage")
+            && let Some(img) = get(vm, o, "Image").as_obj()
+        {
+            let path = hp3_script::natives::object_path(vm, img);
+            out.push(format!("{}  image={path}", "  ".repeat(depth)));
+        }
         if is_a(vm, o, "GUISlider") {
             let v: Vec<f32> = ["MinValue", "MaxValue", "Value"].iter().map(|n| get(vm, o, n).as_float()).collect();
             let ini = get(vm, o, "IniOption").as_str().to_string();

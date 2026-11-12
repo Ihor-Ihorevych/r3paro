@@ -218,6 +218,8 @@ pub struct ClassStatic {
 /// by `yaw` (a script rotation), with its skin stretched over the whole grid `tiles` times.
 #[derive(Clone, Debug)]
 pub struct FluidSurface {
+    /// The actor (its object id), whose place `GpuRenderer::move_fluids` follows.
+    pub actor: u32,
     pub texture: ObjKey,
     pub at: [f32; 3],
     pub yaw: i32,
@@ -313,6 +315,9 @@ pub struct Batch {
     pub blend: Option<ObjKey>,
     /// The picture slides over the surface at this speed (a `TexPanner`).
     pub pan: Option<loader::Pan>,
+    /// A water surface that its actor may carry elsewhere (a mover lowering a fountain): the actor's id and the place the vertices
+    /// were built at, so `GpuRenderer::move_fluids` can shift them.
+    pub fluid: Option<(u32, [f32; 3])>,
     /// Belongs to the sky zone: drawn only in the sky pass, from the sky zone's camera.
     pub sky: bool,
     pub vertices: Vec<Vertex>,
@@ -472,7 +477,7 @@ impl Batcher<'_, '_> {
         let pan = self.last_pan.take();
         let i = *self.by_texture.entry((texture.clone(), lightmap, pan.map(|p| (p.u.to_bits(), p.v.to_bits())), self.sky)).or_insert(next);
         if i == next {
-            self.scene.batches.push(Batch { texture, lightmap, blend: None, pan, sky: self.sky, vertices: Vec::new(), indices: Vec::new() });
+            self.scene.batches.push(Batch { texture, lightmap, blend: None, pan, fluid: None, sky: self.sky, vertices: Vec::new(), indices: Vec::new() });
         }
         &mut self.scene.batches[i]
     }
@@ -504,7 +509,7 @@ fn add_fluids(b: &mut Batcher<'_, '_>, inputs: &MapInputs) {
         let at = GVec3::from(f.at);
         // Unlit: the reflection is its own light (the surroundings are too dark for it).
         let color = [0.5, 0.5, 0.5];
-        let mut batch = Batch { texture: Some(texture), lightmap: None, blend: None, pan: None, sky: false, vertices: Vec::with_capacity(f.nx * f.ny), indices: Vec::new() };
+        let mut batch = Batch { texture: Some(texture), lightmap: None, blend: None, pan: None, fluid: Some((f.actor, f.at)), sky: false, vertices: Vec::with_capacity(f.nx * f.ny), indices: Vec::new() };
         for j in 0..f.ny {
             for i in 0..f.nx {
                 let (lx, ly) = ((i as f32 - (f.nx - 1) as f32 / 2.0) * f.spacing, (j as f32 - (f.ny - 1) as f32 / 2.0) * f.spacing);
@@ -596,7 +601,7 @@ fn add_terrain(b: &mut Batcher<'_, '_>, map: &Rc<Package>, inputs: &MapInputs) {
                 break;
             }
             let m = layer.matrix;
-            let mut batch = Batch { texture: Some(texture), lightmap: None, blend: alpha, pan: None, sky: false, vertices: Vec::with_capacity(w * h), indices: Vec::new() };
+            let mut batch = Batch { texture: Some(texture), lightmap: None, blend: alpha, pan: None, fluid: None, sky: false, vertices: Vec::with_capacity(w * h), indices: Vec::new() };
             for k in 0..w * h {
                 let p = pos(k);
                 let u = p.x * m[0][0] + p.y * m[1][0] + p.z * m[2][0] + m[3][0];

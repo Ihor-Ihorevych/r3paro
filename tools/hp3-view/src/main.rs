@@ -28,6 +28,24 @@ fn main() -> ExitCode {
             args.get(5).map(String::as_str),
             args.get(6).and_then(|f| f.parse().ok()).unwrap_or(0.0),
         ),
+        Some("vpose") if args.len() >= 5 => vpose(
+            Path::new(&args[1]),
+            &args[2],
+            &args[3],
+            Path::new(&args[4]),
+            args.get(5).map(String::as_str),
+            args.get(6).and_then(|f| f.parse().ok()).unwrap_or(0.0),
+        ),
+        // `bik <file.bik> <frame> <out.png>`: one frame of a Bink video, to compare with another decoder.
+        Some("bik") if args.len() >= 4 => (|| {
+            let data = std::fs::read(&args[1])?;
+            let mut v = hp3_movie::BinkVideo::new(data).map_err(|e| e.0)?;
+            eprintln!("{}x{}, {} frames, {:.2} fps", v.width, v.height, v.frames, v.fps);
+            let frame: u32 = args[2].parse()?;
+            let (w, h) = (v.width, v.height);
+            let rgba = v.frame_rgba(frame).ok_or("frame does not decode")?.to_vec();
+            write_png(Path::new(&args[3]), w, h, &rgba)
+        })(),
         Some("tex") if args.len() >= 5 => tex(Path::new(&args[1]), &args[2], &args[3], Path::new(&args[4])),
         Some("play") if args.len() >= 4 => play(Path::new(&args[1]), &args[2], Path::new(&args[3]), args.get(4).and_then(|t| t.parse().ok()).unwrap_or(60)),
         _ => {
@@ -225,6 +243,60 @@ fn pose(root: &Path, package: &str, mesh: &str, out: &Path, seq: Option<&str>, f
     let dynamic = Dynamic::new(&renderer);
     let images = |k: &hp3_assets::loader::ObjKey| loader.image(&set.get(&k.0).ok()?, k.1);
     let gpu = dynamic.upload(&renderer, &geom, &images);
+    let gpu_scene = renderer.upload_scene(&scene::Scene::default());
+    let camera = Camera { position: Vec3::new(180.0, 0.0, 10.0), rotation: [0, 32768, 0], fov_degrees: 70.0 };
+    let (w, h) = (800, 800);
+    let refs = [(&gpu, glam::Mat4::IDENTITY, hp3_render::dynamic::ActorLight { ambient: glam::Vec3::splat(0.5), lights: Vec::new(), fade: 0.0 })];
+    let rgba = renderer.render_frame_to_rgba(w, h, |c, d| dynamic.draw(&renderer, &gpu_scene, &refs, &camera, c, d, 1.0));
+    write_png(out, w, h, &rgba)
+}
+
+/// `vpose <HP3 folder> <package> <mesh> <out.png> [sequence] [frame]`: a vertex-animated mesh (HGame's DogSirius, McGonaCat...) at a
+/// frame of one of its sequences (the first frame of the mesh without one). Lists the sequences on stderr.
+fn vpose(root: &Path, package: &str, mesh: &str, out: &Path, seq: Option<&str>, frame: f32) -> Result<(), Box<dyn std::error::Error>> {
+    use hp3_assets::Asset;
+    let set = PackageSet::open(root)?;
+    let loader = Loader::new(&set);
+    let pkg = set.get(package)?;
+    let mi = pkg.find_export_path(&format!("{mesh}@VertMesh")).ok_or("no such vertex mesh")?;
+    let asset = loader.asset(&pkg, mi).ok_or("mesh does not decode")?;
+    let Asset::VertMesh(m) = &*asset else { return Err("not a vertex mesh".into()) };
+    let names: Vec<String> = m.sequences.iter().map(|s| format!("{}({})", pkg.name(s.name), s.num_frames)).collect();
+    eprintln!("{} vertices, {} frames, {} sequences: {}", m.header.vertex_count, m.anim_frames, names.len(), names.join(" "));
+    let si = seq.and_then(|s| m.sequences.iter().position(|q| pkg.name(q.name).eq_ignore_ascii_case(s)));
+    let points: Vec<glam::Vec3> = match si {
+        Some(i) => m.sequence_points(i, frame),
+        None => m.frame_points(0),
+    }
+    .into_iter()
+    .map(glam::Vec3::from)
+    .collect();
+    eprintln!("posing {seq:?} frame {frame} ({} points)", points.len());
+    let mut geom = hp3_render::meshes::build_posed(&loader, &pkg, mi, &[], Some(&points)).ok_or("no geometry")?;
+    for (i, t) in m.header.textures.iter().enumerate() {
+        let path = set.resolve(&pkg, *t).map(|(p, x)| format!("{} ({})", p.ref_path(hp3_package::ObjRef::from_export(x)), p.export_class_name(x)));
+        eprintln!("texture {i}: ref {t:?} -> {path:?}");
+    }
+    eprintln!("materials (flags, texture index): {:?}; batches: {:?}", m.header.materials, geom.batches.iter().map(|b| (b.indices.len() / 3, b.texture.is_some())).collect::<Vec<_>>());
+    let renderer = Renderer::new_headless()?;
+    let dynamic = Dynamic::new(&renderer);
+    let images = |k: &hp3_assets::loader::ObjKey| loader.image(&set.get(&k.0).ok()?, k.1);
+    // HP3_MOVIE=<file.bik>: the mesh's skin is that video, at the same share of the way through as the animation.
+    let movie = std::env::var("HP3_MOVIE").ok().and_then(|file| {
+        let mut video = hp3_movie::BinkVideo::new(std::fs::read(&file).ok()?).ok()?;
+        let progress = si.and_then(|i| m.sequences.get(i)).map_or(0.0, |q| (frame / q.num_frames.max(1) as f32).clamp(0.0, 1.0));
+        let want = (progress * (video.frames - 1) as f32).round() as u32;
+        eprintln!("video frame {want} of {}", video.frames);
+        let (w, h) = (video.width, video.height);
+        let rgba = video.frame_rgba(want)?.to_vec();
+        Some(renderer.dynamic_texture(w, h, &rgba))
+    });
+    if movie.is_some() {
+        for b in &mut geom.batches {
+            b.placeholder = true;
+        }
+    }
+    let gpu = dynamic.upload_with_movie(&renderer, &geom, &images, movie.as_ref().map(|t| &t.view));
     let gpu_scene = renderer.upload_scene(&scene::Scene::default());
     let camera = Camera { position: Vec3::new(180.0, 0.0, 10.0), rotation: [0, 32768, 0], fov_degrees: 70.0 };
     let (w, h) = (800, 800);
