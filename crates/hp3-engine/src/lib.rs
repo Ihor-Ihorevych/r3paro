@@ -33,6 +33,24 @@ pub fn static_exports(vm: &mut Vm<'_>, map: &Package) -> HashSet<usize> {
     out
 }
 
+/// Hands the loader the entry every material switch of the running world shows now (scripts flip them: Glacius turns the
+/// fountain's water to ice). True when one of them changed since the last call, so what was baked from it must be drawn again.
+pub fn sync_material_switches(vm: &mut Vm<'_>, loader: &Loader<'_>) -> bool {
+    let Some(class) = vm.db.find("MaterialSwitch") else { return false };
+    let mut changed = false;
+    for n in 0..vm.db.objects.len() {
+        let id = ObjId(n as u32);
+        let entry = vm.db.objects.get(id);
+        if entry.deleted || !entry.class.is_some_and(|c| vm.is_child_of(c, class)) {
+            continue;
+        }
+        let Some((pkg, index)) = entry.key.clone() else { continue };
+        let current = get(vm, id, "Current").as_int().max(0) as usize;
+        changed |= loader.set_switch_current((pkg.to_string(), index), current);
+    }
+    changed
+}
+
 /// `LightEffect` of sunlights in HP3 (the `Sunlight` class default).
 pub(crate) const LE_SUNLIGHT: u8 = 19;
 
@@ -714,6 +732,12 @@ pub fn actor_instances(
     let mut out = Vec::new();
     let mut shadows: Vec<hp3_render::dynamic::BlobShadow> = Vec::new();
     let shadows_on = std::env::var_os("HP3_NO_SHADOWS").is_none();
+    // The pawns that cast the shadow map this frame: their index in `out`, where they stand, how strong their strongest
+    // light is, the way it travels and how bright their ambient light is.
+    let real_shadows = shadows_on && dynamic.actor_shadows_enabled(r);
+    let mut casters: Vec<ShadowCaster> = Vec::new();
+    let player_pc = hp3_world::world(vm).player;
+    let player_pawn = player_pc.and_then(|pc| hp3_world::get(vm, pc, "Pawn").as_obj());
     let pawn_class = vm.db.find("Pawn");
     let time = if lighting.is_some() {
         cache.light.begin_frame(vm);
@@ -846,11 +870,13 @@ pub fn actor_instances(
             _ => Vec3::ONE,
         };
         let s3 = if s3 == Vec3::ZERO { Vec3::ONE } else { s3 };
-        // Skeletal meshes stand on their feet; static meshes are placed at the actor's location.
-        let prepivot = if draw_type == DT_MESH { hp3_world::mesh_offset(vm, a) } else { hp3_world::rd_vec(vm, a, "PrePivot") };
+        // Skeletal meshes stand on their feet (their offset is added in the world); a static mesh is drawn as Unreal draws it:
+        // translate(Location) * rotate * scale * translate(-PrePivot), the pivot taken off the mesh before it is scaled and turned.
+        let prepivot = if draw_type == DT_MESH { hp3_world::mesh_offset(vm, a) } else { Vec3::ZERO };
+        let static_pivot = if draw_type == DT_MESH { Vec3::ZERO } else { hp3_world::rd_vec(vm, a, "PrePivot") };
         let tick = world(vm).frame;
         let (shown, turn) = cache.smooth(a, tick, loc, rot, blend);
-        let transform = hp3_world::anim::hang_correction(vm, a) * Mat4::from_translation(shown + prepivot) * turn * Mat4::from_scale(s3 * scale);
+        let transform = hp3_world::anim::hang_correction(vm, a) * Mat4::from_translation(shown + prepivot) * turn * Mat4::from_scale(s3 * scale) * Mat4::from_translation(-static_pivot);
         // A static mesh that cannot be in view is not lit, shadowed or drawn (skeletal ones were left out above). Debugging with
         // HP3_NO_CULL=1 keeps them.
         if draw_type != DT_MESH
@@ -918,9 +944,15 @@ pub fn actor_instances(
             }
         }
         // A soft shadow on the ground under a pawn (not in the original): from the strongest light on it, stretched away from it.
+        // With real shadows on, the blob shrinks to a contact patch under the feet and the pawn joins the shadow map's casters.
+        let mut caster = None;
         if draw_type == DT_MESH && shadows_on && pawn_class.is_some_and(|p| vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, p))) {
-            if let Some(s) = pawn_shadow(vm, a, shown, &light) {
+            if let Some(s) = pawn_shadow(vm, a, shown, &light, real_shadows) {
                 shadows.push(s);
+            }
+            if real_shadows && light.fade <= 0.0 {
+                let (strength, travel) = strongest_light(shown, &light);
+                caster = Some(ShadowCaster { index: 0, at: shown, strength, travel, ambient: light.ambient.dot(Vec3::new(0.3, 0.59, 0.11)), player: Some(a) == player_pawn });
             }
         }
         // A wall the Lumos spell works on: while the hero's light is on, it turns see-through near the hero (a vanishing wall) or
@@ -947,6 +979,9 @@ pub fn actor_instances(
             }
         }
         out.push((gpu, transform, light));
+        if let Some(c) = caster {
+            casters.push(ShadowCaster { index: out.len() - 1, ..c });
+        }
         INSTANCE_NS[3].fetch_add(t_rest.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     }
     world(vm).memo_draw = memo;
@@ -960,6 +995,7 @@ pub fn actor_instances(
         eprintln!("shadows: {} {:?}", shadows.len(), shadows.first());
     }
     dynamic.set_shadows(r, &shadows);
+    dynamic.set_actor_shadow(actor_shadow_cfg(&casters, view.as_ref().map(|v| v.eye)));
     INSTANCE_NS[4].fetch_add(t_total.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     out
 }
@@ -1013,9 +1049,11 @@ pub fn particle_quads(vm: &mut Vm<'_>, loader: &Loader<'_>, cache: &mut Particle
 
 /// The soft shadow of a pawn standing at `at`: found by looking for the ground below, darkest when the pawn is close to it
 /// and lit from one side, and stretched away from the strongest light.
-fn pawn_shadow(vm: &mut Vm<'_>, a: ObjId, at: Vec3, light: &ActorLight) -> Option<hp3_render::dynamic::BlobShadow> {
+///
+/// With `contact` (the pawn also casts a real shadow) it is only the small dark patch right under the feet that grounds them.
+fn pawn_shadow(vm: &mut Vm<'_>, a: ObjId, at: Vec3, light: &ActorLight, contact: bool) -> Option<hp3_render::dynamic::BlobShadow> {
     let half_height = hp3_world::rd(vm, a, "CollisionHeight").as_float().max(1.0);
-    let radius = (hp3_world::rd(vm, a, "CollisionRadius").as_float() * 1.9).clamp(16.0, 56.0);
+    let radius = (hp3_world::rd(vm, a, "CollisionRadius").as_float() * if contact { 1.0 } else { 1.9 }).clamp(12.0, 56.0);
     let hit = world(vm).collision.trace_static(at, at - Vec3::Z * (half_height + 220.0), Vec3::ZERO)?;
     if hit.normal.z < 0.5 {
         return None;
@@ -1051,6 +1089,14 @@ fn pawn_shadow(vm: &mut Vm<'_>, a: ObjId, at: Vec3, light: &ActorLight) -> Optio
     let u = (dir - hit.normal * dir.dot(hit.normal)).normalize_or_zero();
     let u = if u == Vec3::ZERO { Vec3::X } else { u };
     let v = hit.normal.cross(u);
+    if contact {
+        return Some(hp3_render::dynamic::BlobShadow {
+            center: hit.location + hit.normal * 0.6 + u * (radius * 0.15 * reach),
+            axis_u: u * radius * 0.9,
+            axis_v: v * radius * 0.9,
+            opacity: closeness * closeness * (0.35 + 0.15 * lit),
+        });
+    }
     let stretch = 1.0 + 0.7 * reach * (best.0 / (best.0 + 0.25));
     let center = hit.location + hit.normal * 0.6 + u * (radius * 0.45 * reach);
     Some(hp3_render::dynamic::BlobShadow {
@@ -1059,4 +1105,72 @@ fn pawn_shadow(vm: &mut Vm<'_>, a: ObjId, at: Vec3, light: &ActorLight) -> Optio
         axis_v: v * radius * (1.0 + 0.4 * (1.0 - closeness)),
         opacity: closeness * (0.75 + 0.25 * lit),
     })
+}
+
+/// The strongest light on a pawn at `at`: its strength (luma, after attenuation) and the way it travels (zero when nothing lights the pawn).
+fn strongest_light(at: Vec3, light: &ActorLight) -> (f32, Vec3) {
+    let luma = |c: Vec3| c.dot(Vec3::new(0.3, 0.59, 0.11));
+    let mut best = (0.0f32, Vec3::ZERO);
+    for l in &light.lights {
+        let (strength, travel) = if l.kind == 1 {
+            (luma(l.color), l.direction)
+        } else {
+            let to = at - l.position;
+            let d = to.length();
+            if d < 1.0 || d > l.range.max(1.0) {
+                continue;
+            }
+            (luma(l.color) / (l.atten[0] + l.atten[1] * d + l.atten[2] * d * d).max(0.2), to / d)
+        };
+        if strength > best.0 {
+            best = (strength, travel);
+        }
+    }
+    best
+}
+
+/// A pawn that casts into the shadow map this frame.
+#[derive(Clone, Copy)]
+struct ShadowCaster {
+    /// Its place in the frame's meshes.
+    index: usize,
+    at: Vec3,
+    /// How strong its strongest light is, and the way that light travels (zero: none).
+    strength: f32,
+    travel: Vec3,
+    /// How bright its ambient light is.
+    ambient: f32,
+    /// Whether it is the pawn the player controls.
+    player: bool,
+}
+
+/// The frame's character shadow. The map is centred on the player's pawn (the nearest caster to the eye when the player has none in
+/// view, a cutscene), so the shadow that matters never falls outside it whoever walks beside the player; that pawn also picks the
+/// light. Light that skims the ground is tipped down (a lamp at head height would throw shadows without end), and a pawn in a room
+/// with no real light still gets a faint one from above. The casters within reach of the centre join in.
+fn actor_shadow_cfg(casters: &[ShadowCaster], eye: Option<Vec3>) -> Option<hp3_render::dynamic::ActorShadowCfg> {
+    let key = casters.iter().find(|c| c.player).or_else(|| {
+        casters.iter().min_by(|a, b| {
+            let d = |c: &&ShadowCaster| eye.map_or(0.0, |e| e.distance_squared(c.at));
+            d(a).total_cmp(&d(b))
+        })
+    })?;
+    let center = key.at;
+    if eye.is_some_and(|e| e.distance(center) > 3000.0) {
+        return None;
+    }
+    let (mut direction, strength) = if key.strength > 0.02 && key.travel.length() > 0.01 {
+        (key.travel.normalize(), (key.strength / (key.strength + key.ambient)).clamp(0.3, 0.85))
+    } else {
+        (Vec3::new(0.3, 0.2, -1.0).normalize(), 0.35)
+    };
+    if direction.z > -0.5 {
+        direction.z = -0.5;
+        direction = direction.normalize();
+    }
+    let near: Vec<usize> = casters.iter().filter(|c| c.at.truncate().distance(center.truncate()) < 360.0).map(|c| c.index).collect();
+    if std::env::var_os("HP3_SHADOW_DEBUG").is_some() {
+        eprintln!("shadow map: {} casters of {}, key {}, centre {center}, light {direction}, strength {strength:.2}", near.len(), casters.len(), if key.player { "player" } else { "nearest" });
+    }
+    Some(hp3_render::dynamic::ActorShadowCfg { direction, center, strength, casters: near })
 }

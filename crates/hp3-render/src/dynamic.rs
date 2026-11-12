@@ -140,6 +140,45 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @l
 }
 "#;
 
+/// The characters' shadow of one frame: the pawns (indices into the frame's meshes) that cast it, the light they cast it
+/// from and the spot the map is centred on.
+#[derive(Clone, Debug)]
+pub struct ActorShadowCfg {
+    /// The way the light travels (down and along).
+    pub direction: glam::Vec3,
+    /// The middle of the casters (the map covers `ACTOR_SHADOW_RANGE` units around it).
+    pub center: glam::Vec3,
+    /// How dark the shadow is where it falls, 0 to 1.
+    pub strength: f32,
+    pub casters: Vec<usize>,
+}
+
+/// Half the width, in units, of the area the characters' shadow map covers (`HP3_ACTOR_SHADOW_RANGE`).
+fn actor_shadow_range() -> f32 {
+    static RANGE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *RANGE.get_or_init(|| std::env::var("HP3_ACTOR_SHADOW_RANGE").ok().and_then(|v| v.parse().ok()).unwrap_or(400.0))
+}
+
+/// Draws the casters' depth: position and texture only, cut-out sections alpha-tested.
+const CASTER_SHADER: &str = r#"
+struct LightVp { view_proj: mat4x4<f32> };
+struct Model { model: mat4x4<f32>, ambient: vec4<f32>, extra: vec4<f32>, lights: array<vec4<f32>, 32> };
+@group(0) @binding(0) var<uniform> lv: LightVp;
+@group(1) @binding(0) var tex: texture_2d<f32>;
+@group(1) @binding(1) var samp: sampler;
+@group(2) @binding(0) var<uniform> m: Model;
+struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+@vertex fn vs(@location(0) position: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) light_uv: vec2<f32>, @location(3) normal: vec3<f32>) -> VsOut {
+    var o: VsOut;
+    o.pos = lv.view_proj * (m.model * vec4<f32>(position, 1.0));
+    o.uv = uv;
+    return o;
+}
+@fragment fn fs(i: VsOut) {
+    if (textureSample(tex, samp, i.uv).a < 0.5) { discard; }
+}
+"#;
+
 /// Bytes of one shadow in the instance buffer: centre and opacity, then the two axes.
 const SHADOW_BYTES: u64 = 48;
 const SHADOW_CAPACITY: u64 = 256;
@@ -204,6 +243,13 @@ pub struct Dynamic {
     shadow_pipeline: wgpu::RenderPipeline,
     shadow_buffer: wgpu::Buffer,
     shadow_count: std::cell::Cell<u32>,
+    /// The characters' shadow map: its depth pipeline, the light matrix it reads and this frame's settings.
+    caster_pipeline: wgpu::RenderPipeline,
+    caster_buffer: wgpu::Buffer,
+    caster_bind: wgpu::BindGroup,
+    actor_shadow: RefCell<Option<ActorShadowCfg>>,
+    /// The light direction and darkness the shadow has glided to so far.
+    actor_shadow_smooth: RefCell<Option<(glam::Vec3, f32)>>,
 }
 
 /// The posed vertices of every skeletal mesh drawn in a frame go up in one write into one of three vertex buffers, used
@@ -317,8 +363,131 @@ impl Dynamic {
             cache: None,
         });
         let shadow_buffer = d.create_buffer(&wgpu::BufferDescriptor { label: Some("blob shadows"), size: SHADOW_CAPACITY * SHADOW_BYTES, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let caster_shader = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("character shadow"), source: wgpu::ShaderSource::Wgsl(CASTER_SHADER.into()) });
+        let caster_light_layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("character shadow light"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                count: None,
+            }],
+        });
+        let caster_layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("character shadow"),
+            bind_group_layouts: &[&caster_light_layout, r.texture_layout(), &model_layout],
+            push_constant_ranges: &[],
+        });
+        let caster_pipeline = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("character shadow"),
+            layout: Some(&caster_layout),
+            vertex: wgpu::VertexState {
+                module: &caster_shader,
+                entry_point: Some("vs"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &crate::gpu::VERTEX_ATTRIBUTES,
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState { module: &caster_shader, entry_point: Some("fs"), targets: &[], compilation_options: Default::default() }),
+            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+            // Pushed away from the light a little, so a surface does not shadow itself by rounding.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 },
+            }),
+            multisample: Default::default(),
+            multiview: None,
+            cache: None,
+        });
+        let caster_buffer = d.create_buffer(&wgpu::BufferDescriptor { label: Some("character shadow light"), size: 64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let caster_bind = d.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &caster_light_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: caster_buffer.as_entire_binding() }],
+        });
         let (buffer, bind) = Self::instance_buffer(r, &model_layout, 256);
-        Dynamic { pipeline, alpha_pipeline, additive_pipeline, model_layout, instances: RefCell::new((buffer, bind, 256)), images: RefCell::new(HashMap::new()), posed: RefCell::default(), shadow_pipeline, shadow_buffer, shadow_count: std::cell::Cell::new(0) }
+        Dynamic {
+            pipeline,
+            alpha_pipeline,
+            additive_pipeline,
+            model_layout,
+            instances: RefCell::new((buffer, bind, 256)),
+            images: RefCell::new(HashMap::new()),
+            posed: RefCell::default(),
+            shadow_pipeline,
+            shadow_buffer,
+            shadow_count: std::cell::Cell::new(0),
+            caster_pipeline,
+            caster_buffer,
+            caster_bind,
+            actor_shadow: RefCell::new(None),
+            actor_shadow_smooth: RefCell::new(None),
+        }
+    }
+
+    /// Whether the characters cast real shadows (`HP3_ACTOR_SHADOWS=0` turns them off): the blob under each is then their
+    /// whole shadow, and otherwise only a small contact patch.
+    pub fn actor_shadows_enabled(&self, _r: &Renderer) -> bool {
+        crate::quality::actor_shadows()
+    }
+
+    /// The characters' shadow of the next frame (None: no shadow map this frame).
+    ///
+    /// The light and the darkness glide toward what the engine asks for (a few frames), so a shadow does not jump when the strongest
+    /// light changes as the player walks past a torch, and does not blink when the player crosses between lights.
+    pub fn set_actor_shadow(&self, cfg: Option<ActorShadowCfg>) {
+        let mut smooth = self.actor_shadow_smooth.borrow_mut();
+        let cfg = match cfg {
+            Some(mut c) => {
+                let (direction, strength) = match *smooth {
+                    // Slerp-like: blend the directions and renormalise; when they point nearly opposite, take the new one.
+                    Some((d, s)) => (
+                        d.lerp(c.direction, 0.12).try_normalize().unwrap_or(c.direction),
+                        s + (c.strength - s) * 0.12,
+                    ),
+                    None => (c.direction, c.strength),
+                };
+                *smooth = Some((direction, strength));
+                c.direction = direction;
+                c.strength = strength;
+                Some(c)
+            }
+            None => {
+                *smooth = None;
+                None
+            }
+        };
+        *self.actor_shadow.borrow_mut() = cfg;
+    }
+
+    /// The light's matrix for the characters' map, its uniform for the world shader and the depth range: an orthographic
+    /// box around `cfg.center` looking along the light, its centre snapped to whole texels so the shadow does not crawl.
+    fn actor_shadow_light(&self, r: &Renderer, cfg: &ActorShadowCfg) -> (Mat4, [f32; 24]) {
+        let size = r.shadow_maps().actor_size as f32;
+        let half = actor_shadow_range();
+        let texel = 2.0 * half / size;
+        let dir = cfg.direction.normalize_or_zero();
+        let dir = if dir == glam::Vec3::ZERO { -glam::Vec3::Z } else { dir };
+        let up = if dir.z.abs() > 0.95 { glam::Vec3::Y } else { glam::Vec3::Z };
+        let view = Mat4::look_to_lh(glam::Vec3::ZERO, dir, up);
+        let c = view.transform_point3(cfg.center);
+        let (cx, cy) = ((c.x / texel).floor() * texel, (c.y / texel).floor() * texel);
+        // Depth: far enough toward the light to catch anything that could shade the area, and as far past it as a long shadow reaches.
+        let depth = half * 1.5;
+        let proj = Mat4::orthographic_lh(cx - half, cx + half, cy - half, cy + half, c.z - depth, c.z + depth);
+        let vp = proj * view;
+        let mut u = [0.0f32; 24];
+        u[..16].copy_from_slice(&vp.to_cols_array());
+        let to_light = -dir;
+        u[16..20].copy_from_slice(&[cfg.strength.clamp(0.0, 1.0), 1.0 / size, 0.6, depth * 2.0]);
+        u[20..24].copy_from_slice(&[to_light.x, to_light.y, to_light.z, texel]);
+        (vp, u)
     }
 
     /// The soft shadows to draw this frame (replaces last frame's).
@@ -549,12 +718,61 @@ impl Dynamic {
                 }
             }
         };
-        r.draw_with(
+        // The characters' shadow: the light's matrix goes to the caster pass and, with the settings, to the world shader (zero
+        // strength when there is none this frame, which makes the shader skip it).
+        let maps = r.shadow_maps();
+        let cfg = self.actor_shadow.borrow().clone().filter(|c| crate::quality::actor_shadows() && c.strength > 0.0 && c.casters.iter().any(|&i| i < meshes.len()));
+        let light_vp = cfg.as_ref().map(|c| {
+            let (vp, uniform) = self.actor_shadow_light(r, c);
+            r.queue.write_buffer(&maps.actor_uniform, 0, bytemuck::cast_slice(&uniform));
+            r.queue.write_buffer(&self.caster_buffer, 0, bytemuck::cast_slice(&vp.to_cols_array()));
+            vp
+        });
+        if light_vp.is_none() {
+            r.queue.write_buffer(&maps.actor_uniform, 0, bytemuck::cast_slice(&[0.0f32; 24]));
+        }
+        let casters = |enc: &mut wgpu::CommandEncoder| {
+            let Some(cfg) = cfg.as_ref().filter(|_| light_vp.is_some()) else { return };
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("character shadow"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &maps.actor_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.caster_pipeline);
+            pass.set_bind_group(0, &self.caster_bind, &[]);
+            for &i in &cfg.casters {
+                let Some((mesh, _, light)) = meshes.get(i) else { continue };
+                if light.fade > 0.0 {
+                    continue;
+                }
+                pass.set_bind_group(2, &inst.1, &[(i as u64 * STRIDE) as u32]);
+                for (k, d) in mesh.draws.iter().enumerate() {
+                    if !matches!(d.blend, MaterialBlend::Opaque | MaterialBlend::Cutout) {
+                        continue;
+                    }
+                    pass.set_bind_group(1, &d.bind, &[]);
+                    match (&posed_buffer, posed_parts[i][k]) {
+                        (Some(buffer), Some((start, size))) => pass.set_vertex_buffer(0, buffer.slice(start..start + size)),
+                        _ => pass.set_vertex_buffer(0, d.vertices.slice(..)),
+                    }
+                    pass.set_index_buffer(d.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..d.count, 0, 0..1);
+                }
+            }
+        };
+        r.draw_with_pre(
             scene,
             camera,
             color,
             depth,
             aspect,
+            casters,
             // Opaque and cut-out sections go before the scene's blended surfaces, which test against their depth...
             |pass| sections(pass, &[(MaterialBlend::Opaque, &self.pipeline)]),
             // ...and the blended and added ones, then the particles, after them.

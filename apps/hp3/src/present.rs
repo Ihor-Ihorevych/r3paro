@@ -24,6 +24,11 @@ fn elapsed() -> u64 {
 /// World ticks so far (counted by the game loop), which `HP3_SHOT` frames are measured in: the display may run faster than the 60 Hz world.
 pub static TICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// A screenshot asked for with F4: the file to write and the lines of text burned into the picture (where the player is).
+/// The presenter takes it with the next finished frame.
+#[cfg(not(target_os = "android"))]
+pub static SHOT_REQUEST: std::sync::Mutex<Option<(std::path::PathBuf, Vec<String>)>> = std::sync::Mutex::new(None);
+
 enum Msg {
     Frame { slot: usize, image: wgpu::Texture, width: u32, height: u32 },
     /// The window got a new native surface (the app came back from the background): present to this one from now on.
@@ -219,12 +224,19 @@ fn present_loop(
             }
             Msg::Frame { slot, image, width, height } => {
                 #[cfg(not(target_os = "android"))]
+                if let Some((path, lines)) = SHOT_REQUEST.lock().ok().and_then(|mut r| r.take()) {
+                    if let Some(dir) = path.parent() {
+                        let _ = std::fs::create_dir_all(dir);
+                    }
+                    save_shot(&device, &queue, &image, format, width, height, &path.to_string_lossy(), &lines);
+                }
+                #[cfg(not(target_os = "android"))]
                 if let Some((path, at)) = &shot
                     && let Some(&due) = at.get(frames_seen as usize)
                     && elapsed() >= due
                 {
                     let file = if at.len() > 1 { format!("{}-{due}.png", path.trim_end_matches(".png")) } else { path.clone() };
-                    save_shot(&device, &queue, &image, format, width, height, &file);
+                    save_shot(&device, &queue, &image, format, width, height, &file, &[]);
                     frames_seen += 1;
                     if frames_seen as usize == at.len() {
                         std::process::exit(0);
@@ -396,7 +408,7 @@ impl Adjust {
 
 /// Writes a finished frame to a PNG (debugging: see `HP3_SHOT`).
 #[cfg(not(target_os = "android"))]
-fn save_shot(device: &wgpu::Device, queue: &wgpu::Queue, image: &wgpu::Texture, format: wgpu::TextureFormat, width: u32, height: u32, path: &str) {
+fn save_shot(device: &wgpu::Device, queue: &wgpu::Queue, image: &wgpu::Texture, format: wgpu::TextureFormat, width: u32, height: u32, path: &str, caption: &[String]) {
     let bytes_per_row = (width * 4).div_ceil(256) * 256;
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("shot"),
@@ -424,6 +436,7 @@ fn save_shot(device: &wgpu::Device, queue: &wgpu::Queue, image: &wgpu::Texture, 
             rgba.extend_from_slice(&p);
         }
     }
+    stamp(&mut rgba, width, height, caption);
     let result = std::fs::File::create(path).map_err(|e| e.to_string()).and_then(|f| {
         let mut encoder = png::Encoder::new(std::io::BufWriter::new(f), width, height);
         encoder.set_color(png::ColorType::Rgba);
@@ -433,5 +446,69 @@ fn save_shot(device: &wgpu::Device, queue: &wgpu::Queue, image: &wgpu::Texture, 
     match result {
         Ok(()) => eprintln!("shot: wrote {path} ({width}x{height})"),
         Err(e) => eprintln!("shot: {path}: {e}"),
+    }
+}
+
+/// 5x7 glyphs for ASCII 0x20..=0x5F (columns, bit 0 on top): enough for the coordinates stamped on a screenshot.
+#[cfg(not(target_os = "android"))]
+const FONT: [[u8; 5]; 64] = [
+    [0x00, 0x00, 0x00, 0x00, 0x00], [0x00, 0x00, 0x5F, 0x00, 0x00], [0x00, 0x07, 0x00, 0x07, 0x00], [0x14, 0x7F, 0x14, 0x7F, 0x14],
+    [0x24, 0x2A, 0x7F, 0x2A, 0x12], [0x23, 0x13, 0x08, 0x64, 0x62], [0x36, 0x49, 0x55, 0x22, 0x50], [0x00, 0x05, 0x03, 0x00, 0x00],
+    [0x00, 0x1C, 0x22, 0x41, 0x00], [0x00, 0x41, 0x22, 0x1C, 0x00], [0x14, 0x08, 0x3E, 0x08, 0x14], [0x08, 0x08, 0x3E, 0x08, 0x08],
+    [0x00, 0x50, 0x30, 0x00, 0x00], [0x08, 0x08, 0x08, 0x08, 0x08], [0x00, 0x60, 0x60, 0x00, 0x00], [0x20, 0x10, 0x08, 0x04, 0x02],
+    [0x3E, 0x51, 0x49, 0x45, 0x3E], [0x00, 0x42, 0x7F, 0x40, 0x00], [0x42, 0x61, 0x51, 0x49, 0x46], [0x21, 0x41, 0x45, 0x4B, 0x31],
+    [0x18, 0x14, 0x12, 0x7F, 0x10], [0x27, 0x45, 0x45, 0x45, 0x39], [0x3C, 0x4A, 0x49, 0x49, 0x30], [0x01, 0x71, 0x09, 0x05, 0x03],
+    [0x36, 0x49, 0x49, 0x49, 0x36], [0x06, 0x49, 0x49, 0x29, 0x1E], [0x00, 0x36, 0x36, 0x00, 0x00], [0x00, 0x56, 0x36, 0x00, 0x00],
+    [0x08, 0x14, 0x22, 0x41, 0x00], [0x14, 0x14, 0x14, 0x14, 0x14], [0x00, 0x41, 0x22, 0x14, 0x08], [0x02, 0x01, 0x51, 0x09, 0x06],
+    [0x32, 0x49, 0x79, 0x41, 0x3E], [0x7E, 0x11, 0x11, 0x11, 0x7E], [0x7F, 0x49, 0x49, 0x49, 0x36], [0x3E, 0x41, 0x41, 0x41, 0x22],
+    [0x7F, 0x41, 0x41, 0x22, 0x1C], [0x7F, 0x49, 0x49, 0x49, 0x41], [0x7F, 0x09, 0x09, 0x09, 0x01], [0x3E, 0x41, 0x49, 0x49, 0x7A],
+    [0x7F, 0x08, 0x08, 0x08, 0x7F], [0x00, 0x41, 0x7F, 0x41, 0x00], [0x20, 0x40, 0x41, 0x3F, 0x01], [0x7F, 0x08, 0x14, 0x22, 0x41],
+    [0x7F, 0x40, 0x40, 0x40, 0x40], [0x7F, 0x02, 0x0C, 0x02, 0x7F], [0x7F, 0x04, 0x08, 0x10, 0x7F], [0x3E, 0x41, 0x41, 0x41, 0x3E],
+    [0x7F, 0x09, 0x09, 0x09, 0x06], [0x3E, 0x41, 0x51, 0x21, 0x5E], [0x7F, 0x09, 0x19, 0x29, 0x46], [0x46, 0x49, 0x49, 0x49, 0x31],
+    [0x01, 0x01, 0x7F, 0x01, 0x01], [0x3F, 0x40, 0x40, 0x40, 0x3F], [0x1F, 0x20, 0x40, 0x20, 0x1F], [0x3F, 0x40, 0x38, 0x40, 0x3F],
+    [0x63, 0x14, 0x08, 0x14, 0x63], [0x07, 0x08, 0x70, 0x08, 0x07], [0x61, 0x51, 0x49, 0x45, 0x43], [0x00, 0x7F, 0x41, 0x41, 0x00],
+    [0x02, 0x04, 0x08, 0x10, 0x20], [0x00, 0x41, 0x41, 0x7F, 0x00], [0x04, 0x02, 0x01, 0x02, 0x04], [0x40, 0x40, 0x40, 0x40, 0x40],
+];
+
+/// Burns the lines of text into the top left corner of an RGBA picture (yellow on a dark box).
+#[cfg(not(target_os = "android"))]
+fn stamp(rgba: &mut [u8], width: u32, height: u32, lines: &[String]) {
+    if lines.is_empty() {
+        return;
+    }
+    let scale = (height / 360).max(2);
+    let (cell_w, cell_h) = (6 * scale, 9 * scale);
+    let chars = lines.iter().map(|l| l.chars().count() as u32).max().unwrap_or(0);
+    let (box_w, box_h) = ((chars * cell_w + 2 * scale * 2).min(width), (lines.len() as u32 * cell_h + 2 * scale * 2).min(height));
+    let mut put = |x: u32, y: u32, c: [u8; 3], blend: bool| {
+        if x < width && y < height {
+            let i = ((y * width + x) * 4) as usize;
+            for k in 0..3 {
+                rgba[i + k] = if blend { (rgba[i + k] as u32 / 3) as u8 } else { c[k] };
+            }
+        }
+    };
+    for y in 0..box_h {
+        for x in 0..box_w {
+            put(x, y, [0; 3], true);
+        }
+    }
+    for (row, line) in lines.iter().enumerate() {
+        for (col, ch) in line.chars().enumerate() {
+            let code = ch.to_ascii_uppercase() as u32;
+            let glyph = if (0x20..=0x5F).contains(&code) { FONT[(code - 0x20) as usize] } else { FONT[0x1F] };
+            let (ox, oy) = (2 * scale + col as u32 * cell_w, 2 * scale + row as u32 * cell_h);
+            for (gx, bits) in glyph.iter().enumerate() {
+                for gy in 0..7u32 {
+                    if bits >> gy & 1 == 1 {
+                        for dy in 0..scale {
+                            for dx in 0..scale {
+                                put(ox + gx as u32 * scale + dx, oy + gy * scale + dy, [255, 230, 80], false);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

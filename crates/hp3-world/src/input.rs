@@ -22,6 +22,8 @@ pub struct Input {
     pressed: Vec<String>,
     released: Vec<String>,
     mouse: (f32, f32),
+    /// Keys a gamepad stick holds at part strength (0..1), by the key's lower-case ini name.
+    analog: HashMap<String, f32>,
 }
 
 /// Parses `(Command="...",Alias=Name)`.
@@ -93,6 +95,17 @@ impl Input {
         }
     }
 
+    /// Holds a key at `amount` (0..1) of its full effect, as an analog stick does; 0 lets go. Axis commands (movement)
+    /// scale with the amount; buttons count as pressed for any amount above 0.
+    pub fn set_analog(&mut self, key: &str, amount: f32) {
+        let k = key.to_ascii_lowercase();
+        if amount > 0.0 {
+            self.analog.insert(k, amount.min(1.0));
+        } else {
+            self.analog.remove(&k);
+        }
+    }
+
     pub fn mouse_move(&mut self, dx: f32, dy: f32) {
         self.mouse.0 += dx;
         self.mouse.1 += dy;
@@ -144,6 +157,11 @@ pub fn apply(vm: &mut Vm<'_>, pc: ObjId, dt: f32) {
             keys.push((k.clone(), 1.0));
         }
     }
+    for (k, amount) in &input.analog {
+        if !input.held.contains(k) {
+            keys.push((k.clone(), *amount));
+        }
+    }
     // The options menu's mouse speed and invert (`PlayerInput`); the engine's own default of 3 is the speed the axes were tuned for.
     let (speed, invert_y) = crate::settings::mouse_look(vm, pc);
     keys.push(("mousex".into(), input.mouse.0 * speed));
@@ -162,7 +180,7 @@ pub fn apply(vm: &mut Vm<'_>, pc: ObjId, dt: f32) {
                         // Keys that ramp (the arrow keys) reach twice the plain rate.
                         40.0 * base
                     } else {
-                        20.0 * param(&words, "Speed").unwrap_or(1.0)
+                        20.0 * param(&words, "Speed").unwrap_or(1.0) * amount
                     };
                     *axes.entry(words[1].to_string()).or_default() += value * invert;
                 }

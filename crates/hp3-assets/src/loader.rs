@@ -57,6 +57,9 @@ pub struct Loader<'s> {
     images: RefCell<HashMap<ObjKey, Option<Rc<Image>>>>,
     raw_images: RefCell<HashMap<ObjKey, Option<Rc<Image>>>>,
     assets: RefCell<HashMap<ObjKey, Option<Rc<Asset>>>>,
+    /// `Current` of material switches as the running game has them (scripts flip them: the water Glacius freezes).
+    /// A switch not in here shows what its file says.
+    switch_current: RefCell<HashMap<ObjKey, usize>>,
 }
 
 /// Unreal rotation units: 65536 per turn.
@@ -77,7 +80,17 @@ pub fn tag_rotator(tag: &Tag<'_>) -> Option<[i32; 3]> {
 
 impl<'s> Loader<'s> {
     pub fn new(set: &'s PackageSet) -> Self {
-        Loader { set, images: RefCell::new(HashMap::new()), raw_images: RefCell::new(HashMap::new()), assets: RefCell::new(HashMap::new()) }
+        Loader { set, images: RefCell::new(HashMap::new()), raw_images: RefCell::new(HashMap::new()), assets: RefCell::new(HashMap::new()), switch_current: RefCell::new(HashMap::new()) }
+    }
+
+    /// Forgets the switches' run-time entries (a new level starts them over).
+    pub fn clear_switch_current(&self) {
+        self.switch_current.borrow_mut().clear();
+    }
+
+    /// Tells the loader which entry a material switch shows now; true when that differs from what it showed before.
+    pub fn set_switch_current(&self, k: ObjKey, current: usize) -> bool {
+        self.switch_current.borrow_mut().insert(k, current) != Some(current)
     }
 
     /// The native asset decoded from an export, if its class has one.
@@ -418,6 +431,7 @@ impl<'s> Loader<'s> {
             let off = std::env::var_os("HP3_NO_SWITCH").is_some();
             let switch = !off && chain.iter().any(|c| c.eq_ignore_ascii_case("MaterialSwitch"));
             let sequence = !off && chain.iter().any(|c| c.eq_ignore_ascii_case("MaterialSequence"));
+            let live_current = if switch { self.switch_current.borrow().get(&key(&p, i)).copied() } else { None };
             let next = self.with_tags(&p, i, |tags, _| {
                 if switch
                     && let Some(t) = props::find(&p, tags, "Materials", 0)
@@ -426,7 +440,8 @@ impl<'s> Loader<'s> {
                     let mut rd = Reader::new(t.data);
                     let count = rd.ci().ok()?.max(0) as usize;
                     let items: Vec<i32> = (0..count).filter_map(|_| rd.ci().ok()).collect();
-                    let current = props::find(&p, tags, "Current", 0).and_then(|c| c.as_i32()).unwrap_or(0).max(0) as usize;
+                    let _file_current = props::find(&p, tags, "Current", 0).and_then(|c| c.as_i32()).unwrap_or(0).max(0) as usize;
+                    let current = live_current.unwrap_or(_file_current);
                     if let Some(v) = items.get(current).copied().filter(|&v| v != 0).or_else(|| items.iter().copied().find(|&v| v != 0)) {
                         return Some(ObjRef(v));
                     }
@@ -435,12 +450,11 @@ impl<'s> Loader<'s> {
                     && let Some(t) = props::find(&p, tags, "SequenceItems", 0)
                     && t.ty == TagType::Array
                 {
-                    // Items are structs whose first member is the material.
-                    let mut rd = Reader::new(t.data);
-                    if rd.ci().ok()? > 0
-                        && let Ok(v) = rd.ci()
-                        && v != 0
-                    {
+                    // Items are structs of tagged members (Material, Time, ...). A sequence a script has started has played
+                    // (its first item is the new look; the later ones only fade back to the old one).
+                    let items = sequence_materials(t.data);
+                    let pick = items.first();
+                    if let Some(&v) = pick.filter(|&&v| v != 0) {
                         return Some(ObjRef(v));
                     }
                 }
@@ -488,6 +502,8 @@ impl<'s> Loader<'s> {
             }
             // A triggered panner starts when the level triggers it; it is not a steady scroll.
             let steady = chain.first().is_some_and(|c| c.eq_ignore_ascii_case("TexPanner"));
+            let chain_is_switch = chain.iter().any(|c| c.eq_ignore_ascii_case("MaterialSwitch"));
+            let chain_is_sequence = chain.iter().any(|c| c.eq_ignore_ascii_case("MaterialSequence"));
             let (found, next) = self.with_tags(&p, i, |tags, _| {
                 let mut found = None;
                 if steady {
@@ -504,7 +520,19 @@ impl<'s> Loader<'s> {
                     found = Some(Pan { u: rate * pitch.cos() * yaw.cos(), v: rate * pitch.cos() * yaw.sin() });
                 }
                 let mut next = None;
+                // A switch leads to the entry it shows now and a sequence to its first item, as `base_texture` does: ice has no flow.
+                if !std::env::var_os("HP3_NO_SWITCH").is_some() {
+                    if chain_is_switch {
+                        let live = self.switch_current.borrow().get(&key(&p, i)).copied();
+                        next = switch_pick(&p, tags, live);
+                    } else if chain_is_sequence {
+                        next = props::find(&p, tags, "SequenceItems", 0).filter(|t| t.ty == TagType::Array).and_then(|t| sequence_materials(t.data).first().copied()).filter(|&v| v != 0).map(ObjRef);
+                    }
+                }
                 for name in ["SourceTexture", "Diffuse", "Material", "Material1", "Material2", "SelfIllumination"] {
+                    if next.is_some() {
+                        break;
+                    }
                     if let Some(t) = props::find(&p, tags, name, 0)
                         && t.ty == TagType::Object
                     {
@@ -542,4 +570,55 @@ impl<'s> Loader<'s> {
         })
         .unwrap_or_default()
     }
+}
+
+/// The materials of a `MaterialSequence`'s items: each item is a struct of tagged members (Material, Time, ...), the
+/// material an object reference in the first of them.
+fn sequence_materials(data: &[u8]) -> Vec<i32> {
+    let mut rd = Reader::new(data);
+    let Ok(count) = rd.ci() else { return Vec::new() };
+    let mut out = Vec::new();
+    for _ in 0..count.max(0) {
+        let mut material = 0;
+        // Members until the `None` name that closes the struct: (name, info byte, value).
+        for _ in 0..32 {
+            let Ok(name) = rd.ci() else { return out };
+            if name == 0 {
+                break;
+            }
+            let Ok(info) = rd.u8() else { return out };
+            match info & 0x0f {
+                5 => {
+                    let Ok(r) = rd.ci() else { return out };
+                    if material == 0 {
+                        material = r;
+                    }
+                }
+                1 => {
+                    if rd.u8().is_err() {
+                        return out;
+                    }
+                }
+                2 | 4 => {
+                    if rd.u32().is_err() {
+                        return out;
+                    }
+                }
+                _ => {}
+            }
+        }
+        out.push(material);
+    }
+    out
+}
+
+/// The entry of a `MaterialSwitch` that shows: `live` (what a script set) or the file's `Current`; the first entry that
+/// exists when that one is empty.
+fn switch_pick(p: &Package, tags: &[Tag<'_>], live: Option<usize>) -> Option<ObjRef> {
+    let t = props::find(p, tags, "Materials", 0).filter(|t| t.ty == TagType::Array)?;
+    let mut rd = Reader::new(t.data);
+    let count = rd.ci().ok()?.max(0) as usize;
+    let items: Vec<i32> = (0..count).filter_map(|_| rd.ci().ok()).collect();
+    let current = live.unwrap_or_else(|| props::find(p, tags, "Current", 0).and_then(|c| c.as_i32()).unwrap_or(0).max(0) as usize);
+    items.get(current).copied().filter(|&v| v != 0).or_else(|| items.iter().copied().find(|&v| v != 0)).map(ObjRef)
 }

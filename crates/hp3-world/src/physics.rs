@@ -736,6 +736,14 @@ fn walk(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
                     // Along the surface; where that meets a second one (the crease between two slopes, a valley in a
                     // slide track) the rest goes along the crease, so the pawn is not left wedged in it.
                     let mut along = remaining - hit.normal * remaining.dot(hit.normal);
+                    // Going up a slope a walker may stand on keeps its heading and its walking speed: it moves the way it was going
+                    // and rises with the slope. (Projecting onto the slope kept only cos(slope) of the horizontal distance, which the
+                    // next tick's velocity, taken from the distance moved, compounded into a crawl; and on a slope that also tilts
+                    // sideways it turned the pawn off its heading.)
+                    if !sliding && hit.normal.z < 0.998 && hit.normal.z > 0.1 {
+                        let n = hit.normal;
+                        along = Vec3::new(remaining.x, remaining.y, -(n.x * remaining.x + n.y * remaining.y) / n.z);
+                    }
                     let mut plane = hit.normal;
                     for _ in 0..3 {
                         if along.length_squared() <= 1e-8 {
@@ -943,6 +951,29 @@ fn step_up(vm: &mut Vm<'_>, a: ObjId, delta: Vec3, hit: Hit, depth: u32) {
         let before = vec(&get(vm, a, "Location"));
         now = move_actor(vm, a, delta);
         across = vec(&get(vm, a, "Location")) - before;
+        // A riser taller than a step: the lifted box then ends with its feet below the tread's top, inside a surface that
+        // only blocks from above (the round Carpe platform's rim), and the pawn walks on through it and falls. The tread must
+        // lie under the box, not across it: where a box dropped from above meets a floor on the way down, the step is no step.
+        if get(vm, a, "Physics").as_byte() == PHYS_WALKING {
+            let end = vec(&get(vm, a, "Location"));
+            let ext = extent(vm, a);
+            let player = blocked_as_player(vm, a);
+            // Only a floor that cuts through the body counts (its top between the feet and the head): one far overhead, the
+            // next flight of a stair, is no burial.
+            let floor_z = min_floor_z(vm, a);
+            let buried = crate::envc::var_os("HP3_NO_BURIED").is_none()
+                && world(vm).collision.trace_as(player, end + Vec3::Z * (ext.z * 2.0), end, ext, Some(a)).is_some_and(|h| {
+                    let rise = h.location.z - end.z;
+                    h.time < 1.0 && h.normal.z >= floor_z && rise > 1.0 && rise < ext.z * 2.0 - 2.0
+                });
+            if buried {
+                set(vm, a, "Location", value(start));
+                step_down = false;
+                lifted = 0.0;
+                across = Vec3::ZERO;
+                now = Some(hit);
+            }
+        }
     } else if get(vm, a, "Physics").as_byte() != PHYS_WALKING {
         // Not walking: slide up the slope.
         now = move_actor(vm, a, delta + Vec3::Z * (delta.length() * hit.normal.z));
@@ -2044,7 +2075,7 @@ fn rotator_direction(r: &Value) -> Vec3 {
 }
 
 /// The rotator (roll 0) that points along `v`.
-fn direction_rotator(v: Vec3) -> Value {
+pub(crate) fn direction_rotator(v: Vec3) -> Value {
     let k = 65536.0 / std::f32::consts::TAU;
     let yaw = (v.y.atan2(v.x) * k).round() as i32 & 0xFFFF;
     let pitch = (v.z.atan2(v.truncate().length()) * k).round() as i32 & 0xFFFF;
@@ -2472,6 +2503,75 @@ pub fn far_move(vm: &mut Vm<'_>, a: ObjId, to: Vec3, test: bool, attached_move: 
 /// A snapshot of the player's pawn and what is around it, for a bug report (the app's F9 key writes it to the log): the
 /// place, turn, speed, physics, controller state, floor, volume, collision size, what it touches and every actor within 400
 /// units with its class, place and collision, then the floor sweeps.
+/// What the camera looks at, for a screenshot: the first actor whose baked shape the view ray crosses, then the actors with a
+/// static mesh whose origin lies close to the ray (an object without collision has no baked shape to hit).
+pub fn aim(vm: &mut Vm<'_>, origin: Vec3, rot: [i32; 3]) -> Vec<String> {
+    let k = std::f32::consts::TAU / 65536.0;
+    let (pitch, yaw) = (rot[0] as f32 * k, rot[1] as f32 * k);
+    let dir = Vec3::new(pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), pitch.sin());
+    let mut out = Vec::new();
+    let describe = |vm: &mut Vm<'_>, o: ObjId| -> String {
+        let class = vm.db.objects.get(o).class.map(|c| vm.db.names.get(vm.db.get(c).name).to_string()).unwrap_or_default();
+        let mesh = get(vm, o, "StaticMesh").as_obj().map(|m| hp3_script::natives::object_path(vm, m)).unwrap_or_default();
+        let p = vec(&get(vm, o, "Location"));
+        let name = hp3_script::natives::object_path(vm, o);
+        let name = name.rsplit_once('.').map_or(name.clone(), |(_, n)| n.to_string());
+        {
+            let rot = rotator_ints(&get(vm, o, "Rotation"));
+            let base = get(vm, o, "Base").as_obj().map(|b| hp3_script::natives::object_path(vm, b)).unwrap_or_default();
+            let (phys, scale) = (get(vm, o, "Physics").as_byte(), get(vm, o, "DrawScale").as_float());
+            let (tag, group) = (get(vm, o, "Tag"), get(vm, o, "Group"));
+            format!("{name} {} Z={:.0} X={:.0} Y={:.0} | ROT {rot:?} SCALE {scale} PHYS {phys} BASE {base} TAG {tag:?} GROUP {group:?} MESH {mesh}", mesh.rsplit_once('.').map_or(mesh.as_str(), |(_, m)| m), p.z, p.x, p.y)
+        }
+    };
+    if let Some((o, d)) = world(vm).collision.pick_triangle(origin, dir, 20000.0) {
+        out.push(format!("AIM {} DIST {d:.0}", describe(vm, o)));
+    }
+    let mut near: Vec<(f32, ObjId)> = Vec::new();
+    for o in world(vm).actors.clone() {
+        if vm.db.objects.get(o).deleted || get(vm, o, "StaticMesh").as_obj().is_none() {
+            continue;
+        }
+        let rel = vec(&get(vm, o, "Location")) - origin;
+        let t = rel.dot(dir);
+        if t > 0.0 && t < 4000.0 {
+            let off = (rel - dir * t).length();
+            if off < 260.0 {
+                near.push((off, o));
+            }
+        }
+    }
+    near.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (off, o) in near.into_iter().take(8) {
+        out.push(format!("RAY+{off:.0} {}", describe(vm, o)));
+    }
+    out
+}
+
+/// The short lines stamped on a screenshot (F4): where the player is, so a report can say exactly what was on screen.
+pub fn caption(vm: &mut Vm<'_>, cam: Vec3, cam_rot: [i32; 3]) -> Vec<String> {
+    let map = world(vm).level_info.map(|l| hp3_script::natives::object_path(vm, l)).unwrap_or_default();
+    let frame = world(vm).frame;
+    let Some(a) = world(vm).player.and_then(|pc| get(vm, pc, "Pawn").as_obj()) else {
+        let mut lines = vec![format!("MAP {map}  FRAME {frame}"), "NO PAWN".into()];
+        lines.extend(aim(vm, cam, cam_rot));
+        return lines;
+    };
+    let at = vec(&get(vm, a, "Location"));
+    let (x, y, z) = (at.x, at.y, at.z);
+    let rot = rotator_ints(&get(vm, a, "Rotation"));
+    let phys = get(vm, a, "Physics").as_byte();
+    let who = hp3_script::natives::object_path(vm, a);
+    let mut lines = vec![
+        format!("MAP {map}  FRAME {frame}"),
+        format!("POS X={x:.0} Y={y:.0} Z={z:.0}"),
+        format!("ROT PITCH={} YAW={} ROLL={}  PHYS {phys}", rot[0], rot[1], rot[2]),
+        format!("PAWN {}", who.rsplit_once('.').map_or(who.as_str(), |(_, n)| n)),
+    ];
+    lines.extend(aim(vm, cam, cam_rot));
+    lines
+}
+
 pub fn mark(vm: &mut Vm<'_>) -> String {
     let Some(pc) = world(vm).player else { return "mark: no player".into() };
     let Some(a) = get(vm, pc, "Pawn").as_obj() else { return "mark: no pawn".into() };
@@ -2508,6 +2608,23 @@ pub fn mark(vm: &mut Vm<'_>) -> String {
         let (cr, ch) = (get(vm, o, "CollisionRadius").as_float(), get(vm, o, "CollisionHeight").as_float());
         let (ca, cb) = (get(vm, o, "bCollideActors").as_bool(), get(vm, o, "bBlockActors").as_bool());
         out += &format!("  near {} [{class}] at {p} dist {:.0} coll {cr}x{ch} collideActors {ca} block {cb}\n", hp3_script::natives::object_path(vm, o), (p - at).length());
+    }
+    // Carpe spells and their lines wherever they are (a line left behind after a cast).
+    for o in world(vm).actors.clone() {
+        if vm.db.objects.get(o).deleted {
+            continue;
+        }
+        let class = vm.db.objects.get(o).class.map(|c| vm.db.names.get(vm.db.get(c).name).to_string()).unwrap_or_default();
+        if !class.contains("Retractum") && !class.contains("CarpeFly") {
+            continue;
+        }
+        let state = vm.state_of(o).map(|s| vm.db.names.get(vm.db.get(s).name).to_string()).unwrap_or_default();
+        let (p, hidden) = (vec(&get(vm, o, "Location")), get(vm, o, "bHidden").as_bool());
+        let name = |vm: &mut Vm<'_>, v: Value| v.as_obj().map(|x| hp3_script::natives::object_path(vm, x)).unwrap_or_else(|| "-".into());
+        let (target, caster, owner) = (get(vm, o, "TargetActor"), get(vm, o, "spellCaster"), get(vm, o, "Owner"));
+        let (target, caster, owner) = (name(vm, target), name(vm, caster), name(vm, owner));
+        let (soft, tohit) = (get(vm, o, "fTimeSoFar").as_float(), get(vm, o, "fTimeToHit").as_float());
+        out += &format!("  carpe {} [{class}] state {state} at {p} hidden {hidden} target {target} caster {caster} owner {owner} timeSoFar {soft} toHit {tohit}\n", hp3_script::natives::object_path(vm, o));
     }
     out += &format!("  floor sweeps: {}\n", debug_floor(vm, a));
     out

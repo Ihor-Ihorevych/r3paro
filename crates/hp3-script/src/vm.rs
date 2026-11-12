@@ -157,6 +157,8 @@ pub struct Vm<'s> {
     /// Script functions replaced by a native, by lower-case `Class.Function`, and the lookup of them by function struct id.
     script_overrides: HashMap<String, NativeFn>,
     override_cache: Vec<Option<Option<NativeFn>>>,
+    /// Set by `call_original` for the next `invoke`, which then runs the script even if a native override replaces it.
+    skip_override_once: bool,
     trivial: HashMap<StructId, bool>,
     /// Count statements per function when set.
     pub profile: bool,
@@ -214,6 +216,7 @@ impl<'s> Vm<'s> {
             native_cache: Vec::new(),
             script_overrides: HashMap::default(),
             override_cache: Vec::new(),
+            skip_override_once: false,
             trivial: HashMap::default(),
             profile: false,
             trace_states: false,
@@ -841,6 +844,14 @@ impl<'s> Vm<'s> {
         Ok(result)
     }
 
+    /// Runs the script of `f` itself, for an override that handles a few cases and leaves the rest to the original.
+    pub fn call_original(&mut self, f: StructId, this: Option<ObjId>, args: &mut [Value]) -> VmResult<Value> {
+        self.skip_override_once = true;
+        let r = self.invoke(f, this, args);
+        self.skip_override_once = false;
+        r
+    }
+
     /// Runs function `f` with already evaluated arguments; out arguments are updated in place.
     pub fn invoke(&mut self, f: StructId, this: Option<ObjId>, args: &mut [Value]) -> VmResult<Value> {
         if self.depth > 250 {
@@ -896,7 +907,8 @@ impl<'s> Vm<'s> {
             }
             return native(self, this, args);
         }
-        if !self.script_overrides.is_empty() {
+        let skip_override = std::mem::take(&mut self.skip_override_once);
+        if !skip_override && !self.script_overrides.is_empty() {
             let replaced = match self.override_cache.get(f.0 as usize) {
                 Some(Some(n)) => *n,
                 _ => {

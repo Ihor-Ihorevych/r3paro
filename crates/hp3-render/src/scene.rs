@@ -990,13 +990,15 @@ fn add_actors(b: &mut Batcher<'_, '_>, map: &Rc<Package>, include: &dyn Fn(usize
             }
             let scale = f("DrawScale").and_then(|t| t.as_f32()).unwrap_or(1.0);
             let scale3d = f("DrawScale3D").and_then(loader::tag_vec3).map(|v| GVec3::new(v.x, v.y, v.z)).unwrap_or(GVec3::ONE);
+            // `Skins` is a dynamic array: a count, then one reference per slot (null slots keep their place, so the
+            // painting in a frame's second section is not shifted onto its first).
             let skins: Vec<ObjRef> = tags
                 .iter()
                 .filter(|t| map.name(t.name).eq_ignore_ascii_case("Skins"))
-                .filter_map(|t| {
+                .flat_map(|t| {
                     let mut r = hp3_package::Reader::new(t.data);
-                    let n = r.ci().ok()?;
-                    (n > 0).then(|| r.ci().ok().map(ObjRef)).flatten()
+                    let n = r.ci().unwrap_or(0).clamp(0, 64);
+                    (0..n).map_while(|_| r.ci().ok().map(ObjRef)).collect::<Vec<_>>()
                 })
                 .collect();
             let instance = f("StaticMeshInstance").and_then(|t| t.as_obj());

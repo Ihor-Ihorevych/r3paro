@@ -16,6 +16,262 @@ fn vec3(v: &Value) -> [f32; 3] {
     [0, 1, 2].map(|i| f.get(i).map(Value::as_float).unwrap_or(0.0))
 }
 
+/// `HPPawn.HandleSpell(spell, hitLocation, castedBy)` for a fire crab hit by Carpe Retractum with `CarpeCrab` on: hands the
+/// crab's controller the spell, aimed at the caster, and says whether it did.
+fn carpe_on_crab(vm: &mut Vm<'_>, pawn: ObjId, a: &mut [Value]) -> bool {
+    if !carpe_crab_on(vm) {
+        return false;
+    }
+    let (Some(spell), Some(retractum), Some(crab)) = (obj_arg(a, 0), vm.db.find("RetractumSpell"), vm.db.find("firecrab")) else {
+        return false;
+    };
+    let is = |vm: &Vm<'_>, o: ObjId, k| vm.db.objects.get(o).class.is_some_and(|c| vm.is_child_of(c, k));
+    if !is(vm, spell, retractum) || !is(vm, pawn, crab) {
+        return false;
+    }
+    let Some(controller) = get(vm, pawn, "Controller").as_obj() else { return false };
+    let from = crate::vec_of(&get(vm, pawn, "Location"));
+    let toward = match obj_arg(a, 2) {
+        Some(caster) => crate::vec_of(&get(vm, caster, "Location")) - from,
+        None => return false,
+    };
+    set(vm, spell, "vOrigTargetDir", crate::physics::value(toward.normalize_or_zero()));
+    // The pull pose normally began before the hit (`carpe_schedule`); one that did not is started now.
+    if let Some(caster) = obj_arg(a, 2)
+        && !pose_pending(caster)
+    {
+        carpe_pull_pose(vm, caster, pawn);
+    }
+    let mut args =[Value::Object(Some(spell)), a.get(1).cloned().unwrap_or_default(), a.get(2).cloned().unwrap_or_default()];
+    fire(vm, controller, "OnHandleSpell", &mut args);
+    true
+}
+
+/// Casters in the lever pull pose and the time left before they let go (`carpe_tick`).
+static PULLING: std::sync::Mutex<Vec<(ObjId, f32)>> = std::sync::Mutex::new(Vec::new());
+
+/// Poses waiting to start: caster, crab, seconds until the pull begins (`carpe_schedule`).
+static STARTING: std::sync::Mutex<Vec<(ObjId, ObjId, f32)>> = std::sync::Mutex::new(Vec::new());
+
+/// How long before the spell reaches the crab the caster starts pulling.
+const PULL_LEAD: f32 = 0.25;
+
+fn pose_pending(caster: ObjId) -> bool {
+    PULLING.lock().unwrap().iter().any(|e| e.0 == caster) || STARTING.lock().unwrap().iter().any(|e| e.0 == caster)
+}
+
+/// A Carpe spell has just been launched: when its target is a fire crab and the option is on, the caster's pull pose is set to
+/// begin `PULL_LEAD` before the spell lands (`fTimeToHit` after the launch).
+fn carpe_schedule(vm: &mut Vm<'_>, spell: ObjId) {
+    if !carpe_crab_on(vm) {
+        return;
+    }
+    let Some(crab) = vm.db.find("firecrab") else { return };
+    let (Some(target), Some(caster)) = (get(vm, spell, "TargetActor").as_obj(), get(vm, spell, "spellCaster").as_obj()) else { return };
+    if !vm.db.objects.get(target).class.is_some_and(|c| vm.is_child_of(c, crab)) || pose_pending(caster) {
+        return;
+    }
+    let delay = (get(vm, spell, "fTimeToHit").as_float() - PULL_LEAD).max(0.0);
+    STARTING.lock().unwrap().push((caster, target, delay));
+}
+
+/// How long the lever pull takes: `SpellTrigger.fTimeToTrigger`, 1 second unless a level says otherwise.
+const PULL_TIME: f32 = 1.0;
+
+/// The caster's pose when he pulls a Carpe lever, the steps of `HPHeroPawn.DoPreRetractum` and the `prepare` part of
+/// `StateRetractum` for a `SpellTrigger`: the pawn takes the target, goes into `StateRetractum`, turns to face it, blends the
+/// animation channel in and plays `RetractumPullAnim` over `fTimeToTrigger`. The lever's own script lets go afterwards
+/// (`OnEvent('Release')`), which `carpe_tick` does for the crab.
+fn carpe_pull_pose(vm: &mut Vm<'_>, caster: ObjId, target: ObjId) {
+    let (Some(state), Some(release)) = (vm.db.names.find("StateRetractum"), vm.db.names.find("Release")) else { return };
+    set(vm, caster, "RetTarget", Value::Object(Some(target)));
+    fire(vm, caster, "GotoState", &mut [Value::Name(state)]);
+    let toward = crate::vec_of(&get(vm, target, "Location")) - crate::vec_of(&get(vm, caster, "Location"));
+    if let Some(controller) = get(vm, caster, "Controller").as_obj() {
+        fire(vm, controller, "SetRotation", &mut [crate::physics::direction_rotator(toward)]);
+    }
+    let channel = get(vm, caster, "RetractumAnimChannel");
+    fire(vm, caster, "AnimBlendToAlpha", &mut [channel.clone(), Value::Float(1.0), Value::Float(0.2)]);
+    let anim = get(vm, caster, "RetractumPullAnim");
+    if anim.as_name() != Name::NONE {
+        fire(vm, caster, "PlayAnim", &mut [anim, Value::Float(15.0 / 30.0 / PULL_TIME), Value::Float(0.0), channel]);
+    }
+    let _ = release;
+    PULLING.lock().unwrap().push((caster, PULL_TIME));
+}
+
+/// Called every tick: a caster that has pulled for `PULL_TIME` lets go, as the lever's script does.
+pub fn carpe_tick(vm: &mut Vm<'_>, dt: f32) {
+    track_player(vm);
+    let due: Vec<(ObjId, ObjId)> = {
+        let mut p = STARTING.lock().unwrap();
+        for e in p.iter_mut() {
+            e.2 -= dt;
+        }
+        let due = p.iter().filter(|e| e.2 <= 0.0).map(|e| (e.0, e.1)).collect();
+        p.retain(|e| e.2 > 0.0);
+        due
+    };
+    for (caster, target) in due {
+        if !vm.db.objects.get(caster).deleted && !vm.db.objects.get(target).deleted {
+            carpe_pull_pose(vm, caster, target);
+        }
+    }
+    let done: Vec<ObjId> = {
+        let mut p = PULLING.lock().unwrap();
+        if p.is_empty() {
+            return;
+        }
+        for e in p.iter_mut() {
+            e.1 -= dt;
+        }
+        let done = p.iter().filter(|e| e.1 <= 0.0).map(|e| e.0).collect();
+        p.retain(|e| e.1 > 0.0);
+        done
+    };
+    let Some(release) = vm.db.names.find("Release") else { return };
+    for caster in done {
+        if !vm.db.objects.get(caster).deleted {
+            fire(vm, caster, "OnEvent", &mut [Value::Name(release)]);
+        }
+    }
+}
+
+/// Whether Carpe is picked for fire crabs (the Q key): the wand then takes Carpe when the cursor locks onto a crab.
+pub static CARPE_PICK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The spell the player's wand holds, as a short upper-case name (`CARPE`, `RICTUSEMPRA`).
+pub fn wand_spell_name(vm: &mut Vm<'_>) -> Option<String> {
+    let wand = player_wand(vm)?;
+    let class = get(vm, wand, "CurrentSpellClass").as_obj()?;
+    let name = vm.db.names.get(vm.db.objects.get(class).name).to_string();
+    Some(spell_label(&name))
+}
+
+/// The spell picked by hand (the phone's Carpe button): the wand keeps it through lock-ons on targets that do not name a spell of their
+/// own (None: the game chooses, as it does when the cursor locks on).
+static SPELL_PICK: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The short name of a spell class (`CARPE`, `RICTUSEMPRA`), as the indicator writes it.
+fn spell_label(class_name: &str) -> String {
+    let name = class_name.trim_end_matches("_Combat").trim_end_matches("Spell");
+    if name.eq_ignore_ascii_case("Retractum") { "CARPE".to_string() } else { name.to_ascii_uppercase() }
+}
+
+/// The spell picked by hand, if any, as its short name.
+pub fn spell_pick() -> Option<String> {
+    SPELL_PICK.lock().ok()?.as_deref().map(spell_label)
+}
+
+/// The player's wand.
+fn player_wand(vm: &mut Vm<'_>) -> Option<ObjId> {
+    let pc = crate::world(vm).player?;
+    let pawn = get(vm, pc, "Pawn").as_obj()?;
+    get(vm, pawn, "Wand").as_obj()
+}
+
+/// Whether the player's wand has the spell (`HasSpell`: each character's wand lists its own).
+fn wand_has(vm: &mut Vm<'_>, wand: ObjId, spell_class: &str) -> bool {
+    let Some(class) = vm.db.find(spell_class) else { return false };
+    let object = vm.db.get(class).object;
+    fire(vm, wand, "HasSpell", &mut [Value::Object(Some(object))]).as_bool()
+}
+
+/// The phone's Carpe button: the first tap selects Carpe Retractum, which means pulling fire crabs (the `CarpeCrab` option goes on and
+/// Carpe is what the cursor takes at a crab); the second tap lets go of both and the game chooses again. Returns what to show: `CARPE`,
+/// `AUTO`, or `NO CARPE` when this character's wand does not have the spell (nothing changes then).
+pub fn carpe_toggle(vm: &mut Vm<'_>) -> String {
+    use std::sync::atomic::Ordering::Relaxed;
+    if CARPE_PICK.load(Relaxed) {
+        CARPE_PICK.store(false, Relaxed);
+        if let Ok(mut p) = SPELL_PICK.lock() {
+            *p = None;
+        }
+        crate::settings::store(vm, "hp3.app", "CarpeCrab", "False");
+        return "AUTO".to_string();
+    }
+    let Some(wand) = player_wand(vm) else { return "NO WAND".to_string() };
+    if !wand_has(vm, wand, "RetractumSpell") {
+        return "NO CARPE".to_string();
+    }
+    CARPE_PICK.store(true, Relaxed);
+    if let Ok(mut p) = SPELL_PICK.lock() {
+        *p = Some("RetractumSpell".to_string());
+    }
+    crate::settings::store(vm, "hp3.app", "CarpeCrab", "True");
+    if let Some(class) = vm.db.find("RetractumSpell") {
+        let object = vm.db.get(class).object;
+        fire(vm, wand, "ChooseSpell", &mut [Value::Object(Some(object)), Value::Bool(true)]);
+    }
+    "CARPE".to_string()
+}
+
+/// Puts the hand-picked spell back into the wand after the cursor's lock-on chose the target's own, except for a target that names the
+/// spell it needs (`vulnerableToClass`: a Carpe hook, a door, a crab): there the game's own choice stands, as without the button. Only
+/// while the wand has the spell (after a character switch it may not).
+fn reapply_spell_pick(vm: &mut Vm<'_>, target: Option<ObjId>) {
+    if target.is_some_and(|t| get(vm, t, "vulnerableToClass").as_obj().is_some()) {
+        return;
+    }
+    let Some(name) = SPELL_PICK.lock().ok().and_then(|p| p.clone()) else { return };
+    let Some(wand) = player_wand(vm) else { return };
+    let Some(class) = vm.db.find(&name) else { return };
+    if !wand_has(vm, wand, &name) {
+        return;
+    }
+    let object = vm.db.get(class).object;
+    if get(vm, wand, "CurrentSpellClass").as_obj() != Some(object) {
+        fire(vm, wand, "ChooseSpell", &mut [Value::Object(Some(object)), Value::Bool(true)]);
+    }
+}
+
+/// Whether the player is playing as Ron (only he has Carpe): the phone shows its Carpe button only then.
+pub static PLAYER_IS_RON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Looks at who the player is a few times a second; when the player has switched away from Ron while Carpe is selected, Carpe is let go
+/// (the same as a second tap on the button).
+fn track_player(vm: &mut Vm<'_>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    static TICKS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    if TICKS.fetch_add(1, Relaxed) % 10 != 0 {
+        return;
+    }
+    let Some(pc) = crate::world(vm).player else { return };
+    // No pawn (a cutscene): nothing changes, the buttons are hidden anyway.
+    let Some(pawn) = get(vm, pc, "Pawn").as_obj() else { return };
+    let name = vm.db.names.get(vm.db.objects.get(pawn).name).to_string();
+    let ron = name.to_ascii_lowercase().starts_with("ron");
+    PLAYER_IS_RON.store(ron, Relaxed);
+    if !ron && CARPE_PICK.load(Relaxed) {
+        CARPE_PICK.store(false, Relaxed);
+        if let Ok(mut p) = SPELL_PICK.lock() {
+            *p = None;
+        }
+        crate::settings::store(vm, "hp3.app", "CarpeCrab", "False");
+    }
+}
+
+pub fn carpe_crab_on(vm: &Vm<'_>) -> bool {
+    crate::settings::flag(vm, "hp3.app", "CarpeCrab", false) || crate::envc::var_os("HP3_CARPE_CRAB").is_some()
+}
+
+/// Before the spell cursor locks onto `target`: a fire crab is vulnerable to Carpe Retractum while the option is on and the
+/// player's wand holds it, and to its own spell (Rictusempra) in every other case.
+fn carpe_lock(vm: &mut Vm<'_>, cursor: ObjId, target: ObjId) {
+    let (Some(crab), Some(retractum), Some(rictusempra)) = (vm.db.find("firecrab"), vm.db.find("RetractumSpell"), vm.db.find("RictusempraSpell_Combat")) else {
+        return;
+    };
+    if !vm.db.objects.get(target).class.is_some_and(|c| vm.is_child_of(c, crab)) {
+        return;
+    }
+    let (carpe, own) = (vm.db.get(retractum).object, vm.db.get(rictusempra).object);
+    let _ = cursor;
+    let want = if carpe_crab_on(vm) && CARPE_PICK.load(std::sync::atomic::Ordering::Relaxed) { carpe } else { own };
+    if get(vm, target, "vulnerableToClass").as_obj() != Some(want) {
+        set(vm, target, "vulnerableToClass", Value::Object(Some(want)));
+    }
+}
+
 fn given(a: &[Value], i: usize) -> bool {
     !matches!(a.get(i), None | Some(Value::Empty))
 }
@@ -841,6 +1097,52 @@ pub fn register(vm: &mut Vm<'_>) {
         }
         Ok(Value::Empty)
     });
+    // Carpe on a fire crab (opt-in, `CarpeCrab` in `[hp3.app]` of hp3-settings.ini). The original lets only its own spell
+    // (`vulnerableToClass`) hurt a crab, so a crab in a corner behind a ring of fireballs cannot be reached. With the setting
+    // on, Carpe Retractum hitting a crab gives the crab's controller a spell that pulls it toward the caster: the crab pops up
+    // along the spell's direction and flips as it does when hit. All other spells and creatures go the original way.
+    // HP3_NO_CARPE=1 leaves out both overrides below (to tell whether they are behind a problem).
+    if crate::envc::var_os("HP3_NO_CARPE").is_none() {
+    vm.register_override("HPPawn.HandleSpell", |vm, this, a| {
+        let Some(o) = this else { return Ok(Value::Empty) };
+        if carpe_on_crab(vm, o, a) {
+            return Ok(Value::Empty);
+        }
+        let (Some(class), Some(name)) = (vm.db.find("HPPawn"), vm.db.names.find("HandleSpell")) else { return Ok(Value::Empty) };
+        match vm.find_function(None, Some(class), name) {
+            Some(f) => vm.call_original(f, this, a),
+            None => Ok(Value::Empty),
+        }
+    });
+    // A launched Carpe spell at a crab starts the caster's pull pose a little before it lands.
+    vm.register_override("RetractumSpell.Launch", |vm, this, a| {
+        let (Some(class), Some(name)) = (vm.db.find("RetractumSpell"), vm.db.names.find("Launch")) else { return Ok(Value::Empty) };
+        let r = match vm.find_function(None, Some(class), name) {
+            Some(f) => vm.call_original(f, this, a),
+            None => Ok(Value::Empty),
+        };
+        if let Some(spell) = this {
+            carpe_schedule(vm, spell);
+        }
+        r
+    });
+    // Locking onto a target makes the wand take the spell the target is vulnerable to (`lockOn` calls `ChooseSpell` with the
+    // target's `vulnerableToClass`), so a crab always meant Rictusempra. With `CarpeCrab` on and Carpe Retractum in the wand,
+    // the crab is made vulnerable to Carpe for the lock (and to its own spell again otherwise).
+    vm.register_override("SpellCursor.lockOn", |vm, this, a| {
+        let Some(cursor) = this else { return Ok(Value::Empty) };
+        if let Some(target) = obj_arg(a, 0) {
+            carpe_lock(vm, cursor, target);
+        }
+        let (Some(class), Some(name)) = (vm.db.find("SpellCursor"), vm.db.names.find("lockOn")) else { return Ok(Value::Empty) };
+        let r = match vm.find_function(None, Some(class), name) {
+            Some(f) => vm.call_original(f, this, a),
+            None => Ok(Value::Empty),
+        };
+        reapply_spell_pick(vm, obj_arg(a, 0));
+        r
+    });
+    }
     // KWAIController.FindClosestNavPoint, written out natively (the companions call it every tick and the script loop,
     // a trace per nav point, was the biggest cost of a busy hub). The same steps as the script: the nav point nearest
     // the pawn within 1500 (twice the distance for those behind the way to the hero) is the nearest one, but one that

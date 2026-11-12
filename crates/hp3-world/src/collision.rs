@@ -585,6 +585,33 @@ impl Collision {
         Some(it.fold((first, first), |(lo, hi), v| (lo.min(v), hi.max(v))))
     }
 
+    /// The nearest baked triangle a ray from `origin` along `dir` crosses: its actor and the distance (a visual pick for
+    /// screenshots; it ignores what blocks movement).
+    pub fn pick_triangle(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<(ObjId, f32)> {
+        let mut best: Option<(ObjId, f32)> = None;
+        for t in &self.tris {
+            let Some(actor) = t.actor else { continue };
+            let (e1, e2) = (t.v[1] - t.v[0], t.v[2] - t.v[0]);
+            let p = dir.cross(e2);
+            let det = e1.dot(p);
+            if det.abs() < 1e-8 {
+                continue;
+            }
+            let s = origin - t.v[0];
+            let u = s.dot(p) / det;
+            let q = s.cross(e1);
+            let v = dir.dot(q) / det;
+            if !(0.0..=1.0).contains(&u) || v < 0.0 || u + v > 1.0 {
+                continue;
+            }
+            let d = e2.dot(q) / det;
+            if d > 1.0 && d < max && best.is_none_or(|(_, b)| d < b) {
+                best = Some((actor, d));
+            }
+        }
+        best
+    }
+
     /// The actors that own baked triangles or models.
     pub fn baked_owners(&mut self) -> &[ObjId] {
         if self.owners_cache.is_none() {

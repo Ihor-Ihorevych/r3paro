@@ -1109,6 +1109,7 @@ pub fn tick(vm: &mut Vm<'_>, dt: f32) {
         w.frame += 1;
         w.actors.clone()
     };
+    natives::carpe_tick(vm, dt);
     if world(vm).frame % 30 == 0 {
         start_book_fights(vm);
     }

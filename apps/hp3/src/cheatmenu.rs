@@ -14,7 +14,7 @@ pub enum Pick {
 }
 
 /// The entries, in the phone menu's order. The font has no comma, so the labels avoid it.
-const ENTRIES: [(&str, Option<&str>); 12] = [
+const ENTRIES: [(&str, Option<&str>); 15] = [
     ("GO TO LEVEL...", None),
     ("GOD MODE (ON/OFF)", Some("cheat god")),
     ("FLY", Some("cheat fly")),
@@ -27,6 +27,9 @@ const ENTRIES: [(&str, Option<&str>); 12] = [
     ("BEAT THE BOSS", Some("cheat beatboss")),
     ("DEFEAT PEEVES", Some("cheat defeatpeeves")),
     ("HEAL", Some("cheat heal")),
+    ("CARPE PULLS CRABS (ON/OFF)", Some("cheat carpecrab")),
+    ("CARPE FOR CRABS (SELECT/DESELECT)", Some("cheat spellswitch")),
+    ("GRAPHICS: CHARACTER SHADOWS (ON/OFF)", Some("gfx shadows")),
 ];
 
 pub struct CheatMenu {
@@ -101,4 +104,28 @@ impl CheatMenu {
         }
         out
     }
+}
+
+/// The spell indicator shown while "Carpe pulls crabs" is on: the spell in the wand now, and what Q does.
+///
+/// `mode` is written after the spell (PICKED for a spell chosen by hand, AUTO right after the game takes over again); `crab_pick` is
+/// Some while the Carpe-for-crabs option is on, with whether Q has Carpe picked.
+pub fn spell_indicator(spell: &str, mode: &str, crab_pick: Option<bool>, width: u32, height: u32) -> Vec<Quad> {
+    let mut out = Vec::new();
+    let s = (height as f32 / 240.0).floor().max(2.0);
+    let line = 10.0 * s;
+    let (x, y) = (line, line);
+    let label = if mode.is_empty() { format!("SPELL: {spell}") } else { format!("SPELL: {spell} ({mode})") };
+    let hint = crab_pick.map(|p| format!("Q: CARPE FOR CRABS {}", if p { "ON" } else { "OFF" }));
+    let w = (label.len().max(hint.as_ref().map_or(0, String::len)) as f32) * 6.0 * s;
+    let _ = width;
+    let rows = if hint.is_some() { 2.6 } else { 1.6 };
+    pixel(&mut out, x - 0.5 * line, y - 0.5 * line, w + line, rows * line, [0.0, 0.0, 0.0, 0.6]);
+    let color = if spell == "CARPE" { [0.6, 1.0, 0.6, 1.0] } else { [1.0, 0.9, 0.5, 1.0] };
+    text(&mut out, &label, x, y, s, color);
+    if let (Some(hint), Some(picked)) = (hint, crab_pick) {
+        let hint_color = if picked { [0.6, 1.0, 0.6, 1.0] } else { [0.75, 0.75, 0.75, 1.0] };
+        text(&mut out, &hint, x, y + 1.3 * line, s * 0.8, hint_color);
+    }
+    out
 }

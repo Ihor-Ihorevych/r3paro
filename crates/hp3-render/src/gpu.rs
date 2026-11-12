@@ -24,6 +24,11 @@ fn fog_factor(w: f32) -> f32 {
 @group(2) @binding(0) var shadow0: texture_depth_cube;
 @group(2) @binding(1) var shadow1: texture_depth_cube;
 @group(2) @binding(2) var shadow_samp: sampler_comparison;
+// The characters' shadow: an orthographic depth map from their strongest light. a = strength (0: none this frame), 1 / map size,
+// depth bias and depth range in units; b = direction to the light, units per texel.
+struct ActorShadow { view_proj: mat4x4<f32>, a: vec4<f32>, b: vec4<f32> };
+@group(2) @binding(3) var actor_map: texture_depth_2d;
+@group(2) @binding(4) var<uniform> actor_shadow: ActorShadow;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -110,18 +115,63 @@ fn moving_light(world: vec3<f32>, mesh: bool) -> vec3<f32> {
     return sum;
 }
 
+// How much of the static light a character's shadow leaves at `world` (1 none). Sixteen compare taps on a rotated disc whose
+// radius grows with the receiver's distance past the casters (the map is centred on them), so the shadow is sharp at the
+// feet and soft further out; the sampler's own 2x2 comparison smooths each tap. Edges of the map fade out.
+fn actor_shadow_light(world: vec3<f32>, frag: vec2<f32>) -> f32 {
+    // The face's normal from the screen derivatives, turned to the light (taken before any early return: derivatives need
+    // uniform control flow).
+    var n = normalize(cross(dpdx(world), dpdy(world)));
+    let strength = actor_shadow.a.x;
+    if (strength <= 0.0) { return 1.0; }
+    let to_light = actor_shadow.b.xyz;
+    if (dot(n, to_light) < 0.0) { n = -n; }
+    let nl = dot(n, to_light);
+    let texel = actor_shadow.b.w;
+    let c = actor_shadow.view_proj * vec4<f32>(world + n * (texel * 1.5), 1.0);
+    let uv = vec2<f32>(c.x * 0.5 + 0.5, 0.5 - c.y * 0.5);
+    let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+    if (edge <= 0.0 || c.z <= 0.0 || c.z >= 1.0) { return 1.0; }
+    let range = actor_shadow.a.w;
+    let recv = c.z - actor_shadow.a.z / range;
+    // Units past the casters' plane (the middle of the depth range) the receiver lies, and the blur it earns.
+    let past = max((c.z - 0.5) * range, 0.0);
+    let radius = clamp((1.2 + past * 0.07) / texel, 1.5, 18.0) * actor_shadow.a.y;
+    let noise = fract(52.9829189 * fract(dot(frag, vec2<f32>(0.06711056, 0.00583715))));
+    let ang = noise * 6.2831853;
+    let rot = vec2<f32>(cos(ang), sin(ang));
+    var vis = 0.0;
+    for (var k = 0; k < 16; k = k + 1) {
+        // A sunflower spiral: even coverage of the disc without a table.
+        let r = sqrt((f32(k) + 0.5) / 16.0);
+        let t = f32(k) * 2.3999632;
+        let d = vec2<f32>(cos(t), sin(t)) * r;
+        let o = vec2<f32>(d.x * rot.x - d.y * rot.y, d.x * rot.y + d.y * rot.x) * radius;
+        vis = vis + textureSampleCompareLevel(actor_map, shadow_samp, uv + o, recv);
+    }
+    vis = vis / 16.0;
+    vis = mix(1.0, vis, smoothstep(0.0, 0.06, edge));
+    return 1.0 - strength * smoothstep(0.0, 0.3, nl) * (1.0 - vis);
+}
+
+// The level's baked light under a character's shadow: darker, and a little cooler (the shadow is lit by the sky, not the lamp).
+fn shaded(baked: vec3<f32>, world: vec3<f32>, frag: vec2<f32>) -> vec3<f32> {
+    let s = actor_shadow_light(world, frag);
+    return baked * s * mix(vec3<f32>(0.88, 0.94, 1.0), vec3<f32>(1.0), s);
+}
+
 // Light is stored halved (vertex color and lightmap): doubled here, so surfaces can be lit beyond their texture.
 @fragment fn fs(i: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, i.uv);
     if (c.a < 0.5) { discard; }
-    let light = textureSample(lightmap, lsamp, i.light_uv).rgb * i.color * 4.0 + moving_light(i.world, i.light_uv.x < 0.0);
+    let light = shaded(textureSample(lightmap, lsamp, i.light_uv).rgb * i.color * 4.0, i.world, i.pos.xy) + moving_light(i.world, i.light_uv.x < 0.0);
     return vec4<f32>(mix(globals.fog_color.rgb, c.rgb * light, fog_factor(i.pos.w)), 1.0);
 }
 
 // Alpha-blended surfaces: lit like the others, covering what is below by their own alpha.
 @fragment fn fs_alpha(i: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, i.uv);
-    let light = textureSample(lightmap, lsamp, i.light_uv).rgb * i.color * 4.0 + moving_light(i.world, i.light_uv.x < 0.0);
+    let light = shaded(textureSample(lightmap, lsamp, i.light_uv).rgb * i.color * 4.0, i.world, i.pos.xy) + moving_light(i.world, i.light_uv.x < 0.0);
     return vec4<f32>(c.rgb * light, c.a * fog_factor(i.pos.w));
 }
 
@@ -129,7 +179,7 @@ fn moving_light(world: vec3<f32>, mesh: bool) -> vec3<f32> {
 @fragment fn fs_blend(i: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, i.uv);
     let weight = textureSample(lightmap, lsamp, i.light_uv).r;
-    let light = i.color * 2.0 + moving_light(i.world, false);
+    let light = shaded(i.color * 2.0, i.world, i.pos.xy) + moving_light(i.world, false);
     return vec4<f32>(mix(globals.fog_color.rgb, c.rgb * light, fog_factor(i.pos.w)), weight);
 }
 "#;
@@ -628,6 +678,27 @@ impl Renderer {
         opaque: impl FnOnce(&mut wgpu::RenderPass<'_>),
         blended: impl FnOnce(&mut wgpu::RenderPass<'_>),
     ) -> wgpu::CommandBuffer {
+        self.draw_with_pre(scene, camera, color, depth, aspect, |_| {}, opaque, blended)
+    }
+
+    /// The shadow maps (the moving lights' cubes and the characters' map).
+    pub fn shadow_maps(&self) -> &crate::shadow::ShadowMaps {
+        &self.shadows
+    }
+
+    /// Like `draw_with`, with `pre` recording its own passes into the frame's encoder first (the characters' shadow map).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_with_pre(
+        &self,
+        scene: &GpuScene,
+        camera: &Camera,
+        color: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        aspect: f32,
+        pre: impl FnOnce(&mut wgpu::CommandEncoder),
+        opaque: impl FnOnce(&mut wgpu::RenderPass<'_>),
+        blended: impl FnOnce(&mut wgpu::RenderPass<'_>),
+    ) -> wgpu::CommandBuffer {
         let fog = self.fog.get();
         let far = fog.map_or(65536.0, |f| f.end.clamp(64.0, 65536.0));
         let view_proj = camera.view_proj_far(aspect, far);
@@ -658,6 +729,7 @@ impl Renderer {
         if let Some(geom) = scene.shadow_geom.as_ref().filter(|_| !shadowed.is_empty()) {
             self.shadows.render(&self.queue, &mut enc, geom, scene.id, &shadowed);
         }
+        pre(&mut enc);
         let clear_color = match fog {
             Some(f) if f.clear => f.color,
             _ => glam::Vec3::ZERO,

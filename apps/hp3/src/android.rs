@@ -290,6 +290,15 @@ pub extern "system" fn Java_com_ut2004_android_GameActivity_nativeSavedCount(_en
     SAVED.load(Ordering::Relaxed)
 }
 
+/// `GameActivity.nativeGfxState()`: for the phone's graphics dialog and the Carpe button (bit 0 the characters' shadow, bit 1 Carpe
+/// selected, bit 2 the player is Ron); the dialog changes the options with the `gfx` debug commands.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_ut2004_android_GameActivity_nativeGfxState(_env: Env, _class: *mut c_void) -> i32 {
+    hp3_render::quality::packed()
+        | if hp3_world::natives::CARPE_PICK.load(Ordering::Relaxed) { 2 } else { 0 }
+        | if hp3_world::natives::PLAYER_IS_RON.load(Ordering::Relaxed) { 4 } else { 0 }
+}
+
 /// The phone's display runs at the game's own rate: no blending between ticks.
 pub fn interpolate() -> bool {
     false

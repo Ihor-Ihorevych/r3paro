@@ -116,6 +116,8 @@ pub struct AudioSystem {
     started: std::time::Instant,
     /// Plays in the last second, by sound and asker, to point at a sound asked for over and over.
     repeats: HashMap<String, u32>,
+    /// Name of the system's default output the stream was opened on; when it changes (a headset connected) the output follows.
+    device_name: Option<String>,
 }
 
 /// Slots of `PlaySound` (`ESoundSlot`) that matter here.
@@ -132,8 +134,6 @@ fn tag_of(key: &SoundKey) -> u64 {
 impl AudioSystem {
     /// Opens the default output; `None` when there is no audio device (the game then runs silent).
     pub fn new(sdl: &sdl3::Sdl, root: &Path) -> Option<AudioSystem> {
-        let audio = sdl.audio().ok()?;
-        let spec = AudioSpec { freq: Some(mixer::OUTPUT_RATE as i32), channels: Some(2), format: Some(AudioFormat::f32_sys()) };
         // Volumes from the game's own settings (`[ALAudio.ALAudioSubsystem]`).
         let config = hp3_core::Config::load(root);
         let setting = |key: &str, default: f32| {
@@ -148,8 +148,7 @@ impl AudioSystem {
             m.ambient_volume = 1.0;
             m.rolloff = setting("Rolloff", 1.0).max(0.0);
         }
-        let stream = audio.open_playback_stream(&spec, Callback { mixer: mixer.clone(), buffer: Vec::new(), meter: std::env::var_os("HP3_AUDIO_DEBUG").map(|_| (0.0, 0)) }).ok()?;
-        stream.resume().ok()?;
+        let stream = open_stream(sdl, &mixer)?;
         let music_dir = ["Music", "music"].iter().map(|d| root.join(d)).find(|p| p.is_dir()).unwrap_or_else(|| root.join("Music"));
         let (jobs, job_rx) = std::sync::mpsc::channel();
         let (done_tx, done) = std::sync::mpsc::channel();
@@ -166,7 +165,45 @@ impl AudioSystem {
                 .map(std::io::BufWriter::new),
             started: std::time::Instant::now(),
             repeats: HashMap::new(),
+            device_name: default_device_name(sdl),
         })
+    }
+
+    /// Looks at which device is the system's default now (once a second is plenty) and moves the sound when it is another
+    /// one than before: Windows makes a Bluetooth headset the default some seconds after it connects, later than any
+    /// event says it arrived.
+    pub fn check_device(&mut self, sdl: &sdl3::Sdl) {
+        let now = default_device_name(sdl);
+        if now.is_some() && now != self.device_name {
+            self.device_note(&format!("default output changed: {:?} -> {:?}", self.device_name, now));
+            self.device_name = now;
+            self.reopen(sdl);
+        }
+    }
+
+    fn device_note(&mut self, text: &str) {
+        eprintln!("audio: {text}");
+        let t = self.started.elapsed().as_secs_f32();
+        if let Some(log) = &mut self.log {
+            use std::io::Write;
+            let _ = writeln!(log, "[{t:8.2}] DEVICE {text}");
+            let _ = log.flush();
+        }
+    }
+
+    /// A device came or went (a Bluetooth headset connected, headphones unplugged): the output is opened again on whatever
+    /// the system's default is now, with the voices playing on. The old stream goes when the new one stands.
+    pub fn reopen(&mut self, sdl: &sdl3::Sdl) -> bool {
+        match open_stream(sdl, &self.mixer) {
+            Some(stream) => {
+                self._stream = stream;
+                let name = default_device_name(sdl);
+                self.device_note(&format!("output reopened on the default device {name:?}"));
+                self.device_name = name;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Reads the volumes and the stereo option the player set in the option menus (`SetVolumes`).
@@ -418,4 +455,22 @@ impl AudioSystem {
             m.stop_everything();
         }
     }
+}
+
+/// Opens a stream on the system's default output and starts it. The default is asked for again at every call, so a
+/// stream opened after a headset was plugged in or paired lands on the headset.
+fn open_stream(sdl: &sdl3::Sdl, mixer: &Arc<Mutex<Mixer>>) -> Option<AudioStreamWithCallback<Callback>> {
+    let audio = sdl.audio().ok()?;
+    let spec = AudioSpec { freq: Some(mixer::OUTPUT_RATE as i32), channels: Some(2), format: Some(AudioFormat::f32_sys()) };
+    let stream = audio
+        .open_playback_stream(&spec, Callback { mixer: mixer.clone(), buffer: Vec::new(), meter: std::env::var_os("HP3_AUDIO_DEBUG").map(|_| (0.0, 0)) })
+        .map_err(|e| eprintln!("audio: cannot open the output: {e}"))
+        .ok()?;
+    stream.resume().map_err(|e| eprintln!("audio: cannot start the output: {e}")).ok()?;
+    Some(stream)
+}
+
+/// The name of the system's default output device, as SDL sees it now.
+fn default_device_name(sdl: &sdl3::Sdl) -> Option<String> {
+    sdl.audio().ok()?.default_playback_device().name().ok()
 }

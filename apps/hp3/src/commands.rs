@@ -23,11 +23,12 @@ pub fn take() -> Vec<String> {
 }
 
 /// Runs one command: `quicksave`, `quickload`, `level <map>` (sets `level`, which the loop opens), or
-/// `cheat <god|ghost|fly|walk|giveall|beans|cakes|pasties|beatboss|defeatpeeves|heal>`.
+/// `cheat <god|ghost|fly|walk|giveall|beans|cakes|pasties|beatboss|defeatpeeves|heal|carpecrab>`.
 pub fn run(vm: &mut Vm<'_>, command: &str, level: &mut Option<String>) {
     let mut words = command.split_whitespace();
     let (Some(verb), arg) = (words.next(), words.next()) else { return };
     match verb {
+        "gfx" => gfx(vm, arg.unwrap_or(""), words.next()),
         "quicksave" => {
             let ok = hp3_world::save::write(vm, QUICK_SLOT);
             eprintln!("quick save: {}", if ok { "written" } else { "failed" });
@@ -117,6 +118,42 @@ fn dump_near(vm: &mut Vm<'_>, radius: f32) {
     }
 }
 
+/// The spell the button just picked and when, for the indicator (it stays up a few seconds even when the game chooses again).
+static SPELL_TOAST: Mutex<Option<(String, std::time::Instant)>> = Mutex::new(None);
+
+/// The spell the button picked in the last few seconds, as its label.
+pub fn spell_toast() -> Option<String> {
+    let t = SPELL_TOAST.lock().ok()?;
+    t.as_ref().filter(|(_, at)| at.elapsed().as_secs_f32() < 2.5).map(|(l, _)| l.clone())
+}
+
+/// `gfx shadows [on|off]` (no value: the other way), kept in
+/// `[hp3.app]` of the settings.
+fn gfx(vm: &mut Vm<'_>, what: &str, value: Option<&str>) {
+    use hp3_render::quality;
+    match what {
+        "shadows" => {
+            let on = match value {
+                Some("on") => true,
+                Some("off") => false,
+                _ => !quality::actor_shadows(),
+            };
+            quality::set_actor_shadows(on);
+            hp3_world::settings::store(vm, "hp3.app", "ActorShadows", if on { "True" } else { "False" });
+            eprintln!("gfx: character shadows {}", if on { "on" } else { "off" });
+        }
+        other => eprintln!("gfx: unknown '{other}'"),
+    }
+}
+
+/// Takes the graphics options saved in the settings (the environment's starting values stay for any not saved).
+pub fn load_graphics(vm: &Vm<'_>) {
+    use hp3_render::quality;
+    if hp3_world::settings::text(vm, "hp3.app", "ActorShadows").is_some() {
+        quality::set_actor_shadows(hp3_world::settings::flag(vm, "hp3.app", "ActorShadows", true));
+    }
+}
+
 fn cheat(vm: &mut Vm<'_>, name: &str) {
     use hp3_world::debug_move::{Mode, set_mode};
     let Some(pc) = hp3_world::world(vm).player else { return };
@@ -182,6 +219,20 @@ fn cheat(vm: &mut Vm<'_>, name: &str) {
                 hp3_world::set(vm, pawn, "Health", Value::Float(max));
                 eprintln!("cheat: healed to {max}");
             }
+        }
+        // The phone's Carpe button: select Carpe (which means pulling fire crabs), tap again to let go.
+        "spellswitch" => {
+            let label = hp3_world::natives::carpe_toggle(vm);
+            eprintln!("cheat: carpe button -> {label}");
+            if let Ok(mut t) = SPELL_TOAST.lock() {
+                *t = Some((label, std::time::Instant::now()));
+            }
+        }
+        // Carpe Retractum pulls a fire crab toward the caster (see `carpe_on_crab` in hp3-world): an option, off by default.
+        "carpecrab" => {
+            let on = !hp3_world::settings::flag(vm, "hp3.app", "CarpeCrab", false);
+            hp3_world::settings::store(vm, "hp3.app", "CarpeCrab", if on { "True" } else { "False" });
+            eprintln!("cheat: carpe pulls crabs {}", if on { "on" } else { "off" });
         }
         other => eprintln!("cheat: unknown '{other}'"),
     }

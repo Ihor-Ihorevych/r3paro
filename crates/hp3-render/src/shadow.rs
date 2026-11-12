@@ -65,7 +65,17 @@ pub struct ShadowMaps {
     /// What each slot's map was made for: the light's position and radius, and the scene it was made from.
     made: RefCell<[Option<(Vec3, f32, u64)>; MAX_SHADOW_LIGHTS]>,
     pub enabled: bool,
+    /// The characters' shadow: one orthographic depth map of the pawns near the player seen from their strongest light.
+    /// Rendered by `Dynamic` (which owns the skinned vertices), sampled by the world shader at group 2 binding 3, with the
+    /// light's matrix and settings in the uniform at binding 4 (`ACTOR_UNIFORM_BYTES`; strength 0 means no shadow this frame).
+    pub actor_view: wgpu::TextureView,
+    pub actor_uniform: wgpu::Buffer,
+    pub actor_size: u32,
 }
+
+/// Bytes of the character shadow's uniform: the light's view-projection, then `a` (strength, 1 / map size, depth bias in
+/// units, depth range in units) and `b` (direction to the light, units per texel).
+pub const ACTOR_UNIFORM_BYTES: u64 = 96;
 
 impl ShadowMaps {
     pub fn new(device: &wgpu::Device) -> ShadowMaps {
@@ -92,7 +102,40 @@ impl ShadowMaps {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: wgpu::BufferSize::new(ACTOR_UNIFORM_BYTES) },
+                    count: None,
+                },
             ],
+        });
+        let actor_size: u32 = std::env::var("HP3_ACTOR_SHADOW_SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(2048);
+        let actor_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("character shadow"),
+            size: wgpu::Extent3d { width: actor_size, height: actor_size, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let actor_view = actor_tex.create_view(&Default::default());
+        let actor_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("character shadow"),
+            contents: &[0u8; ACTOR_UNIFORM_BYTES as usize],
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let mut cubes = Vec::new();
         let mut cube_views = Vec::new();
@@ -132,6 +175,8 @@ impl ShadowMaps {
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&cube_views[0]) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&cube_views[1]) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&actor_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: actor_uniform.as_entire_binding() },
             ],
         });
         let face_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -182,7 +227,7 @@ impl ShadowMaps {
             multiview: None,
             cache: None,
         });
-        ShadowMaps { layout, bind, faces, face_buffers, face_binds, pipeline, made: RefCell::new([None; MAX_SHADOW_LIGHTS]), enabled }
+        ShadowMaps { layout, bind, faces, face_buffers, face_binds, pipeline, made: RefCell::new([None; MAX_SHADOW_LIGHTS]), enabled, actor_view, actor_uniform, actor_size }
     }
 
     /// Makes the cube maps of `lights` (the lights that have a slot, in slot order) from `geom`, unless a slot's map is already

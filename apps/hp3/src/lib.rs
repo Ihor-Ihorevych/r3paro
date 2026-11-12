@@ -29,6 +29,7 @@ mod audio;
 mod cheatmenu;
 pub mod commands;
 mod gamelog;
+mod gamepad;
 mod levelmenu;
 mod present;
 use hp3_script::Value;
@@ -406,13 +407,17 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
     let t = Instant::now();
     hp3_world::load(&mut vm, &pkg, config)?;
     eprintln!("world loaded in {:?}", t.elapsed());
+    commands::load_graphics(&vm);
     // Static actors are baked into the level's geometry; everything else is drawn per frame.
     let statics = hp3_engine::static_exports(&mut vm, &pkg);
     let t = Instant::now();
     // HP3_UNLIT=1 draws everything at full brightness.
-    let inputs = hp3_engine::map_inputs(&mut vm, &loader, &pkg, std::env::var_os("HP3_UNLIT").is_none());
-    let scene = scene::build_map(&loader, &pkg, &|i| statics.contains(&i), &inputs);
-    let mut lighting = inputs.lighting;
+    hp3_engine::sync_material_switches(&mut vm, &loader);
+    let mut level_inputs = hp3_engine::map_inputs(&mut vm, &loader, &pkg, std::env::var_os("HP3_UNLIT").is_none());
+    let scene = scene::build_map(&loader, &pkg, &|i| statics.contains(&i), &level_inputs);
+    let mut lighting = level_inputs.lighting.take();
+    let mut level_pkg = pkg.clone();
+    let mut level_statics = statics;
     eprintln!("{map}: scene built in {:?} ({:?})", t.elapsed(), scene.stats);
 
     // On a phone the game is played with the screen on its side, whichever way it is held.
@@ -456,11 +461,15 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
     let mut camera = Camera { position: start + Vec3::Z * 50.0, rotation: [start_rot[0], start_rot[1], 0], fov_degrees: 90.0 };
     sdl.mouse().set_relative_mouse_mode(&window, true);
     let mut events = sdl.event_pump()?;
+    // No gamepad subsystem is not fatal: the keyboard and the touch controls still work.
+    let mut pad = sdl.gamepad().map(gamepad::Pad::new).map_err(|e| eprintln!("gamepad: off ({e})")).ok();
+    let mut pad_clock = Instant::now();
     let mut last = Instant::now();
     // HP3_CAST=<Spell>:<TargetClass>[:n[:distance]]@<tick> casts a spell at a creature, as in hp3-run (with HP3_SHOT to see it).
     let mut cast = hp3_world::casttest::CastTest::from_env();
     let mut cast_ticks = 0u32;
     let mut accumulator = 0.0f32;
+    let mut switch_check = 0u32;
     let (mut cam_from, mut cam_to, mut cam_tick) = (camera, camera, 0u64);
     let mut fog_state = hp3_engine::FogState::default();
     let fixed_step = std::env::var_os("HP3_FIXED_STEP").is_some();
@@ -489,7 +498,26 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
     let mut game_log = gamelog::GameLog::new(root);
     let particle_renderer = hp3_render::particles::ParticleRenderer::new(&renderer);
     let mut particle_cache = hp3_engine::ParticleCache::default();
+    let mut audio_reopen_at: Option<Instant> = None;
+    let mut audio_check_at = Instant::now();
     'main: loop {
+        if audio_check_at.elapsed() >= std::time::Duration::from_secs(1) {
+            audio_check_at = Instant::now();
+            if let Some(a) = &mut audio {
+                a.check_device(&sdl);
+            }
+        }
+        if audio_reopen_at.is_some_and(|t| Instant::now() >= t) {
+            audio_reopen_at = None;
+            match &mut audio {
+                Some(a) => {
+                    a.reopen(&sdl);
+                }
+                // The game started with no output at all: a device that shows up later is used.
+                None if std::env::var_os("HP3_NO_AUDIO").is_none() => audio = audio::AudioSystem::new(&sdl, &root),
+                None => {}
+            }
+        }
         // Menus take the mouse as a visible cursor; play takes it relative.
         let menu = hp3_world::gui::menu_open(&mut vm);
         if menu != in_menu {
@@ -498,12 +526,47 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             sdl.mouse().set_relative_mouse_mode(&window, !menu);
         }
         for event in events.poll_iter() {
+            if let Some(p) = &mut pad
+                && matches!(
+                    event,
+                    Event::GamepadAdded { .. }
+                        | Event::GamepadRemoved { .. }
+                        | Event::GamepadAxisMotion { .. }
+                        | Event::GamepadButtonDown { .. }
+                        | Event::GamepadButtonUp { .. }
+                )
+            {
+                for action in p.event(&event, in_menu) {
+                    apply_pad_action(&mut vm, action);
+                }
+                continue;
+            }
             match event {
                 Event::Quit { .. } => break 'main,
+                // An output device came or went (a Bluetooth headset connected): the sound moves to the new default once the
+                // burst of events a connection makes has passed.
+                Event::AudioDeviceAdded { iscapture: false, .. } | Event::AudioDeviceRemoved { iscapture: false, .. } => {
+                    audio_reopen_at = Some(Instant::now() + std::time::Duration::from_millis(700));
+                }
                 Event::KeyDown { scancode: Some(Scancode::F11), repeat: false, .. } if !cheats.open => levels.toggle(&current_map),
                 Event::KeyDown { scancode: Some(Scancode::F12), repeat: false, .. } if !levels.open => cheats.toggle(),
                 // F7: gamma, brightness and contrast back to the defaults (also while a menu is open).
                 Event::KeyDown { scancode: Some(Scancode::F7), repeat: false, .. } => commands::push("resetpicture"),
+                // F4: a screenshot with where the player is burned into it, plus the full F8 report beside it, in <root>/screenshots.
+                #[cfg(not(target_os = "android"))]
+                Event::KeyDown { scancode: Some(Scancode::F4), repeat: false, .. } => {
+                    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                    let path = root.join("screenshots").join(format!("shot-{stamp}.png"));
+                    let _ = std::fs::create_dir_all(root.join("screenshots"));
+                    let lines = hp3_world::physics::caption(&mut vm, camera.position, camera.rotation);
+                    let _ = std::fs::write(path.with_extension("txt"), format!("{}
+{}", lines.join("
+"), hp3_world::physics::mark(&mut vm)));
+                    eprintln!("screenshot: {} ({})", path.display(), lines.join(" | "));
+                    if let Ok(mut r) = present::SHOT_REQUEST.lock() {
+                        *r = Some((path, lines));
+                    }
+                }
                 // F6: the actors around the player go to the log (what a pickup that cannot be taken looks like to the engine).
                 Event::KeyDown { scancode: Some(Scancode::F6), repeat: false, .. } if !in_menu => commands::push("dumpnear"),
                 // [ and ] (or numpad - and +): the field of view narrows or widens by 5 degrees.
@@ -609,6 +672,12 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                     hp3_world::world(&mut vm).input.key_down(key);
                     hp3_world::world(&mut vm).input.key_up(key);
                 }
+                // Q: Carpe or the crab's own spell for the next lock-on (only with "Carpe pulls crabs" on).
+                Event::KeyDown { scancode: Some(Scancode::Q), repeat: false, .. } if !in_menu && !cheats.open && !levels.open && hp3_world::natives::carpe_crab_on(&vm) => {
+                    let on = !hp3_world::natives::CARPE_PICK.load(std::sync::atomic::Ordering::Relaxed);
+                    hp3_world::natives::CARPE_PICK.store(on, std::sync::atomic::Ordering::Relaxed);
+                    eprintln!("carpe for crabs: {}", if on { "on" } else { "off" });
+                }
                 Event::KeyDown { scancode: Some(Scancode::F5), repeat: false, .. } if !in_menu => commands::push("quicksave"),
                 Event::KeyDown { scancode: Some(Scancode::F9), repeat: false, .. } if !in_menu => commands::push("quickload"),
                 Event::KeyDown { scancode: Some(Scancode::F1), repeat: false, .. } => free_camera = !free_camera,
@@ -678,6 +747,13 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                     }
                 }
                 _ => {}
+            }
+        }
+        if let Some(p) = &mut pad {
+            let dt = pad_clock.elapsed().as_secs_f32().min(0.1);
+            pad_clock = Instant::now();
+            for action in p.frame(&mut hp3_world::world(&mut vm).input, in_menu, dt) {
+                apply_pad_action(&mut vm, action);
             }
         }
         // HP3_COMMANDS=<command>@<tick>[;<command>@<tick>...] (debugging): runs those commands at those world ticks (`quicksave@100;quickload@200`).
@@ -805,6 +881,19 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             }
         }
         stages.push(("ticks", frame_start.elapsed().as_secs_f32() * 1000.0));
+        // A script flipped a material switch (Glacius froze the water): what was baked from it is built again.
+        switch_check += 1;
+        if switch_check % 6 == 0 && hp3_engine::sync_material_switches(&mut vm, &loader) {
+            let t = Instant::now();
+            level_inputs.lighting = lighting.take();
+            let scene = scene::build_map(&loader, &level_pkg, &|i| level_statics.contains(&i), &level_inputs);
+            lighting = level_inputs.lighting.take();
+            gpu_scene = renderer.upload_scene(&scene);
+            drop(scene);
+            loader.trim();
+            mesh_cache = hp3_engine::MeshCache::default();
+            eprintln!("material switch changed: scene rebuilt in {:?}", t.elapsed());
+        }
         // A level switch the game asked for: the new level is loaded and its scene built.
         if hp3_world::world(&mut vm).quit_requested {
             break 'main;
@@ -831,12 +920,17 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             let t = Instant::now();
             let pkg = hp3_world::travel(&mut vm, &url)?;
             let statics = hp3_engine::static_exports(&mut vm, &pkg);
-            let inputs = hp3_engine::map_inputs(&mut vm, &loader, &pkg, std::env::var_os("HP3_UNLIT").is_none());
+            loader.clear_switch_current();
+            hp3_engine::sync_material_switches(&mut vm, &loader);
+            let mut inputs = hp3_engine::map_inputs(&mut vm, &loader, &pkg, std::env::var_os("HP3_UNLIT").is_none());
             let scene = scene::build_map(&loader, &pkg, &|i| statics.contains(&i), &inputs);
             gpu_scene = renderer.upload_scene(&scene);
             drop(scene);
             loader.trim();
-            lighting = inputs.lighting;
+            lighting = inputs.lighting.take();
+            level_inputs = inputs;
+            level_statics = statics;
+            level_pkg = pkg.clone();
             mesh_cache = hp3_engine::MeshCache::default();
             fog_state = hp3_engine::FogState::default();
             particle_cache = hp3_engine::ParticleCache::default();
@@ -906,6 +1000,21 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         quads.extend(hp3_engine::screen_flash(&mut vm, width, height));
         quads.extend(levels.quads(width, height, &current_map));
         quads.extend(cheats.quads(width, height));
+        // The spell indicator: with "Carpe pulls crabs" on, or while a spell picked by hand (the phone's spell button) is in the wand,
+        // and for a moment after the button was pressed.
+        let crab_option = hp3_world::natives::carpe_crab_on(&vm);
+        let hand_pick = hp3_world::natives::spell_pick();
+        let toast = commands::spell_toast();
+        if crab_option || hand_pick.is_some() || toast.is_some() {
+            let spell = hp3_world::natives::wand_spell_name(&mut vm).unwrap_or_else(|| "-".to_string());
+            let picked = hp3_world::natives::CARPE_PICK.load(std::sync::atomic::Ordering::Relaxed);
+            let mode = match (&hand_pick, &toast) {
+                (Some(_), _) => "PICKED",
+                (None, Some(_)) => "AUTO",
+                _ => "",
+            };
+            quads.extend(cheatmenu::spell_indicator(&spell, mode, crab_option.then_some(picked), width, height));
+        }
         let images = |k: &hp3_assets::loader::ObjKey| hud_cache.image(&loader, k);
         let hud = overlay.draw(&renderer, &quads, &images, &view, width, height);
         stages.push(("hud", frame_start.elapsed().as_secs_f32() * 1000.0));
@@ -981,6 +1090,23 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
 }
 
 /// The camera `t` of the way from `a` to `b` (angles the short way round).
+/// Carries out what a gamepad button asked for.
+fn apply_pad_action(vm: &mut Vm<'_>, action: gamepad::Action) {
+    use gamepad::Action;
+    match action {
+        Action::Key(k, true) => hp3_world::world(vm).input.key_down(k),
+        Action::Key(k, false) => hp3_world::world(vm).input.key_up(k),
+        Action::Notch(k) => {
+            hp3_world::world(vm).input.key_down(k);
+            hp3_world::world(vm).input.key_up(k);
+        }
+        Action::SwitchCharacter => eprintln!("switch character: {}", hp3_world::character_switch::switch(vm, None)),
+        Action::Menu(k, state) => {
+            hp3_world::gui::key(vm, k, state, 0.0);
+        }
+    }
+}
+
 fn blend_cameras(a: &Camera, b: &Camera, t: f32) -> Camera {
     let turn = |x: i32, y: i32| {
         let d = ((y - x) as i64).rem_euclid(65536) as i32;
