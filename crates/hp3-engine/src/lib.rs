@@ -1176,7 +1176,9 @@ pub fn actor_instances(
         eprintln!("shadows: {} {:?}", shadows.len(), shadows.first());
     }
     dynamic.set_shadows(r, &shadows);
-    dynamic.set_actor_shadow(actor_shadow_cfg(&casters, view.as_ref().map(|v| v.eye)));
+    // In a Quidditch match the riders fly far above the pitch: the map reaches down to its ground.
+    let ground = hp3_world::world(vm).quidditch.is_some().then_some(hp3_world::quidditch::arena::GROUND_Z);
+    dynamic.set_actor_shadow(actor_shadow_cfg(&casters, view.as_ref().map(|v| v.eye), ground));
     INSTANCE_NS[4].fetch_add(t_total.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     out
 }
@@ -1329,7 +1331,7 @@ struct ShadowCaster {
 /// view, a cutscene), so the shadow that matters never falls outside it whoever walks beside the player; that pawn also picks the
 /// light. Light that skims the ground is tipped down (a lamp at head height would throw shadows without end), and a pawn in a room
 /// with no real light still gets a faint one from above. The casters within reach of the centre join in.
-fn actor_shadow_cfg(casters: &[ShadowCaster], eye: Option<Vec3>) -> Option<hp3_render::dynamic::ActorShadowCfg> {
+fn actor_shadow_cfg(casters: &[ShadowCaster], eye: Option<Vec3>, ground: Option<f32>) -> Option<hp3_render::dynamic::ActorShadowCfg> {
     let key = casters.iter().find(|c| c.player).or_else(|| {
         casters.iter().min_by(|a, b| {
             let d = |c: &&ShadowCaster| eye.map_or(0.0, |e| e.distance_squared(c.at));
@@ -1349,9 +1351,18 @@ fn actor_shadow_cfg(casters: &[ShadowCaster], eye: Option<Vec3>) -> Option<hp3_r
         direction.z = -0.5;
         direction = direction.normalize();
     }
-    let near: Vec<usize> = casters.iter().filter(|c| c.at.truncate().distance(center.truncate()) < 360.0).map(|c| c.index).collect();
+    // The high tier's nested maps reach far, so pawns further from the player join in too.
+    let caster_reach = if hp3_render::quality::high_shadows() { 1400.0 } else { 360.0 };
+    // HP3_ACTOR_SHADOW_STRENGTH=<0..1> forces the darkness (tuning, and a way to see the shadow in a dim level).
+    let strength = std::env::var("HP3_ACTOR_SHADOW_STRENGTH").ok().and_then(|v| v.parse().ok()).unwrap_or(strength);
+    let near: Vec<usize> = casters.iter().filter(|c| c.at.truncate().distance(center.truncate()) < caster_reach).map(|c| c.index).collect();
     if std::env::var_os("HP3_SHADOW_DEBUG").is_some() {
         eprintln!("shadow map: {} casters of {}, key {}, centre {center}, light {direction}, strength {strength:.2}", near.len(), casters.len(), if key.player { "player" } else { "nearest" });
     }
-    Some(hp3_render::dynamic::ActorShadowCfg { direction, center, strength, casters: near })
+    // How far down the light the map must reach to include the ground under the key pawn (None: the default reach).
+    let depth = ground.map(|g| ((center.z - g) / -direction.z).max(0.0) + 100.0);
+    if std::env::var_os("HP3_SHADOW_DEBUG").is_some() {
+        eprintln!("shadow depth: ground {ground:?} depth {depth:?}");
+    }
+    Some(hp3_render::dynamic::ActorShadowCfg { direction, center, strength, casters: near, depth })
 }

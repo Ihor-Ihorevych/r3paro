@@ -8,7 +8,8 @@
 //!
 //! When a match started that way ends, `glue::tick` records the result in the league, writes it next to the
 //! game's own slots and leaves the result line up for `LINGER_TICKS`; then the match is stopped and the player
-//! travels back to the front end. Leaving early (`quidditch stop`) is the same thing without the wait. Both
+//! travels back to where the match was asked for (the level and story state it was asked from, the front end when it was asked
+//! there). Leaving early (`quidditch stop`) is the same thing without the wait. Both
 //! stop the match **before** travelling, because `count_down_travel` refuses a level switch while one runs.
 
 use std::cell::RefCell;
@@ -32,16 +33,24 @@ thread_local! {
     /// The match the front end asked for, waiting for the level that can play it. A thread local for the same
     /// reason the command queue is a static: it is set outside the VM (a menu pick) and read inside it.
     static REQUEST: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Where the player was when the match was asked for (a map URL with its story state), so the match ends back there. None:
+    /// the match was asked for from the front end, and ends there.
+    static ORIGIN: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// Where the league is saved: beside `Save<slot>.usa`, so a scratch data root (the tests, the headless
 /// drivers) keeps its own league and the real game's is never touched.
-pub fn league_path(vm: &Vm<'_>) -> PathBuf {
-    crate::save::save_dir(vm).join(LEAGUE_FILE)
+///
+/// Each New Game profile keeps its own season: profile 0 (the first slot, and a game with no profile chosen) uses `League.txt`
+/// as before, profile `n` uses `League<n>.txt`.
+pub fn league_path(vm: &mut Vm<'_>) -> PathBuf {
+    let profile = crate::world(vm).viewport.gui.map_or(0, |g| crate::get(vm, g, "CurUserID").as_int());
+    let file = if profile > 0 { format!("League{profile}.txt") } else { LEAGUE_FILE.to_string() };
+    crate::save::save_dir(vm).join(file)
 }
 
 /// The saved league, or a fresh season when there is no file (or it is not one).
-pub fn read_league(vm: &Vm<'_>) -> League {
+pub fn read_league(vm: &mut Vm<'_>) -> League {
     std::fs::read_to_string(league_path(vm)).ok().and_then(|t| League::from_text(&t)).unwrap_or_default()
 }
 
@@ -62,18 +71,43 @@ pub fn write_league(vm: &mut Vm<'_>, l: &League) -> bool {
 }
 
 /// Whom the saved league says Gryffindor plays next; `None` once the season is over.
-pub fn next_opponent(vm: &Vm<'_>) -> Option<Opponent> {
+pub fn next_opponent(vm: &mut Vm<'_>) -> Option<Opponent> {
     league::next_match_request(&read_league(vm))
 }
 
 /// Asks for a match against `opponent` on the next load of `MATCH_MAP`. A match already running is stopped
 /// first, so the level that is left behind is a tidy one.
 pub fn request(vm: &mut Vm<'_>, opponent: Opponent) {
+    remember_origin(vm);
     super::glue::stop(vm);
     REQUEST.with(|r| *r.borrow_mut() = Some(opponent.name().to_string()));
     let line = format!("quidditch: a match against {} was asked for, loading {MATCH_MAP}", opponent.name());
     println!("{line}");
     vm.log.push(line);
+}
+
+/// Notes the level the player asks for a match from, with its story state, so the match can hand them back to it. Asked from the
+/// front end or from a match (a rematch), the origin stays as it was: the front end, or wherever the first match came from.
+fn remember_origin(vm: &mut Vm<'_>) {
+    let map = crate::world(vm).map.name.to_string();
+    if map.eq_ignore_ascii_case(MATCH_MAP) {
+        return;
+    }
+    if map.eq_ignore_ascii_case(&front_end_map(vm)) {
+        ORIGIN.with(|o| *o.borrow_mut() = None);
+        return;
+    }
+    let state = crate::world(vm)
+        .level_info
+        .and_then(|li| crate::get(vm, li, "Game").as_obj())
+        .map(|g| crate::get(vm, g, "CurrentGameState").as_str().to_string())
+        .filter(|s| !s.is_empty());
+    let url = match state {
+        Some(s) => format!("{map}?GameState={s}"),
+        None => map,
+    };
+    println!("quidditch: the match was asked for from {url}");
+    ORIGIN.with(|o| *o.borrow_mut() = Some(url));
 }
 
 /// Asks for the league's next fixture. `None` (and nothing asked for) when the season is over.
@@ -138,7 +172,10 @@ pub fn leave(vm: &mut Vm<'_>) -> String {
     super::glue::stop(vm);
     clear_request();
     crate::world(vm).quidditch_travel_blocked = false;
-    let map = front_end_map(vm);
+    let map = match ORIGIN.with(|o| o.borrow_mut().take()) {
+        Some(origin) => origin,
+        None => front_end_map(vm),
+    };
     let line = format!("quidditch: leaving the match, back to {map}");
     println!("{line}");
     vm.log.push(line);

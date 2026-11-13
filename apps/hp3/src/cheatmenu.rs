@@ -14,7 +14,7 @@ pub enum Pick {
 }
 
 /// The entries, in the phone menu's order. The font has no comma, so the labels avoid it.
-const ENTRIES: [(&str, Option<&str>); 18] = [
+const ENTRIES: [(&str, Option<&str>); 19] = [
     ("GO TO LEVEL...", None),
     // The Quidditch cup: the next fixture of the league, and the way out of a match again.
     ("QUIDDITCH: PLAY THE NEXT MATCH", Some("quidditch")),
@@ -34,6 +34,7 @@ const ENTRIES: [(&str, Option<&str>); 18] = [
     ("CARPE PULLS CRABS (ON/OFF)", Some("cheat carpecrab")),
     ("CARPE FOR CRABS (SELECT/DESELECT)", Some("cheat spellswitch")),
     ("GRAPHICS: CHARACTER SHADOWS (ON/OFF)", Some("gfx shadows")),
+    ("GRAPHICS: SHADOW QUALITY (LOW/HIGH)", Some("gfx quality")),
 ];
 
 pub struct CheatMenu {

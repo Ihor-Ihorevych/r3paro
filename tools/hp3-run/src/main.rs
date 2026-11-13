@@ -97,6 +97,12 @@ fn list_class(vm: &mut hp3_script::Vm<'_>) {
             if let Some((lo, hi)) = hp3_world::volume_bounds(vm, a) {
                 info.push_str(&format!(" bounds {:.0} .. {:.0}", lo, hi));
             }
+            if let Some((lo, hi)) = hp3_world::world(vm).collision.baked_bounds(a) {
+                info.push_str(&format!(" baked {:.0} .. {:.0}", lo, hi));
+            }
+            if let Some((lo, hi)) = hp3_world::world(vm).collision.mover(a).map(|m| m.world_bounds()) {
+                info.push_str(&format!(" moverbox {:.0} .. {:.0}", lo, hi));
+            }
             println!("  {name} state {state:?}{info}");
             // Emitter actors: what each emitter shows (its texture object and class).
             if let hp3_script::Value::Array(list) = hp3_world::get(vm, a, "Emitters") {
@@ -1398,7 +1404,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                     println!("  tile {m} at ({:.0},{:.0}) {:.0}x{:.0}", t.x, t.y, t.w, t.h);
                 }
             }
-            println!("  opened {page}: {opened}, menu up {}", hp3_world::gui::menu_open(&mut vm));
+            println!("  opened {page}: {opened}, menu up {}, top page {:?}", hp3_world::gui::menu_open(&mut vm), hp3_world::gui::top_menu_class(&mut vm));
             if let Ok(click) = std::env::var("HP3_CLICK") {
                 let v: Vec<f32> = click.split(',').filter_map(|s| s.parse().ok()).collect();
                 if v.len() == 2 {

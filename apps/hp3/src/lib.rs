@@ -27,6 +27,7 @@ use sdl3::mouse::MouseButton;
 pub mod android;
 mod audio;
 pub mod broom;
+mod captaintalk;
 mod cheatmenu;
 pub mod commands;
 mod gamelog;
@@ -511,6 +512,8 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
     let mut levels = levelmenu::LevelMenu::new(root);
     // F12 cheat list (the phone debug menu's entries).
     let mut cheats = cheatmenu::CheatMenu::new();
+    let mut captain_talk = captaintalk::CaptainTalk::new();
+    let mut captain_offer = captaintalk::Offer::SeasonOver;
     let mut current_map = map.clone();
     platform::set_level(&current_map);
     // HP3_OPEN_LEVELS=1 starts with the list open (for screenshots).
@@ -549,10 +552,17 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             platform::set_in_menu(menu);
             sdl.mouse().set_relative_mouse_mode(&window, !menu);
         }
-        // The QUIDDITCH button is on the front-end menu only, while no match runs and no debug list is open.
+        // The Quidditch captain in the Grounds hub: a prompt while the player stands near, a speech box once they talk.
+        let match_running = hp3_world::world(&mut vm).quidditch.is_some();
+        if captain_talk.open && (in_menu || match_running) {
+            captain_talk.open = false;
+        }
+        let captain_near = !in_menu && !cheats.open && !levels.open && !captain_talk.open && !match_running && hp3_world::quidditch::captain::near(&mut vm);
+        // The QUIDDITCH button is on the front-end menu and on the in-game menu (its tabbed pages), while no match runs and no debug
+        // list is open.
         let quid_button = in_menu && !levels.open && !cheats.open && hp3_world::world(&mut vm).quidditch.is_none() && {
             let front = hp3_world::quidditch::menu::front_end_map(&mut vm);
-            front.eq_ignore_ascii_case(&current_map)
+            front.eq_ignore_ascii_case(&current_map) || hp3_world::gui::top_menu_class(&mut vm).is_some_and(|c| c.starts_with("Tab_"))
         };
         for event in events.poll_iter() {
             if let Some(p) = &mut pad
@@ -652,6 +662,25 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                     _ => {}
                 },
                 Event::MouseMotion { .. } | Event::MouseButtonDown { .. } if levels.open => {}
+                // E next to the captain starts the talk; while it is open it takes the keyboard (Y or Enter: play, N or Escape: not now).
+                Event::KeyDown { scancode: Some(Scancode::E), repeat: false, .. } if captain_near => {
+                    captain_offer = match hp3_world::quidditch::menu::next_opponent(&mut vm) {
+                        Some(o) => captaintalk::Offer::Match(o.name().to_ascii_uppercase()),
+                        None => captaintalk::Offer::SeasonOver,
+                    };
+                    captain_talk.open = true;
+                }
+                Event::KeyDown { scancode: Some(sc), .. } if captain_talk.open => match sc {
+                    Scancode::Y | Scancode::Return | Scancode::KpEnter => {
+                        captain_talk.open = false;
+                        if matches!(captain_offer, captaintalk::Offer::Match(_)) {
+                            commands::push("quidditch");
+                        }
+                    }
+                    Scancode::N | Scancode::Escape => captain_talk.open = false,
+                    _ => {}
+                },
+                Event::MouseMotion { .. } | Event::MouseButtonDown { .. } if captain_talk.open => {}
                 Event::KeyDown { scancode: Some(sc @ (Scancode::G | Scancode::F | Scancode::H)), repeat: false, .. } if !in_menu => {
                     let mode = match sc {
                         Scancode::G => hp3_world::debug_move::Mode::Ghost,
@@ -1054,12 +1083,18 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         quads.extend(hp3_engine::screen_flash(&mut vm, width, height));
         quads.extend(levels.quads(width, height, &current_map));
         quads.extend(cheats.quads(width, height));
+        if captain_talk.open {
+            quads.extend(captain_talk.quads(width, height, &captain_offer));
+        } else if captain_near {
+            quads.extend(captain_talk.prompt(width, height));
+        }
         // The spell indicator: with "Carpe pulls crabs" on, or while a spell picked by hand (the phone's spell button) is in the wand,
         // and for a moment after the button was pressed.
         let crab_option = hp3_world::natives::carpe_crab_on(&vm);
         let hand_pick = hp3_world::natives::spell_pick();
         let toast = commands::spell_toast();
-        if crab_option || hand_pick.is_some() || toast.is_some() {
+        // (Not in a Quidditch match: spells are not cast there, and the box sits over the match's score banner.)
+        if (crab_option || hand_pick.is_some() || toast.is_some()) && hp3_world::world(&mut vm).quidditch.is_none() {
             let spell = hp3_world::natives::wand_spell_name(&mut vm).unwrap_or_else(|| "-".to_string());
             let picked = hp3_world::natives::CARPE_PICK.load(std::sync::atomic::Ordering::Relaxed);
             let mode = match (&hand_pick, &toast) {

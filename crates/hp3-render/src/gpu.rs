@@ -23,12 +23,7 @@ fn fog_factor(w: f32) -> f32 {
 // Depth cube maps of the static level seen from the two nearest moving lights (the nearest is slot 1), for their shadows.
 @group(2) @binding(0) var shadow0: texture_depth_cube;
 @group(2) @binding(1) var shadow1: texture_depth_cube;
-@group(2) @binding(2) var shadow_samp: sampler_comparison;
-// The characters' shadow: an orthographic depth map from their strongest light. a = strength (0: none this frame), 1 / map size,
-// depth bias and depth range in units; b = direction to the light, units per texel.
-struct ActorShadow { view_proj: mat4x4<f32>, a: vec4<f32>, b: vec4<f32> };
-@group(2) @binding(3) var actor_map: texture_depth_2d;
-@group(2) @binding(4) var<uniform> actor_shadow: ActorShadow;
+// (The sampler at binding 2, the characters' shadow map and its uniform at 3 and 4 come from `shadow::actor_shadow_wgsl`.)
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -119,39 +114,9 @@ fn moving_light(world: vec3<f32>, mesh: bool) -> vec3<f32> {
 // radius grows with the receiver's distance past the casters (the map is centred on them), so the shadow is sharp at the
 // feet and soft further out; the sampler's own 2x2 comparison smooths each tap. Edges of the map fade out.
 fn actor_shadow_light(world: vec3<f32>, frag: vec2<f32>) -> f32 {
-    // The face's normal from the screen derivatives, turned to the light (taken before any early return: derivatives need
-    // uniform control flow).
-    var n = normalize(cross(dpdx(world), dpdy(world)));
-    let strength = actor_shadow.a.x;
-    if (strength <= 0.0) { return 1.0; }
-    let to_light = actor_shadow.b.xyz;
-    if (dot(n, to_light) < 0.0) { n = -n; }
-    let nl = dot(n, to_light);
-    let texel = actor_shadow.b.w;
-    let c = actor_shadow.view_proj * vec4<f32>(world + n * (texel * 1.5), 1.0);
-    let uv = vec2<f32>(c.x * 0.5 + 0.5, 0.5 - c.y * 0.5);
-    let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
-    if (edge <= 0.0 || c.z <= 0.0 || c.z >= 1.0) { return 1.0; }
-    let range = actor_shadow.a.w;
-    let recv = c.z - actor_shadow.a.z / range;
-    // Units past the casters' plane (the middle of the depth range) the receiver lies, and the blur it earns.
-    let past = max((c.z - 0.5) * range, 0.0);
-    let radius = clamp((1.2 + past * 0.07) / texel, 1.5, 18.0) * actor_shadow.a.y;
-    let noise = fract(52.9829189 * fract(dot(frag, vec2<f32>(0.06711056, 0.00583715))));
-    let ang = noise * 6.2831853;
-    let rot = vec2<f32>(cos(ang), sin(ang));
-    var vis = 0.0;
-    for (var k = 0; k < 16; k = k + 1) {
-        // A sunflower spiral: even coverage of the disc without a table.
-        let r = sqrt((f32(k) + 0.5) / 16.0);
-        let t = f32(k) * 2.3999632;
-        let d = vec2<f32>(cos(t), sin(t)) * r;
-        let o = vec2<f32>(d.x * rot.x - d.y * rot.y, d.x * rot.y + d.y * rot.x) * radius;
-        vis = vis + textureSampleCompareLevel(actor_map, shadow_samp, uv + o, recv);
-    }
-    vis = vis / 16.0;
-    vis = mix(1.0, vis, smoothstep(0.0, 0.06, edge));
-    return 1.0 - strength * smoothstep(0.0, 0.3, nl) * (1.0 - vis);
+    // The face's normal from the screen derivatives (taken here, in uniform control flow).
+    let n = normalize(cross(dpdx(world), dpdy(world)));
+    return actor_shadow_term(world, n, frag, 1.5);
 }
 
 // The level's baked light under a character's shadow: darker, and a little cooler (the shadow is lit by the sky, not the lamp).
@@ -308,7 +273,7 @@ impl Renderer {
         let (device, queue) = pollster::block_on(adapter.request_device(&descriptor)).map_err(|e| format!("device: {e}"))?;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("scene"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(format!("{}{}", crate::shadow::actor_shadow_wgsl(2), SHADER).into()),
         });
         let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("globals"),

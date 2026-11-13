@@ -11,6 +11,7 @@ pub mod arena;
 pub mod ball;
 pub mod bludger;
 pub mod camera;
+pub mod captain;
 pub mod commentary;
 pub mod flight;
 pub mod glue;

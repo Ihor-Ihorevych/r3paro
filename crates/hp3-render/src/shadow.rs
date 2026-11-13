@@ -53,6 +53,77 @@ impl ShadowGeom {
     }
 }
 
+/// WGSL shared by every shader that receives the characters' shadow (the world's and the dynamic actors'): the comparison
+/// sampler, the map and its uniform at bindings 2-4 of group `GROUP`, and `actor_shadow_term`. Use `actor_shadow_wgsl(group)`.
+const ACTOR_SHADOW_WGSL: &str = r#"
+@group(GROUP) @binding(2) var shadow_samp: sampler_comparison;
+// The characters' shadow: nested orthographic depth maps (one layer each, the first the finest) from their strongest light.
+// view_proj = each map's matrix; a = strength (0: none this frame), 1 / map size, depth bias in units, how many maps are in use;
+// b = direction to the light; c = half the width in units each map covers; d = the depth range in units of each map.
+struct ActorShadow { view_proj: array<mat4x4<f32>, 3>, a: vec4<f32>, b: vec4<f32>, c: vec4<f32>, d: vec4<f32> };
+@group(GROUP) @binding(3) var actor_map: texture_depth_2d_array;
+@group(GROUP) @binding(4) var<uniform> actor_shadow: ActorShadow;
+
+// How much of the light a character's shadow leaves at `world` (1 none), for a surface with normal `n_in` (any side; the
+// shader turns it to the light). The finest map that holds the point (and its depth) is used; the last one fades out at its
+// edge. Sixteen compare taps on a rotated disc whose radius grows with the receiver's distance past the casters (the maps are
+// centred on them), so the shadow is sharp at the feet and soft further out; the sampler's own 2x2 comparison smooths each
+// tap. `push` scales the offset along the normal that keeps a surface from shadowing itself, in texels (1.5 for the level;
+// actors, whose normals are smooth, take more).
+fn actor_shadow_term(world: vec3<f32>, n_in: vec3<f32>, frag: vec2<f32>, push: f32) -> f32 {
+    let strength = actor_shadow.a.x;
+    if (strength <= 0.0) { return 1.0; }
+    var n = n_in;
+    let to_light = actor_shadow.b.xyz;
+    if (dot(n, to_light) < 0.0) { n = -n; }
+    let nl = dot(n, to_light);
+    let count = max(i32(actor_shadow.a.w), 1);
+    var cascade = 0;
+    var uv = vec2<f32>(0.0);
+    var cz = 0.0;
+    var texel = 1.0;
+    var edge = -1.0;
+    for (var i = 0; i < count; i = i + 1) {
+        let t = 2.0 * actor_shadow.c[i] * actor_shadow.a.y;
+        let p = actor_shadow.view_proj[i] * vec4<f32>(world + n * (t * push), 1.0);
+        let u = vec2<f32>(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
+        cascade = i;
+        uv = u;
+        cz = p.z;
+        texel = t;
+        edge = min(min(u.x, 1.0 - u.x), min(u.y, 1.0 - u.y));
+        if (edge > 0.04 && p.z > 0.0 && p.z < 1.0) { break; }
+    }
+    if (edge <= 0.0 || cz <= 0.0 || cz >= 1.0) { return 1.0; }
+    let range = actor_shadow.d[cascade];
+    // The depth bias grows with the texel (a coarse map needs more).
+    let recv = cz - actor_shadow.a.z * max(texel * 2.56, 1.0) / range;
+    // Units past the casters' plane (the middle of the depth range) the receiver lies, and the blur it earns.
+    let past = max((cz - 0.5) * range, 0.0);
+    let radius = clamp((1.2 + past * 0.07) / texel, 1.5, 18.0) * actor_shadow.a.y;
+    let noise = fract(52.9829189 * fract(dot(frag, vec2<f32>(0.06711056, 0.00583715))));
+    let ang = noise * 6.2831853;
+    let rot = vec2<f32>(cos(ang), sin(ang));
+    var vis = 0.0;
+    for (var k = 0; k < 16; k = k + 1) {
+        // A sunflower spiral: even coverage of the disc without a table.
+        let r = sqrt((f32(k) + 0.5) / 16.0);
+        let t = f32(k) * 2.3999632;
+        let d = vec2<f32>(cos(t), sin(t)) * r;
+        let o = vec2<f32>(d.x * rot.x - d.y * rot.y, d.x * rot.y + d.y * rot.x) * radius;
+        vis = vis + textureSampleCompareLevel(actor_map, shadow_samp, uv + o, cascade, recv);
+    }
+    vis = vis / 16.0;
+    if (cascade == count - 1) { vis = mix(1.0, vis, smoothstep(0.0, 0.06, edge)); }
+    return 1.0 - strength * smoothstep(0.0, 0.3, nl) * (1.0 - vis);
+}
+"#;
+
+/// The shared receiver code with its bind group number filled in.
+pub fn actor_shadow_wgsl(group: u32) -> String {
+    ACTOR_SHADOW_WGSL.replace("GROUP", &group.to_string())
+}
+
 pub struct ShadowMaps {
     /// Group 2 of the world pipelines: the cube maps and their comparison sampler.
     pub layout: wgpu::BindGroupLayout,
@@ -68,14 +139,18 @@ pub struct ShadowMaps {
     /// The characters' shadow: one orthographic depth map of the pawns near the player seen from their strongest light.
     /// Rendered by `Dynamic` (which owns the skinned vertices), sampled by the world shader at group 2 binding 3, with the
     /// light's matrix and settings in the uniform at binding 4 (`ACTOR_UNIFORM_BYTES`; strength 0 means no shadow this frame).
-    pub actor_view: wgpu::TextureView,
+    pub actor_layers: Vec<wgpu::TextureView>,
     pub actor_uniform: wgpu::Buffer,
     pub actor_size: u32,
 }
 
-/// Bytes of the character shadow's uniform: the light's view-projection, then `a` (strength, 1 / map size, depth bias in
-/// units, depth range in units) and `b` (direction to the light, units per texel).
-pub const ACTOR_UNIFORM_BYTES: u64 = 96;
+/// Bytes of the character shadow's uniform: three view-projections (one per nested map), then `a` (strength, 1 / map size,
+/// depth bias in units, maps in use), `b` (direction to the light), `c` (half width in units of each map) and `d` (depth range in
+/// units of each map).
+pub const ACTOR_UNIFORM_BYTES: u64 = 256;
+
+/// Layers of the characters' shadow texture, the most nested maps there can be (the phone, which has no room for more, has one).
+pub const ACTOR_LAYERS: u32 = if cfg!(target_os = "android") { 1 } else { 3 };
 
 impl ShadowMaps {
     pub fn new(device: &wgpu::Device) -> ShadowMaps {
@@ -107,7 +182,7 @@ impl ShadowMaps {
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
                         multisampled: false,
                     },
                     count: None,
@@ -123,7 +198,7 @@ impl ShadowMaps {
         let actor_size: u32 = std::env::var("HP3_ACTOR_SHADOW_SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(2048);
         let actor_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("character shadow"),
-            size: wgpu::Extent3d { width: actor_size, height: actor_size, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d { width: actor_size, height: actor_size, depth_or_array_layers: ACTOR_LAYERS },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -131,7 +206,10 @@ impl ShadowMaps {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let actor_view = actor_tex.create_view(&Default::default());
+        let actor_array = actor_tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
+        let actor_layers: Vec<wgpu::TextureView> = (0..ACTOR_LAYERS)
+            .map(|layer| actor_tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2), base_array_layer: layer, array_layer_count: Some(1), ..Default::default() }))
+            .collect();
         let actor_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("character shadow"),
             contents: &[0u8; ACTOR_UNIFORM_BYTES as usize],
@@ -175,7 +253,7 @@ impl ShadowMaps {
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&cube_views[0]) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&cube_views[1]) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&actor_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&actor_array) },
                 wgpu::BindGroupEntry { binding: 4, resource: actor_uniform.as_entire_binding() },
             ],
         });
@@ -227,7 +305,7 @@ impl ShadowMaps {
             multiview: None,
             cache: None,
         });
-        ShadowMaps { layout, bind, faces, face_buffers, face_binds, pipeline, made: RefCell::new([None; MAX_SHADOW_LIGHTS]), enabled, actor_view, actor_uniform, actor_size }
+        ShadowMaps { layout, bind, faces, face_buffers, face_binds, pipeline, made: RefCell::new([None; MAX_SHADOW_LIGHTS]), enabled, actor_layers, actor_uniform, actor_size }
     }
 
     /// Makes the cube maps of `lights` (the lights that have a slot, in slot order) from `geom`, unless a slot's map is already

@@ -73,7 +73,14 @@ fn refresh_actor_boxes(vm: &mut Vm<'_>) {
         let blocks_actors = crate::read(vm, a, s.block).as_bool();
         let blocks_players = crate::read(vm, a, s.block_players).as_bool();
         let (r, h) = (crate::read(vm, a, s.radius).as_float(), crate::read(vm, a, s.height).as_float());
-        let has_box = crate::read(vm, a, s.collide).as_bool() && (blocks_actors || blocks_players) && (crate::read(vm, a, s.static_mesh).as_obj().is_none() || crate::read(vm, a, use_cylinder).as_bool()) && r > 0.0 && h > 0.0;
+        // As the original picks an actor's collision: a `CollideType` box first, whatever it draws; then a static mesh by its
+        // triangles (unless it asks for its cylinder); anything else is its cylinder.
+        let ct_box = crate::read(vm, a, collide_type).as_byte() == CT_BOX && crate::collision_rules_new();
+        let has_box = crate::read(vm, a, s.collide).as_bool()
+            && (blocks_actors || blocks_players)
+            && (ct_box || crate::read(vm, a, s.static_mesh).as_obj().is_none() || crate::read(vm, a, use_cylinder).as_bool())
+            && r > 0.0
+            && h > 0.0;
         memo.set(a, if has_box { 2 } else { 1 });
         if !has_box {
             continue;
@@ -302,10 +309,13 @@ pub(crate) fn move_and_slide(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<H
         match move_actor(vm, a, remaining) {
             None => break,
             Some(h) => {
+                if crate::envc::var_os("HP3_FALL_DEBUG").is_some() {
+                    eprintln!("slide: remaining {remaining} hit t {} n {} actor {:?} at {}", h.time, h.normal, h.actor.is_some(), vec(&get(vm, a, "Location")));
+                }
                 first.get_or_insert(h);
                 let left = remaining * (1.0 - h.time);
                 remaining = left - h.normal * left.dot(h.normal);
-                if remaining.length_squared() < 0.01 {
+                if remaining.length_squared() < 1.0e-6 {
                     break;
                 }
             }
@@ -1514,6 +1524,28 @@ fn fall(vm: &mut Vm<'_>, a: ObjId, dt: f32) {
             }
             // Against a wall the start speed is the one it slid along at (keeping its rise or fall), so the
             // carry-on does not push it back into the wall.
+            if pawn && (vec(&get(vm, a, "Location")) - from).length_squared() < 1.0e-4 {
+                // Wedged on a slope the box cannot slide down (a corner of a chute: the slope under it, a wall
+                // beside it and one ahead). The original's cylinder rolls out of such a corner; the box steps
+                // sideways along the free way that leads most downhill, and the slope takes it from there.
+                let (loc0, ext0) = (vec(&get(vm, a, "Location")), extent(vm, a));
+                let under = world(vm).collision.trace_as(true, loc0, loc0 - Vec3::Z * 8.0, ext0, Some(a)).map_or(landing, |h| h.normal);
+                let down = Vec3::new(under.x, under.y, 0.0).normalize_or_zero();
+                let mut dirs: Vec<Vec3> = (0..8).map(|i| {
+                    let t = i as f32 * std::f32::consts::FRAC_PI_4;
+                    Vec3::new(t.cos(), t.sin(), 0.0)
+                }).collect();
+                dirs.sort_by(|p, q| q.dot(down).total_cmp(&p.dot(down)));
+                for d in dirs {
+                    let at = vec(&get(vm, a, "Location"));
+                    if move_actor(vm, a, d * 2.0).is_none() {
+                        if crate::envc::var_os("HP3_FALL_DEBUG").is_some() {
+                            eprintln!("fall: unwedged by {d} at {at}");
+                        }
+                        break;
+                    }
+                }
+            }
             let slid = (vec(&get(vm, a, "Location")) - from) / tick;
             start_vel = Vec3::new(slid.x, slid.y, start_vel.z);
             refine(vm, start_vel);
@@ -2418,6 +2450,8 @@ fn overlaps_world(col: &crate::collision::Collision, at: Vec3, extent: Vec3) -> 
 /// Behaviour: reference `ULevel::FindSpot`/`CheckSlice` (a thin slice at the box's middle decides whether the
 /// trouble is above or below, then the box is moved clear of it), re-expressed.
 pub fn find_spot(col: &crate::collision::Collision, extent: Vec3, want: Vec3) -> Option<Vec3> {
+    // A spot inside a solid volume is first pushed out through its nearest face, as the original's point check reports it.
+    let want = col.push_out_of_hulls(want, extent);
     if !overlaps_world(col, want, extent) {
         return Some(want);
     }
@@ -2505,7 +2539,15 @@ pub fn far_move(vm: &mut Vm<'_>, a: ObjId, to: Vec3, test: bool, attached_move: 
     }
     if get(vm, a, "bCollideWorld").as_bool() {
         let ext = extent(vm, a);
-        match find_spot(&world(vm).collision, ext, to) {
+        let spot = find_spot(&world(vm).collision, ext, to);
+        if crate::envc::var_os("HP3_FAR_DEBUG").is_some() {
+            let pushed = world(vm).collision.push_out_of_hulls(to, ext);
+            let c = &world(vm).collision;
+            let (sweep, tris) = (c.trace_static(to + Vec3::Z * 0.1, to, ext).map(|h| (h.time, h.normal, h.actor)), c.box_overlaps_triangles(to, ext, None));
+            let owners: Vec<String> = c.debug_overlaps(to, ext).into_iter().map(|o| o.map_or("terrain".to_string(), |o| hp3_script::natives::object_path(vm, o))).collect();
+            eprintln!("far_move {}: pushed out of volumes to {pushed}, spot {spot:?}; at the spot: sweep {sweep:?} triangles {tris} {owners:?}", hp3_script::natives::object_path(vm, a));
+        }
+        match spot {
             Some(spot) => at = spot,
             None => return false,
         }

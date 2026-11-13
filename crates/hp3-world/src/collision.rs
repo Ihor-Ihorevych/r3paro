@@ -81,6 +81,72 @@ pub struct Collision {
     volume_bounds: HashMap<ObjId, (Vec3, Vec3)>,
     /// `baked_owners`, kept until a triangle or model is added.
     owners_cache: Option<Vec<ObjId>>,
+    /// Blocking volumes whose brush is convex, as solids in the world, and the cells they cover.
+    hulls: Vec<Hull>,
+    hull_grid: HashMap<(i32, i32), Vec<u32>>,
+}
+
+/// A blocking volume's brush as a convex solid: planes facing out, so a point is inside when it is behind all of them.
+/// As the original's brush model, it is solid through and through. A box that starts inside it is held only while it
+/// would sink deeper, so a pawn caught in one can always walk out.
+struct Hull {
+    actor: ObjId,
+    planes: Vec<(Vec3, f32)>,
+    lo: Vec3,
+    hi: Vec3,
+}
+
+impl Hull {
+    /// How far a box of `extent` at `p` is inside the solid (the least distance out through any face): positive inside.
+    fn depth(&self, p: Vec3, extent: Vec3) -> f32 {
+        self.planes.iter().map(|&(n, w)| plane_offset(n, extent) - (n.dot(p) - w)).fold(f32::MAX, f32::min)
+    }
+
+    /// Where a box swept from `start` to `end` first meets the solid. The move is clipped against every face pushed out by
+    /// the box: it is in the solid while it is behind all of them.
+    fn trace(&self, start: Vec3, end: Vec3, extent: Vec3) -> Option<Hit> {
+        let (mut enter, mut leave) = (0.0f32, 1.0f32);
+        let mut entry: Option<Vec3> = None;
+        for &(n, w) in &self.planes {
+            let off = plane_offset(n, extent);
+            let (d0, d1) = (n.dot(start) - w - off, n.dot(end) - w - off);
+            if d0 >= 0.0 && d1 >= 0.0 {
+                return None;
+            }
+            if d0 >= 0.0 {
+                let t = d0 / (d0 - d1);
+                if entry.is_none() || t > enter {
+                    enter = t;
+                    entry = Some(n);
+                }
+            } else if d1 >= 0.0 {
+                leave = leave.min(d0 / (d0 - d1));
+            }
+        }
+        let len = (end - start).length().max(EPSILON);
+        match entry {
+            Some(normal) => {
+                if enter > leave {
+                    return None;
+                }
+                let time = (enter - EPSILON / len).max(0.0);
+                Some(Hit { time, location: start + (end - start) * time, normal, actor: Some(self.actor) })
+            }
+            // Already inside: only a move that goes deeper is held, at once; leaving or sliding along is let through.
+            None => {
+                let (from, to) = (self.depth(start, extent), self.depth(end, extent));
+                if to <= from + 1.0e-3 {
+                    return None;
+                }
+                let normal = self
+                    .planes
+                    .iter()
+                    .min_by(|a, b| (plane_offset(a.0, extent) - (a.0.dot(start) - a.1)).total_cmp(&(plane_offset(b.0, extent) - (b.0.dot(start) - b.1))))
+                    .map_or(Vec3::Z, |p| p.0);
+                Some(Hit { time: 0.0, location: start, normal, actor: Some(self.actor) })
+            }
+        }
+    }
 }
 
 /// A static mesh's collision model placed in the world. It stands in for the mesh's triangles for the kinds of
@@ -380,6 +446,53 @@ impl Collision {
         self.modeled.get(&actor).is_some_and(|&(boxes, lines)| if extent == Vec3::ZERO { lines } else { boxes })
     }
 
+    /// Adds a convex blocking volume: its faces as (outward normal, distance) in the world, and its box.
+    pub fn add_hull(&mut self, actor: ObjId, planes: Vec<(Vec3, f32)>, lo: Vec3, hi: Vec3) {
+        if planes.len() < 4 {
+            return;
+        }
+        let index = self.hulls.len() as u32;
+        self.owners_cache = None;
+        self.hulls.push(Hull { actor, planes, lo, hi });
+        for x in cell(lo.x)..=cell(hi.x) {
+            for y in cell(lo.y)..=cell(hi.y) {
+                self.hull_grid.entry((x, y)).or_default().push(index);
+            }
+        }
+    }
+
+    /// `at` moved out of every solid volume a box of `extent` there sinks into, each time through the face it is least deep
+    /// behind (a few rounds, for volumes that meet).
+    pub fn push_out_of_hulls(&self, mut at: Vec3, extent: Vec3) -> Vec3 {
+        for _ in 0..4 {
+            let mut moved = false;
+            for key in cells_swept(at, at, extent) {
+                let Some(list) = self.hull_grid.get(&key) else { continue };
+                for &i in list {
+                    let h = &self.hulls[i as usize];
+                    if self.inactive.contains(&h.actor) || !self.blocks_mover(h.actor) {
+                        continue;
+                    }
+                    let depth = h.depth(at, extent);
+                    if depth <= 0.0 {
+                        continue;
+                    }
+                    let face = h.planes.iter().copied().min_by(|a, b| {
+                        (plane_offset(a.0, extent) - (a.0.dot(at) - a.1)).total_cmp(&(plane_offset(b.0, extent) - (b.0.dot(at) - b.1)))
+                    });
+                    if let Some((n, _)) = face {
+                        at += n * (depth + 0.5);
+                        moved = true;
+                    }
+                }
+            }
+            if !moved {
+                break;
+            }
+        }
+        at
+    }
+
     /// Adds a world-space triangle; degenerate ones are skipped.
     pub fn add_triangle(&mut self, v: [Vec3; 3], actor: Option<ObjId>) {
         let normal = (v[1] - v[0]).cross(v[2] - v[0]);
@@ -486,6 +599,28 @@ impl Collision {
             }
         }
         TRI_STAMPS.set(stamps);
+        // Convex blocking volumes (brushes, so part of the world: a thing that does not collide with the world passes).
+        if !self.passes_world {
+            let mut seen_hulls = hp3_script::fx::FxHashSet::default();
+            for key in &swept {
+                let Some(list) = self.hull_grid.get(key) else { continue };
+                for &i in list {
+                    if !seen_hulls.insert(i) {
+                        continue;
+                    }
+                    let h = &self.hulls[i as usize];
+                    if Some(h.actor) == ignore || self.inactive.contains(&h.actor) || !self.blocks_mover(h.actor) {
+                        continue;
+                    }
+                    if (start.min(end) - extent).cmpgt(h.hi).any() || (start.max(end) + extent).cmplt(h.lo).any() {
+                        continue;
+                    }
+                    if let Some(hit) = h.trace(start, end, extent) {
+                        keep(hit);
+                    }
+                }
+            }
+        }
         // Static meshes traced through their collision models.
         let mut seen_models = hp3_script::fx::FxHashSet::default();
         for key in &swept {
@@ -580,6 +715,9 @@ impl Collision {
 
     /// The world box of the baked triangles of `actor`.
     pub fn baked_bounds(&self, actor: ObjId) -> Option<(Vec3, Vec3)> {
+        if let Some(h) = self.hulls.iter().find(|h| h.actor == actor) {
+            return Some((h.lo, h.hi));
+        }
         let mut it = self.tris.iter().filter(|t| t.actor == Some(actor)).flat_map(|t| t.v);
         let first = it.next()?;
         Some(it.fold((first, first), |(lo, hi), v| (lo.min(v), hi.max(v))))
@@ -617,7 +755,8 @@ impl Collision {
         if self.owners_cache.is_none() {
             let mut seen = hp3_script::fx::FxHashSet::default();
             let tris = self.tris.iter().filter_map(|t| t.actor);
-            self.owners_cache = Some(tris.chain(self.mesh_models.iter().map(|m| m.actor)).filter(|a| seen.insert(*a)).collect());
+            let hulls = self.hulls.iter().map(|h| h.actor);
+            self.owners_cache = Some(tris.chain(self.mesh_models.iter().map(|m| m.actor)).chain(hulls).filter(|a| seen.insert(*a)).collect());
         }
         self.owners_cache.as_deref().unwrap_or_default()
     }
@@ -661,7 +800,31 @@ impl Collision {
                 }
             }
         }
-        false
+        // The convex blocking volumes are solid inside, not just at their faces.
+        swept.iter().filter_map(|key| self.hull_grid.get(key)).flatten().any(|&i| {
+            let h = &self.hulls[i as usize];
+            Some(h.actor) != ignore && !self.inactive.contains(&h.actor) && self.blocks_mover(h.actor) && h.depth(center, half) > 0.0
+        })
+    }
+
+    /// For debugging: the owners of the triangles a box overlaps (None for terrain), and of the solid volumes it sinks into.
+    pub fn debug_overlaps(&self, center: Vec3, half: Vec3) -> Vec<Option<ObjId>> {
+        let mut out = Vec::new();
+        for key in cells_swept(center, center, half) {
+            for &i in self.grid.get(&key).into_iter().flatten() {
+                let t = &self.tris[i as usize];
+                if !t.actor.is_some_and(|a| self.inactive.contains(&a)) && tri_box_overlap(&t.v, t.normal, center, half) && !out.contains(&t.actor) {
+                    out.push(t.actor);
+                }
+            }
+            for &i in self.hull_grid.get(&key).into_iter().flatten() {
+                let h = &self.hulls[i as usize];
+                if h.depth(center, half) > 0.0 && !out.contains(&Some(h.actor)) {
+                    out.push(Some(h.actor));
+                }
+            }
+        }
+        out
     }
 
     /// The BSP nodes a point walks through down to its leaf, with the side it takes at each and whether that makes it solid.
@@ -842,7 +1005,109 @@ fn plane_offset(n: Vec3, extent: Vec3) -> f32 {
     (n.x * n.x + n.y * n.y).sqrt() * extent.x.max(extent.y) + n.z.abs() * extent.z
 }
 
+/// Whether triangles are met by the true box (the original's rule) rather than the older circle-footprint approximation.
+fn exact_triangles() -> bool {
+    static EXACT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *EXACT.get_or_init(|| crate::envc::var("HP3_COLLISION").ok().as_deref() != Some("old"))
+}
+
+/// An upright box of half size `extent` swept from `start` to `end` against a triangle, by separating axes: the box's three
+/// axes, the triangle's normal and the nine edge-by-axis crosses. For each axis the move's time window in which the two
+/// projections overlap is narrowed; the box meets the triangle when every window still overlaps. The axis that was crossed
+/// last gives the normal, turned toward where the box came from.
+/// A box that already overlaps the triangle where it starts is not held by it (`Overlap`): the original then tries the move
+/// again from a little behind, so a box that has only grazed into a face is still stopped by it.
+enum SatSweep {
+    Hit(f32, Vec3),
+    Miss,
+    Overlap,
+}
+
+fn sat_sweep(v: &[Vec3; 3], start: Vec3, end: Vec3, extent: Vec3) -> SatSweep {
+    let (mut t_min, mut t_max) = (-1.0f32, 1.0f32);
+    let mut normal = Vec3::ZERO;
+    let edges = [v[1] - v[0], v[2] - v[1], v[0] - v[2]];
+    let mut axes: [Vec3; 13] = [Vec3::ZERO; 13];
+    axes[0] = Vec3::X;
+    axes[1] = Vec3::Y;
+    axes[2] = Vec3::Z;
+    axes[3] = edges[0].cross(edges[1]);
+    let mut k = 4;
+    for box_axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+        for e in edges {
+            axes[k] = e.cross(box_axis);
+            k += 1;
+        }
+    }
+    const DELTA: f32 = 1.0e-5;
+    for line in axes {
+        if line.length_squared() < DELTA {
+            continue;
+        }
+        let reach = extent.x * line.x.abs() + extent.y * line.y.abs() + extent.z * line.z.abs();
+        let (p0, p1) = (line.dot(start), line.dot(end));
+        let dir = p1 - p0;
+        let pv = [line.dot(v[0]), line.dot(v[1]), line.dot(v[2])];
+        let lo = pv[0].min(pv[1]).min(pv[2]) - reach;
+        let hi = pv[0].max(pv[1]).max(pv[2]) + reach;
+        if p0 < lo {
+            if dir < DELTA {
+                return SatSweep::Miss;
+            }
+            let t = (lo - p0) / dir;
+            if t > t_min {
+                t_min = t;
+                normal = -line;
+            }
+            t_max = t_max.min((hi - p0) / dir);
+        } else if p0 > hi {
+            if dir > -DELTA {
+                return SatSweep::Miss;
+            }
+            let t = (hi - p0) / dir;
+            if t > t_min {
+                t_min = t;
+                normal = line;
+            }
+            t_max = t_max.min((lo - p0) / dir);
+        } else if dir > DELTA {
+            t_max = t_max.min((hi - p0) / dir);
+        } else if dir < -DELTA {
+            t_max = t_max.min((lo - p0) / dir);
+        }
+        if t_max < t_min {
+            return SatSweep::Miss;
+        }
+    }
+    if t_min >= 0.0 { SatSweep::Hit(t_min, normal.normalize_or_zero()) } else { SatSweep::Overlap }
+}
+
 fn tri_trace(t: &Tri, start: Vec3, end: Vec3, extent: Vec3) -> Option<Hit> {
+    if exact_triangles() {
+        let len = (end - start).length();
+        if len < 1.0e-6 {
+            return None;
+        }
+        let pull = EPSILON / len;
+        return match sat_sweep(&t.v, start, end, extent) {
+            SatSweep::Hit(time, normal) => {
+                let time = (time - pull).max(0.0);
+                Some(Hit { time, location: start + (end - start) * time, normal, actor: t.actor })
+            }
+            SatSweep::Miss => None,
+            // Tried again from 5 units back: a face it meets on the way in still stops it, at once if it is that close.
+            SatSweep::Overlap => {
+                let back = (end - start) / len * 5.0;
+                match sat_sweep(&t.v, start - back, end, extent) {
+                    SatSweep::Hit(time, normal) => {
+                        let time = ((time * (len + 5.0) - 5.0) / len - pull).max(0.0);
+                        Some(Hit { time, location: start + (end - start) * time, normal, actor: t.actor })
+                    }
+                    _ => None,
+                }
+            }
+        };
+    }
     let mut n = t.normal;
     let mut d0 = n.dot(start - t.v[0]);
     // Two-sided: the side the move starts on is the front.
@@ -1041,6 +1306,55 @@ fn tri_box_overlap(v: &[Vec3; 3], normal: Vec3, center: Vec3, half: Vec3) -> boo
 #[cfg(test)]
 mod oriented_box_tests {
     use super::*;
+
+    /// A volume from (0,0,0) to (100,100,100) as outward planes.
+    fn cube() -> Hull {
+        let planes = vec![
+            (Vec3::X, 100.0),
+            (-Vec3::X, 0.0),
+            (Vec3::Y, 100.0),
+            (-Vec3::Y, 0.0),
+            (Vec3::Z, 100.0),
+            (-Vec3::Z, 0.0),
+        ];
+        Hull { actor: ObjId(7), planes, lo: Vec3::ZERO, hi: Vec3::splat(100.0) }
+    }
+
+    #[test]
+    fn solid_volume_stops_a_box_at_its_face() {
+        let ext = Vec3::new(15.0, 15.0, 38.0);
+        let hit = cube().trace(Vec3::new(-50.0, 50.0, 50.0), Vec3::new(50.0, 50.0, 50.0), ext).expect("hits the -x face");
+        let at = Vec3::new(-50.0, 50.0, 50.0).lerp(Vec3::new(50.0, 50.0, 50.0), hit.time);
+        assert!((at.x - -15.0).abs() < 0.5, "stops one radius short of the face: {}", at.x);
+        assert_eq!(hit.normal, -Vec3::X);
+    }
+
+    #[test]
+    fn a_box_inside_a_volume_can_leave_but_not_go_deeper() {
+        let (c, ext) = (cube(), Vec3::new(15.0, 15.0, 38.0));
+        let inside = Vec3::new(10.0, 50.0, 50.0);
+        assert!(c.trace(inside, inside - Vec3::X * 20.0, ext).is_none(), "walking out is free");
+        assert!(c.trace(inside, inside + Vec3::Y * 10.0, ext).is_none(), "sliding at the same depth is free");
+        assert!(c.trace(inside, inside + Vec3::X * 10.0, ext).is_some_and(|h| h.time == 0.0), "going deeper is held at once");
+    }
+
+    #[test]
+    fn a_tall_box_does_not_slip_under_a_wall_edge() {
+        // A wall face from z 296 up; the box's top reaches 318 (22 into the wall's height, more than its 15 radius).
+        let t = Tri { v: [Vec3::new(-100.0, 400.0, 296.0), Vec3::new(100.0, 400.0, 296.0), Vec3::new(0.0, 400.0, 500.0)], normal: Vec3::Y, actor: None };
+        let ext = Vec3::new(15.0, 15.0, 38.0);
+        let hit = sat_sweep(&t.v, Vec3::new(0.0, 450.0, 280.0), Vec3::new(0.0, 380.0, 280.0), ext);
+        match hit {
+            SatSweep::Hit(time, normal) => {
+                let y = 450.0 - 70.0 * time;
+                assert!((y - 415.0).abs() < 0.5, "held at the face plus its half width: {y}");
+                assert!(normal.y > 0.99, "pushed back the way it came: {normal}");
+            }
+            _ => panic!("the box must meet the wall"),
+        }
+        // Below the wall's bottom (top at 290) it passes.
+        assert!(matches!(sat_sweep(&t.v, Vec3::new(0.0, 450.0, 252.0), Vec3::new(0.0, 380.0, 252.0), ext), SatSweep::Miss));
+    }
 
     fn wall(extent: Vec3, yaw_deg: f32) -> ActorBox {
         let (s, c) = yaw_deg.to_radians().sin_cos();

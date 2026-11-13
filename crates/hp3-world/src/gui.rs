@@ -512,16 +512,27 @@ pub fn mouse_move(vm: &mut Vm<'_>, x: f32, y: f32) {
         if let Some(p) = prev
             && get(vm, p, "MenuState").as_byte() != MSAT_PRESSED
         {
-            set(vm, p, "MenuState", Value::Byte(MSAT_BLURRY));
+            change_state(vm, p, MSAT_BLURRY);
         }
         if let Some(o) = over {
-            set(vm, o, "MenuState", Value::Byte(MSAT_WATCHED));
+            change_state(vm, o, MSAT_WATCHED);
         }
         set(vm, gui, "ActiveControl", Value::Object(over));
         // The page shows the hint of what the cursor is on (the card pages put a card's name and description there; an empty
         // hint makes the page show its default one). The scripts only set `Hint`, nothing else tells the page.
         let hint = over.map(|o| get(vm, o, "Hint").as_str().to_string()).unwrap_or_default();
         call_method_with(vm, page, "ChangeHint", &mut [Value::Str(hint)]);
+    }
+}
+
+/// Moves a component to a menu state the way the controller does: through the script's `MenuStateChange`, which is what
+/// fires `OnWatch`/`OnDeActivate` (the load page picks its slot in `OnWatch`). Components without it just get the state.
+fn change_state(vm: &mut Vm<'_>, o: ObjId, state: u8) {
+    let n = vm.db.names.intern("MenuStateChange");
+    if vm.find_function(Some(o), None, n).is_some() {
+        call_method_with(vm, o, "MenuStateChange", &mut [Value::Byte(state)]);
+    } else {
+        set(vm, o, "MenuState", Value::Byte(state));
     }
 }
 
@@ -879,4 +890,11 @@ fn list_rows(vm: &mut Vm<'_>, o: ObjId, count: usize) -> usize {
         owner = get(vm, m, "MenuOwner").as_obj().filter(|&x| x != m);
     }
     if limit > 0 { count.min(limit as usize) } else { count }
+}
+
+/// The script class name of the topmost open menu page (`HPPageFrontEnd`), when a menu is up.
+pub fn top_menu_class(vm: &mut Vm<'_>) -> Option<String> {
+    let page = top_page(vm)?;
+    let class = vm.db.objects.get(page).class?;
+    Some(vm.db.names.get(vm.db.get(class).name).to_string())
 }

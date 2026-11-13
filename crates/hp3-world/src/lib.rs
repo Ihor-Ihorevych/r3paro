@@ -889,6 +889,8 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
     // `HP3_MATCH=<opponent>` (debugging): the level is loaded and the player is logged in, so a Quidditch
     // match can build its arena and spawn into it. Every other level leaves the match state empty.
     quidditch::glue::start_from_env(vm)?;
+    // The Quidditch captain stands in the Grounds hub (nowhere else).
+    quidditch::captain::spawn(vm);
     Ok(())
 }
 
@@ -1788,6 +1790,47 @@ pub fn volume_bounds(vm: &mut Vm<'_>, a: ObjId) -> Option<(glam::Vec3, glam::Vec
     Some((lo, hi))
 }
 
+/// Whether collision follows the original's rules as read from its Engine.dll (`docs/collision-original.md`); `HP3_COLLISION=old`
+/// keeps the earlier approximations, to compare.
+pub fn collision_rules_new() -> bool {
+    static NEW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *NEW.get_or_init(|| envc::var("HP3_COLLISION").ok().as_deref() != Some("old"))
+}
+
+/// The faces of a closed brush (world triangles) as outward planes, with its box, when the brush is convex: every corner
+/// lies behind every face. None for a brush that is not (an L-shaped or hollow one), which then collides by its faces.
+fn convex_planes(tris: &[[glam::Vec3; 3]]) -> Option<(Vec<(glam::Vec3, f32)>, glam::Vec3, glam::Vec3)> {
+    use glam::Vec3;
+    if tris.len() < 4 {
+        return None;
+    }
+    let (mut lo, mut hi, mut sum) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN), Vec3::ZERO);
+    for p in tris.iter().flatten() {
+        lo = lo.min(*p);
+        hi = hi.max(*p);
+        sum += *p;
+    }
+    let centre = sum / (tris.len() * 3) as f32;
+    let mut planes: Vec<(Vec3, f32)> = Vec::new();
+    for t in tris {
+        let n = (t[1] - t[0]).cross(t[2] - t[0]);
+        if n.length_squared() < 1e-6 {
+            continue;
+        }
+        let mut n = n.normalize();
+        let mut d = n.dot(t[0]);
+        if n.dot(centre) - d > 0.0 {
+            n = -n;
+            d = -d;
+        }
+        if !planes.iter().any(|(pn, pd)| pn.dot(n) > 0.9999 && (pd - d).abs() < 0.5) {
+            planes.push((n, d));
+        }
+    }
+    let convex = planes.iter().all(|&(n, d)| tris.iter().flatten().all(|p| n.dot(*p) - d <= 0.5));
+    (convex && planes.len() >= 4).then_some((planes, lo, hi))
+}
+
 /// A physics volume's brush as planes (a point is inside when it is behind all of them).
 pub struct VolumeHull {
     pub actor: ObjId,
@@ -2073,6 +2116,7 @@ fn build_collision(vm: &mut Vm<'_>, map: &Rc<Package>, model: Option<ObjRef>, ac
     let mut col = collision::Collision::new(model);
     let mover_class = vm.db.find("Mover");
     let volume_class = vm.db.find("Volume");
+    let blocking_volume_class = vm.db.find("BlockingVolume");
     for &a in actors {
         // Movers collide as moving shapes, not as part of the fixed level.
         if mover_class.is_some_and(|m| vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, m))) {
@@ -2088,8 +2132,12 @@ fn build_collision(vm: &mut Vm<'_>, map: &Rc<Package>, model: Option<ObjRef>, ac
         let mesh = get(vm, a, "StaticMesh").as_obj();
         let blocks = get(vm, a, "bCollideActors").as_bool()
             && (get(vm, a, "bBlockActors").as_bool() || get(vm, a, "bBlockPlayers").as_bool());
-        // A volume that blocks (a BlockingVolume, mountable or not) is its brush: invisible walls and ledges.
-        if blocks && mesh.is_none() && volume_class.is_some_and(|v| vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, v))) {
+        // A volume that blocks (a BlockingVolume, mountable or not) is its brush: invisible walls and ledges. A blocking volume
+        // is baked even while its collision is off: a trigger can turn it on later (KWBlockingVolume's toggles), and the
+        // per-tick sync keeps it out of the way until then.
+        let is_volume = volume_class.is_some_and(|v| vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, v)));
+        let blocking_volume = blocking_volume_class.is_some_and(|v| vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, v)));
+        if (blocks || blocking_volume) && mesh.is_none() && is_volume {
             let loc = vec_of(&get(vm, a, "Location"));
             let r: Vec<i32> = get(vm, a, "Rotation").fields().iter().map(Value::as_int).collect();
             let axes = hp3_script::natives::rot_axes([r.first().copied().unwrap_or(0), r.get(1).copied().unwrap_or(0), r.get(2).copied().unwrap_or(0)]);
@@ -2104,17 +2152,26 @@ fn build_collision(vm: &mut Vm<'_>, map: &Rc<Package>, model: Option<ObjRef>, ac
             };
             let s3 = if s3 == Vec3::ZERO { Vec3::ONE } else { s3 };
             if let Some(tris) = brush_triangles(vm, a, s3, scale) {
+                let world_tris: Vec<[Vec3; 3]> = tris.iter().map(|t| t.map(|p| loc + basis * p)).collect();
+                // A convex brush is a solid (as the original's brush model is); any other keeps its faces as triangles.
+                let hull = convex_planes(&world_tris).filter(|_| collision_rules_new());
                 if std::env::var_os("HP3_COLLISION_STATS").is_some() {
-                    eprintln!("volume {} collision: {} triangles", hp3_script::natives::object_path(vm, a), tris.len());
+                    eprintln!("volume {} collision: {} triangles, convex {}", hp3_script::natives::object_path(vm, a), tris.len(), hull.is_some());
                 }
-                for t in tris {
-                    col.add_triangle(t.map(|p| loc + basis * p), Some(a));
+                match hull {
+                    Some((planes, lo, hi)) => col.add_hull(a, planes, lo, hi),
+                    None => {
+                        for t in world_tris {
+                            col.add_triangle(t, Some(a));
+                        }
+                    }
                 }
             }
             continue;
         }
-        // A static mesh with `bUseCylinderCollision` collides as its collision cylinder (see `refresh_actor_boxes`), not as its triangles.
-        let cylinder = get(vm, a, "bUseCylinderCollision").as_bool();
+        // A static mesh with `bUseCylinderCollision` collides as its collision cylinder, and one whose `CollideType` is a box as
+        // that box (see `refresh_actor_boxes`), not as its triangles.
+        let cylinder = get(vm, a, "bUseCylinderCollision").as_bool() || (collision_rules_new() && get(vm, a, "CollideType").as_byte() == 1);
         if let Some(mesh) = mesh.filter(|_| blocks && !cylinder) {
             let Some((mkey_pkg, mkey_idx)) = vm.db.objects.get(mesh).key.clone() else { continue };
             let Ok(mp) = vm.db.set.get(&mkey_pkg) else { continue };

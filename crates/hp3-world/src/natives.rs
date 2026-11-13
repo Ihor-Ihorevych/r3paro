@@ -459,6 +459,9 @@ pub fn debug_trace_actors(vm: &mut Vm<'_>, source: ObjId, start: glam::Vec3, end
 }
 
 /// Creates an actor of `class`: defaults, owner, tag, location, rotation, then the begin-play events.
+/// Seconds added to how long a Lumos light stays on.
+const LUMOS_EXTRA_SECONDS: f32 = 5.0;
+
 pub fn spawn(vm: &mut Vm<'_>, spawner: Option<ObjId>, a: &[Value]) -> Result<Value, VmError> {
     let Some(class_obj) = obj_arg(a, 0) else { return Ok(Value::Object(None)) };
     let Some(class) = vm.class_of(class_obj) else { return Ok(Value::Object(None)) };
@@ -485,6 +488,11 @@ pub fn spawn(vm: &mut Vm<'_>, spawner: Option<ObjId>, a: &[Value]) -> Result<Val
     let tag = if given(a, 2) { a[2].as_name() } else { hp3_script::Name::NONE };
     set(vm, obj, "Tag", Value::Name(if tag == hp3_script::Name::NONE { class_name } else { tag }));
     set(vm, obj, "Level", Value::Object(level));
+    // Lumos burns five seconds longer than the original's 30 (`LumosLight.fLumosTimeToTurnOff`).
+    if vm.db.names.get(class_name).eq_ignore_ascii_case("LumosLight") {
+        let t = get(vm, obj, "fLumosTimeToTurnOff").as_float();
+        set(vm, obj, "fLumosTimeToTurnOff", Value::Float(t + LUMOS_EXTRA_SECONDS));
+    }
     let instigator = spawner.map(|s| get(vm, s, "Instigator")).unwrap_or_default();
     set(vm, obj, "Instigator", instigator);
     // An actor that collides with the world is fitted to a free place near where it was asked for, as the original does when

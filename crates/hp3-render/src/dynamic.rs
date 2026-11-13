@@ -39,7 +39,7 @@ struct Model { model: mat4x4<f32>, ambient: vec4<f32>, extra: vec4<f32>, lights:
 @group(1) @binding(1) var samp: sampler;
 @group(2) @binding(0) var<uniform> m: Model;
 
-struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) light: vec3<f32>, @location(2) fade: f32 };
+struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) light: vec3<f32>, @location(2) fade: f32, @location(3) world: vec3<f32>, @location(4) wnorm: vec3<f32> };
 
 // Fixed-function style lighting per vertex (smooth, clamped to 0..1 before it modulates the texture, doubled).
 @vertex fn vs(@location(0) position: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) light_uv: vec2<f32>,
@@ -49,12 +49,15 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @l
     o.pos = globals.view_proj * wp;
     o.uv = uv;
     o.fade = 1.0 - m.extra.x;
+    o.world = wp.xyz;
+    o.wnorm = vec3<f32>(0.0);
     // A normal a thousand long marks a surface that lights itself (a glowing orb): full brightness (the output is doubled).
     if (length(normal) > 100.0) {
         o.light = vec3<f32>(0.5);
         return o;
     }
     let n = normalize((m.model * vec4<f32>(normal, 0.0)).xyz);
+    o.wnorm = n;
     var lit = m.ambient.rgb;
     let count = i32(m.ambient.w);
     for (var i = 0; i < count; i = i + 1) {
@@ -84,7 +87,13 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @l
 @fragment fn fs(i: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, i.uv);
     if (c.a < 0.5) { discard; }
-    return vec4<f32>(mix(globals.fog_color.rgb, c.rgb * i.light * 2.0, fog_factor(i.pos.w)), 1.0);
+    var light = i.light;
+    // Receives the characters' shadow like the level does (self-lit orbs, with no normal, do not).
+    if (dot(i.wnorm, i.wnorm) > 0.0) {
+        let s = actor_shadow_term(i.world, normalize(i.wnorm), i.pos.xy, 3.0);
+        light = light * s * mix(vec3<f32>(0.88, 0.94, 1.0), vec3<f32>(1.0), s);
+    }
+    return vec4<f32>(mix(globals.fog_color.rgb, c.rgb * light * 2.0, fog_factor(i.pos.w)), 1.0);
 }
 
 // Sections blended by their alpha (flame cards): nothing is cut out, the alpha goes to the blend.
@@ -151,6 +160,8 @@ pub struct ActorShadowCfg {
     /// How dark the shadow is where it falls, 0 to 1.
     pub strength: f32,
     pub casters: Vec<usize>,
+    /// Half the depth the map covers along the light, when the default is too short (a rider high above the ground it shades).
+    pub depth: Option<f32>,
 }
 
 /// Half the width, in units, of the area the characters' shadow map covers (`HP3_ACTOR_SHADOW_RANGE`).
@@ -267,7 +278,7 @@ impl Dynamic {
         let d = &r.device;
         let shader = d.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("dynamic"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(format!("{}{}", crate::shadow::actor_shadow_wgsl(3), SHADER).into()),
         });
         let model_layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("model"),
@@ -284,7 +295,7 @@ impl Dynamic {
         });
         let layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("dynamic"),
-            bind_group_layouts: &[r.globals_layout(), r.texture_layout(), &model_layout],
+            bind_group_layouts: &[r.globals_layout(), r.texture_layout(), &model_layout, &r.shadow_maps().layout],
             push_constant_ranges: &[],
         });
         // `blend` None: opaque and cut-out sections (depth written); Some: blended with the given factors, depth only tested.
@@ -369,7 +380,7 @@ impl Dynamic {
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: true, min_binding_size: wgpu::BufferSize::new(64) },
                 count: None,
             }],
         });
@@ -405,11 +416,11 @@ impl Dynamic {
             multiview: None,
             cache: None,
         });
-        let caster_buffer = d.create_buffer(&wgpu::BufferDescriptor { label: Some("character shadow light"), size: 64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let caster_buffer = d.create_buffer(&wgpu::BufferDescriptor { label: Some("character shadow light"), size: 256 * crate::shadow::ACTOR_LAYERS as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let caster_bind = d.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &caster_light_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: caster_buffer.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &caster_buffer, offset: 0, size: wgpu::BufferSize::new(64) }) }],
         });
         let (buffer, bind) = Self::instance_buffer(r, &model_layout, 256);
         Dynamic {
@@ -468,26 +479,38 @@ impl Dynamic {
 
     /// The light's matrix for the characters' map, its uniform for the world shader and the depth range: an orthographic
     /// box around `cfg.center` looking along the light, its centre snapped to whole texels so the shadow does not crawl.
-    fn actor_shadow_light(&self, r: &Renderer, cfg: &ActorShadowCfg) -> (Mat4, [f32; 24]) {
+    fn actor_shadow_light(&self, r: &Renderer, cfg: &ActorShadowCfg) -> (Vec<Mat4>, [f32; 64]) {
         let size = r.shadow_maps().actor_size as f32;
-        let half = actor_shadow_range();
-        let texel = 2.0 * half / size;
+        let base = actor_shadow_range();
+        // The low tier is one map of the base width; the high tier nests three, each four times as wide as the one before.
+        let count = crate::quality::cascades().clamp(1, crate::shadow::ACTOR_LAYERS as usize);
+        let halves: Vec<f32> = if count == 1 { vec![base] } else { (0..count).map(|i| base * 0.4 * 4.0f32.powi(i as i32)).collect() };
         let dir = cfg.direction.normalize_or_zero();
         let dir = if dir == glam::Vec3::ZERO { -glam::Vec3::Z } else { dir };
         let up = if dir.z.abs() > 0.95 { glam::Vec3::Y } else { glam::Vec3::Z };
         let view = Mat4::look_to_lh(glam::Vec3::ZERO, dir, up);
         let c = view.transform_point3(cfg.center);
-        let (cx, cy) = ((c.x / texel).floor() * texel, (c.y / texel).floor() * texel);
-        // Depth: far enough toward the light to catch anything that could shade the area, and as far past it as a long shadow reaches.
-        let depth = half * 1.5;
-        let proj = Mat4::orthographic_lh(cx - half, cx + half, cy - half, cy + half, c.z - depth, c.z + depth);
-        let vp = proj * view;
-        let mut u = [0.0f32; 24];
-        u[..16].copy_from_slice(&vp.to_cols_array());
+        let mut u = [0.0f32; 64];
+        let mut matrices = Vec::new();
+        let (mut widths, mut ranges) = ([0.0f32; 4], [1.0f32; 4]);
+        for (i, &half) in halves.iter().enumerate() {
+            let texel = 2.0 * half / size;
+            let (cx, cy) = ((c.x / texel).floor() * texel, (c.y / texel).floor() * texel);
+            // Depth: far enough toward the light to catch anything that could shade the area, and as far past it as a long shadow reaches.
+            let depth = cfg.depth.map_or(half * 1.5, |d| d.max(half * 1.5));
+            let proj = Mat4::orthographic_lh(cx - half, cx + half, cy - half, cy + half, c.z - depth, c.z + depth);
+            let vp = proj * view;
+            u[i * 16..i * 16 + 16].copy_from_slice(&vp.to_cols_array());
+            widths[i] = half;
+            ranges[i] = depth * 2.0;
+            matrices.push(vp);
+        }
         let to_light = -dir;
-        u[16..20].copy_from_slice(&[cfg.strength.clamp(0.0, 1.0), 1.0 / size, 0.6, depth * 2.0]);
-        u[20..24].copy_from_slice(&[to_light.x, to_light.y, to_light.z, texel]);
-        (vp, u)
+        u[48..52].copy_from_slice(&[cfg.strength.clamp(0.0, 1.0), 1.0 / size, 0.6, count as f32]);
+        u[52..56].copy_from_slice(&[to_light.x, to_light.y, to_light.z, 0.0]);
+        u[56..60].copy_from_slice(&widths);
+        u[60..64].copy_from_slice(&ranges);
+        (matrices, u)
     }
 
     /// Makes `view` the texture every mesh uploaded from now on takes for `key` (a video's picture the caller keeps rewriting).
@@ -713,6 +736,7 @@ impl Dynamic {
         let sections = |pass: &mut wgpu::RenderPass<'_>, kinds: &[(MaterialBlend, &wgpu::RenderPipeline)]| {
             for &(blend, pipeline) in kinds {
                 pass.set_pipeline(pipeline);
+                pass.set_bind_group(3, &r.shadow_maps().bind, &[]);
                 for (i, (mesh, _, light)) in meshes.iter().enumerate() {
                     pass.set_bind_group(2, &inst.1, &[(i as u64 * STRIDE) as u32]);
                     // A faded actor (a wall under Lumos) is all blended: its sections go with the alpha ones.
@@ -745,19 +769,23 @@ impl Dynamic {
         let light_vp = cfg.as_ref().map(|c| {
             let (vp, uniform) = self.actor_shadow_light(r, c);
             r.queue.write_buffer(&maps.actor_uniform, 0, bytemuck::cast_slice(&uniform));
-            r.queue.write_buffer(&self.caster_buffer, 0, bytemuck::cast_slice(&vp.to_cols_array()));
+            for (i, m) in vp.iter().enumerate() {
+                r.queue.write_buffer(&self.caster_buffer, i as u64 * 256, bytemuck::cast_slice(&m.to_cols_array()));
+            }
             vp
         });
         if light_vp.is_none() {
-            r.queue.write_buffer(&maps.actor_uniform, 0, bytemuck::cast_slice(&[0.0f32; 24]));
+            r.queue.write_buffer(&maps.actor_uniform, 0, bytemuck::cast_slice(&[0.0f32; 64]));
         }
         let casters = |enc: &mut wgpu::CommandEncoder| {
             let Some(cfg) = cfg.as_ref().filter(|_| light_vp.is_some()) else { return };
+            // One depth pass per nested map, each with its own light matrix (at its 256-byte slot of the caster buffer).
+            for cascade in 0..light_vp.as_ref().map_or(0, |v| v.len()) {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("character shadow"),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &maps.actor_view,
+                    view: &maps.actor_layers[cascade],
                     depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
                     stencil_ops: None,
                 }),
@@ -765,7 +793,7 @@ impl Dynamic {
                 occlusion_query_set: None,
             });
             pass.set_pipeline(&self.caster_pipeline);
-            pass.set_bind_group(0, &self.caster_bind, &[]);
+            pass.set_bind_group(0, &self.caster_bind, &[(cascade * 256) as u32]);
             for &i in &cfg.casters {
                 let Some((mesh, _, light)) = meshes.get(i) else { continue };
                 if light.fade > 0.0 {
@@ -784,6 +812,7 @@ impl Dynamic {
                     pass.set_index_buffer(d.indices.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..d.count, 0, 0..1);
                 }
+            }
             }
         };
         r.draw_with_pre(

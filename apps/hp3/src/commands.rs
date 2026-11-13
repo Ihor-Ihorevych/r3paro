@@ -151,7 +151,7 @@ pub fn spell_toast() -> Option<String> {
     t.as_ref().filter(|(_, at)| at.elapsed().as_secs_f32() < 2.5).map(|(l, _)| l.clone())
 }
 
-/// `gfx shadows [on|off]` (no value: the other way), kept in
+/// `gfx shadows [on|off]` and `gfx quality [low|high]` (no value: the other way), kept in
 /// `[hp3.app]` of the settings.
 fn gfx(vm: &mut Vm<'_>, what: &str, value: Option<&str>) {
     use hp3_render::quality;
@@ -166,6 +166,16 @@ fn gfx(vm: &mut Vm<'_>, what: &str, value: Option<&str>) {
             hp3_world::settings::store(vm, "hp3.app", "ActorShadows", if on { "True" } else { "False" });
             eprintln!("gfx: character shadows {}", if on { "on" } else { "off" });
         }
+        "quality" => {
+            let high = match value {
+                Some("high") => true,
+                Some("low") => false,
+                _ => !quality::high_shadows(),
+            };
+            quality::set_high_shadows(high);
+            hp3_world::settings::store(vm, "hp3.app", "ShadowQuality", if high { "High" } else { "Low" });
+            eprintln!("gfx: shadow quality {}", if high { "high" } else { "low" });
+        }
         other => eprintln!("gfx: unknown '{other}'"),
     }
 }
@@ -175,6 +185,9 @@ pub fn load_graphics(vm: &Vm<'_>) {
     use hp3_render::quality;
     if hp3_world::settings::text(vm, "hp3.app", "ActorShadows").is_some() {
         quality::set_actor_shadows(hp3_world::settings::flag(vm, "hp3.app", "ActorShadows", true));
+    }
+    if let Some(q) = hp3_world::settings::text(vm, "hp3.app", "ShadowQuality") {
+        quality::set_high_shadows(q.eq_ignore_ascii_case("high"));
     }
 }
 

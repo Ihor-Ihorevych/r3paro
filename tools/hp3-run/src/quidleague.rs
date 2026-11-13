@@ -106,7 +106,7 @@ pub fn run(root: &Path, matches: u32) -> Result<ExitCode, Box<dyn std::error::Er
         println!("quid-league: after the match the match state is {}, the travel asked for is {travel:?}", if gone { "cleared" } else { "STILL THERE" });
         ok &= gone;
         // What was saved, and whom the entry would start next.
-        let path = menu::league_path(&vm);
+        let path = menu::league_path(&mut vm);
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         println!("quid-league: {} holds:\n{}", path.display(), text.trim_end());
         for line in menu::report(&mut vm) {
