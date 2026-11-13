@@ -15,11 +15,15 @@ use hp3_script::{ObjId, Value, Vm};
 pub const MAP: &str = "HP3_GroundsHub";
 /// A Gryffindor rider, as the retail map places them for the cutscene: a skeletal mesh in the team's robes and gear.
 const CLASS: &str = "HGame.QuidPlayerGriffMale";
-/// Where the captain stands (world units, the hub's own coordinates): beside the stair up to the castle door, where the
-/// player arrives in the first story state. The floor is found under this point.
-const SPOT: Vec3 = Vec3::new(-700.0, -6740.0, 900.0);
-/// The yaw (65536ths of a turn) the captain faces: back toward the way the player comes in.
-const YAW: i32 = -16384;
+/// Where the captain stands (world units, the hub's own coordinates): by the stone bench near the castle wall, the place the user
+/// picked in game (F4 screenshot of 2026-11-14, Harry's own position there). The floor is found under this point.
+const SPOT: Vec3 = Vec3::new(-1223.56, -5147.68, 870.03);
+/// The yaw (65536ths of a turn) the captain faces: the way the player faced on that spot (49545).
+const YAW: i32 = 49545 - 65536;
+/// Where the captain stood before: a save made then holds him there, and a load moves him to `SPOT`.
+const OLD_SPOTS: [Vec3; 1] = [Vec3::new(-700.0, -6740.0, 900.0)];
+/// The `Tag` the captain carries, so a load finds him wherever the save had him.
+const TAG: &str = "QuidditchCaptain";
 /// How close the player has to be to talk.
 pub const TALK_RANGE: f32 = 170.0;
 
@@ -35,6 +39,17 @@ fn rot(r: [i32; 3]) -> Value {
     Value::Struct(vec![Value::Int(r[0]), Value::Int(r[1]), Value::Int(r[2])].into())
 }
 
+/// Where the captain stands: `SPOT`, or `HP3_CAPTAIN_AT=x,y,z` (to try other places).
+fn spot() -> Vec3 {
+    std::env::var("HP3_CAPTAIN_AT")
+        .ok()
+        .and_then(|v| {
+            let n: Vec<f32> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+            (n.len() == 3).then(|| Vec3::new(n[0], n[1], n[2]))
+        })
+        .unwrap_or(SPOT)
+}
+
 /// Puts the captain into the loaded level when it is the hub (called once the level has begun). Any other level leaves none.
 pub fn spawn(vm: &mut Vm<'_>) {
     CAPTAIN.with(|c| c.set(None));
@@ -42,21 +57,65 @@ pub fn spawn(vm: &mut Vm<'_>) {
         return;
     }
     let Some(class) = crate::find_object(vm, CLASS) else { return };
-    let spot = std::env::var("HP3_CAPTAIN_AT")
-        .ok()
-        .and_then(|v| {
-            let n: Vec<f32> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
-            (n.len() == 3).then(|| Vec3::new(n[0], n[1], n[2]))
-        })
-        .unwrap_or(SPOT);
+    let spot = spot();
     let args = [Value::Object(Some(class)), Value::Object(None), Value::Empty, v3(spot), rot([0, YAW, 0])];
     let Some(captain) = crate::natives::spawn(vm, None, &args).ok().and_then(|v| v.as_obj()) else { return };
     CAPTAIN.with(|c| c.set(Some(captain)));
+    let tag = vm.db.names.intern(TAG);
+    crate::set(vm, captain, "Tag", Value::Name(tag));
     stand(vm, captain);
     let at = crate::physics::vec(&crate::get(vm, captain, "Location"));
     let line = format!("quidditch: the captain stands in {MAP} at ({:.0}, {:.0}, {:.0})", at.x, at.y, at.z);
     println!("{line}");
     vm.log.push(line);
+}
+
+/// After a saved level was put over the hub (a quick load, the way back from a match): the captain the load spawned may have been
+/// dropped for the one in the save, or both may stand, and a save from before the captain moved has him at an old spot. Every
+/// captain (one carrying `TAG`, or a rider standing on his spot or an old one) is gathered; the one nearest his spot is kept and put
+/// on it, any other is removed. With none left (a save from before the captain existed) a new one is spawned.
+pub fn relink(vm: &mut Vm<'_>) {
+    if !crate::world(vm).map.name.eq_ignore_ascii_case(MAP) {
+        CAPTAIN.with(|c| c.set(None));
+        return;
+    }
+    let Some(class) = vm.db.find(CLASS.rsplit('.').next().unwrap_or(CLASS)) else { return };
+    let spot = spot();
+    let tag = vm.db.names.intern(TAG);
+    let player_pawn = crate::world(vm).player.and_then(|pc| crate::get(vm, pc, "Pawn").as_obj());
+    let riders: Vec<ObjId> = crate::world(vm)
+        .actors
+        .clone()
+        .into_iter()
+        .filter(|&a| !vm.db.objects.get(a).deleted && Some(a) != player_pawn && vm.db.objects.get(a).class == Some(class))
+        .collect();
+    // The hub's own riders (in the Quidditch cutscene's places) carry no tag and stand elsewhere: they are left alone. Distances are
+    // across the ground only: the captain stands on the floor found under his spot, below it.
+    let mut found: Vec<(f32, ObjId)> = Vec::new();
+    for a in riders {
+        let at = crate::physics::vec(&crate::get(vm, a, "Location")).truncate();
+        let near = |p: Vec3| at.distance(p.truncate()) < 300.0;
+        if crate::get(vm, a, "Tag").as_name() == tag || near(spot) || OLD_SPOTS.iter().any(|&p| near(p)) {
+            found.push((at.distance(spot.truncate()), a));
+        }
+    }
+    found.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let Some(&(_, keep)) = found.first() else {
+        spawn(vm);
+        return;
+    };
+    for &(_, extra) in &found[1..] {
+        crate::destroy_actor(vm, extra);
+    }
+    // Back on his spot when the save had him elsewhere (from before he moved), standing on its floor.
+    if found[0].0 > 50.0 {
+        crate::set(vm, keep, "Location", v3(spot));
+        crate::set(vm, keep, "Rotation", rot([0, YAW, 0]));
+        crate::physics::lift_out_of_floor(vm, keep);
+    }
+    crate::set(vm, keep, "Tag", Value::Name(tag));
+    CAPTAIN.with(|c| c.set(Some(keep)));
+    stand(vm, keep);
 }
 
 /// How far the player's pawn is from the captain; None when there is no captain or no player. No match is running when this is

@@ -1,15 +1,9 @@
-//! The debug level list (F11): every map in the install, drawn with a small built-in bitmap font so it works
-//! on any screen, whatever the game's own fonts are doing.
+//! The built-in bitmap font the Settings view is drawn with (so it works on any screen, whatever the game's own fonts are doing),
+//! and the list of the install's maps for its level tab.
 
 use std::path::Path;
 
 use hp3_render::overlay::{Blend, Quad};
-
-pub struct LevelMenu {
-    pub open: bool,
-    maps: Vec<String>,
-    selected: usize,
-}
 
 /// 5x7 glyphs, one byte per row (the low five bits, most significant bit leftmost).
 fn glyph(c: char) -> [u8; 7] {
@@ -58,6 +52,8 @@ fn glyph(c: char) -> [u8; 7] {
         '(' => [0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02],
         ')' => [0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08],
         '/' => [0x01, 0x01, 0x02, 0x04, 0x08, 0x10, 0x10],
+        '+' => [0, 0x04, 0x04, 0x1F, 0x04, 0x04, 0],
+        '<' => [0x02, 0x04, 0x08, 0x10, 0x08, 0x04, 0x02],
         '?' => [0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04],
         '!' => [0x04, 0x04, 0x04, 0x04, 0x04, 0x00, 0x04],
         ',' => [0, 0, 0, 0, 0x0C, 0x04, 0x08],
@@ -93,77 +89,19 @@ pub(crate) fn text(out: &mut Vec<Quad>, text: &str, x: f32, y: f32, s: f32, colo
     }
 }
 
-impl LevelMenu {
-    /// The maps of the install (`Maps/*.unr`), in name order.
-    pub fn new(root: &Path) -> LevelMenu {
-        let dir = ["Maps", "maps"].iter().map(|d| root.join(d)).find(|p| p.is_dir());
-        let mut maps: Vec<String> = dir
-            .and_then(|d| std::fs::read_dir(d).ok())
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|e| {
-                let p = e.path();
-                (p.extension()?.eq_ignore_ascii_case("unr")).then(|| p.file_stem().map(|s| s.to_string_lossy().into_owned()))?
-            })
-            .collect();
-        maps.sort_by_key(|m| m.to_ascii_lowercase());
-        LevelMenu { open: false, maps, selected: 0 }
-    }
-
-    /// Opens the list with `current` selected, or closes it.
-    pub fn toggle(&mut self, current: &str) {
-        self.open = !self.open;
-        if self.open {
-            self.selected = self.maps.iter().position(|m| m.eq_ignore_ascii_case(current)).unwrap_or(0);
-        }
-    }
-
-    pub fn step(&mut self, delta: i32) {
-        let n = self.maps.len() as i32;
-        if n > 0 {
-            self.selected = (self.selected as i32 + delta).clamp(0, n - 1) as usize;
-        }
-    }
-
-    pub fn home(&mut self) {
-        self.selected = 0;
-    }
-
-    pub fn end(&mut self) {
-        self.selected = self.maps.len().saturating_sub(1);
-    }
-
-    /// Closes the list and returns the chosen map.
-    pub fn choose(&mut self) -> Option<String> {
-        self.open = false;
-        self.maps.get(self.selected).cloned()
-    }
-
-    pub fn quads(&self, width: u32, height: u32, current: &str) -> Vec<Quad> {
-        let mut out = Vec::new();
-        if !self.open {
-            return out;
-        }
-        let s = (height as f32 / 240.0).floor().max(2.0);
-        let line = 10.0 * s;
-        let visible = (((height as f32 - 6.0 * line) / line).floor() as usize).clamp(4, 30);
-        let first = self.selected.saturating_sub(visible / 2).min(self.maps.len().saturating_sub(visible));
-        let (x, y) = (width as f32 * 0.5 - 32.0 * 6.0 * s * 0.5, 2.0 * line);
-        pixel(&mut out, x - 2.0 * line, y - line, 32.0 * 6.0 * s + 4.0 * line, (visible as f32 + 4.0) * line, [0.0, 0.0, 0.0, 0.8]);
-        text(&mut out, "SELECT LEVEL", x, y, s, [1.0, 0.9, 0.5, 1.0]);
-        text(&mut out, "UP/DOWN  ENTER GO  F11 CLOSE", x, y + line, s * 0.67, [0.7, 0.7, 0.7, 1.0]);
-        for (row, name) in self.maps.iter().enumerate().skip(first).take(visible) {
-            let yy = y + (row - first + 3) as f32 * line;
-            let chosen = row == self.selected;
-            let color = if chosen { [1.0, 1.0, 1.0, 1.0] } else { [0.65, 0.75, 0.9, 1.0] };
-            if chosen {
-                pixel(&mut out, x - 0.5 * line, yy - 0.2 * line, 32.0 * 6.0 * s + line, line, [0.25, 0.3, 0.55, 0.9]);
-                text(&mut out, ">", x - 0.5 * line + 2.0, yy, s, color);
-            }
-            let label = if name.eq_ignore_ascii_case(current) { format!("{name} (HERE)") } else { name.clone() };
-            text(&mut out, &label, x + 2.0 * 6.0 * s, yy, s, color);
-        }
-        out
-    }
+/// The maps of the install (`Maps/*.unr`), in name order (the Settings view's level list).
+pub fn list_maps(root: &Path) -> Vec<String> {
+    let dir = ["Maps", "maps"].iter().map(|d| root.join(d)).find(|p| p.is_dir());
+    let mut maps: Vec<String> = dir
+        .and_then(|d| std::fs::read_dir(d).ok())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            (p.extension()?.eq_ignore_ascii_case("unr")).then(|| p.file_stem().map(|s| s.to_string_lossy().into_owned()))?
+        })
+        .collect();
+    maps.sort_by_key(|m| m.to_ascii_lowercase());
+    maps
 }

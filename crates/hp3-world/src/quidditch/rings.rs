@@ -252,10 +252,12 @@ pub fn tick(vm: &mut Vm<'_>, m: &mut QuidditchMatch, dt: f32, events: &mut Vec<M
                     if ready { "is open to him" } else { "still wants more rings" },
                 ));
             }
-            TrailEvent::Missed { streak_lost } if streak_lost > 0 => {
-                note(vm, format!("quidditch: tick {}: a ring gone past, the run of {streak_lost} is lost", m.frames));
+            TrailEvent::Missed => {
+                note(vm, format!("quidditch: tick {}: a ring gone past, the run of {} carries on", m.frames, m.rings.trail.streak()));
             }
-            TrailEvent::Missed { .. } => {}
+            TrailEvent::RunExpired { streak_lost } => {
+                note(vm, format!("quidditch: tick {}: no ring for {:.0} s, the run of {streak_lost} is over", m.frames, t.run_timeout));
+            }
         }
     }
     // The owner's rule: no catch without the run of rings. Told to the Snitch every frame, so a run lost to a

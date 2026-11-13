@@ -132,6 +132,13 @@ pub fn set_flight(on: bool) {
     FLIGHT.store(on, Ordering::Relaxed);
 }
 
+static CAPTAIN_NEAR: AtomicBool = AtomicBool::new(false);
+
+/// The player stands within reach of the Quidditch captain: the touch controls show their TALK button (it sends E).
+pub fn set_captain_near(on: bool) {
+    CAPTAIN_NEAR.store(on, Ordering::Relaxed);
+}
+
 fn lefty_flight() -> bool {
     std::env::var("HP3_LEFTY_FLIGHT").is_ok_and(|v| v != "0")
 }
@@ -203,6 +210,8 @@ native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeVendorActive, 
 // A Quidditch match is the broom the overlay knows: it shows its broom layout (a steering stick that presses
 // nothing, a boost button that toggles and a brake that is held; see `crate::broom`).
 native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeOnBroom, crate::broom::on_broom());
+// Next to the Quidditch captain in the Grounds hub: the overlay shows a TALK button (the E key).
+native_bool!(Java_io_github_flipendo_spike_FlipendoActivity_nativeCaptainNear, CAPTAIN_NEAR.load(Ordering::Relaxed));
 
 native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetDebugMode, _on: u8);
 native_unit!(Java_io_github_flipendo_spike_FlipendoActivity_nativeSetAutoJump, _on: u8);

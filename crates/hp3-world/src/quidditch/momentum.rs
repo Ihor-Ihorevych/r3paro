@@ -24,8 +24,9 @@ pub struct MomentumTuning {
     pub decay: f32,
     /// What a Bludger hit takes off the charge.
     pub hit_drain: f32,
-    /// The boost: how long it lasts (s), how much speed it adds to the target (uu/s), and how long the
-    /// cooldown after it is, drawn between the two (s).
+    /// The boost: how long one tap of it lasts (s), how much speed it adds to the target (uu/s), and how long
+    /// the cooldown after it is, drawn between the two (s). No cooldown (the owner's rule: boosting is possible
+    /// all the time): a tap always starts the boost or tops it back up to `boost_time`.
     pub boost_time: f32,
     pub boost_add: f32,
     pub cooldown: (f32, f32),
@@ -46,8 +47,11 @@ impl Default for MomentumTuning {
             decay: 0.12,
             hit_drain: 0.25,
             boost_time: 3.0,
-            boost_add: 320.0,
-            cooldown: (4.0, 5.0),
+            // With the boost always there it is cut from 320: base + boost (620) stays under the Snitch's near
+            // speed (734), so the rings still decide the chase; a full charge + boost (1010) out-flies even its
+            // dodge (955).
+            boost_add: 250.0,
+            cooldown: (0.0, 0.0),
         }
     }
 }
@@ -84,10 +88,10 @@ impl Momentum {
         Momentum { tuning, charge: 0.0, pending: 0.0, since_ring: 0.0, boost_left: 0.0, cooldown: 0.0, rng: 0x9E37_79B9_7F4A_7C15 }
     }
 
-    /// Starts a boost if one is allowed (none running, none cooling down). It lasts `boost_time`, then the
-    /// cooldown runs for a random 4 to 5 seconds. True if it started.
+    /// Starts a boost, or tops a running one back up to `boost_time`, unless a cooldown is running (the default
+    /// tuning has none, so a tap always boosts). True if it started or was topped up.
     pub fn try_boost(&mut self) -> bool {
-        if self.boost_left > 0.0 || self.cooldown > 0.0 {
+        if self.cooldown > 0.0 {
             return false;
         }
         self.boost_left = self.tuning.boost_time;
@@ -241,6 +245,26 @@ mod tests {
             d.step(DT);
         }
         assert!(d.charge() < 1e-4, "{}", d.charge());
+    }
+
+    /// Boosting is possible all the time: a tap during a boost tops it up, and one right after it ends starts the
+    /// next (there is no cooldown).
+    #[test]
+    fn the_boost_is_always_available() {
+        let t = MomentumTuning::default();
+        let mut m = Momentum::default();
+        assert!(m.try_boost());
+        assert_eq!(m.target_speed(), t.base_speed + t.boost_add);
+        for _ in 0..60 {
+            m.step(DT);
+        }
+        assert!(m.try_boost(), "a tap during the boost tops it up");
+        for _ in 0..(t.boost_time * 60.0) as u32 + 2 {
+            m.step(DT);
+        }
+        assert_eq!(m.target_speed(), t.base_speed, "it ran out");
+        assert!(m.try_boost(), "and starts again at once");
+        assert_eq!(m.boost_state(), 2.0);
     }
 
     #[test]

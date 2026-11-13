@@ -30,6 +30,8 @@ pub fn run(vm: &mut Vm<'_>, command: &str, level: &mut Option<String>) {
     let (Some(verb), arg) = (words.next(), words.next()) else { return };
     match verb {
         "gfx" => gfx(vm, arg.unwrap_or(""), words.next()),
+        "fps" => fps(vm),
+        "fov" => fov(),
         "quicksave" => {
             let ok = hp3_world::save::write(vm, QUICK_SLOT);
             eprintln!("quick save: {}", if ok { "written" } else { "failed" });
@@ -142,20 +144,38 @@ fn dump_near(vm: &mut Vm<'_>, radius: f32) {
     }
 }
 
-/// The spell the button just picked and when, for the indicator (it stays up a few seconds even when the game chooses again).
-static SPELL_TOAST: Mutex<Option<(String, std::time::Instant)>> = Mutex::new(None);
+/// The on/off graphics switches: the `gfx` word, the settings key and the quality module's getter and setter.
+type Switch = (&'static str, &'static str, fn() -> bool, fn(bool));
 
-/// The spell the button picked in the last few seconds, as its label.
-pub fn spell_toast() -> Option<String> {
-    let t = SPELL_TOAST.lock().ok()?;
-    t.as_ref().filter(|(_, at)| at.elapsed().as_secs_f32() < 2.5).map(|(l, _)| l.clone())
-}
+const SWITCHES: [Switch; 4] = [
+    ("tonemap", "ToneMapping", hp3_render::quality::tonemap, hp3_render::quality::set_tonemap),
+    ("rim", "RimLight", hp3_render::quality::rim_light, hp3_render::quality::set_rim_light),
+    ("heightfog", "HeightFog", hp3_render::quality::height_fog, hp3_render::quality::set_height_fog),
+    ("softparticles", "SoftParticles", hp3_render::quality::soft_particles, hp3_render::quality::set_soft_particles),
+];
 
-/// `gfx shadows [on|off]` and `gfx quality [low|high]` (no value: the other way), kept in
-/// `[hp3.app]` of the settings.
+/// `gfx shadows [on|off]`, `gfx quality [low|high]`, `gfx aa [off|fxaa|msaa]` (no value: the next one) and
+/// `gfx tonemap|rim|heightfog|softparticles [on|off]` (no value: the other way), kept in `[hp3.app]` of the settings.
 fn gfx(vm: &mut Vm<'_>, what: &str, value: Option<&str>) {
     use hp3_render::quality;
+    if let Some(&(word, key, get, set)) = SWITCHES.iter().find(|s| s.0 == what) {
+        let on = match value {
+            Some("on") => true,
+            Some("off") => false,
+            _ => !get(),
+        };
+        set(on);
+        hp3_world::settings::store(vm, "hp3.app", key, if on { "True" } else { "False" });
+        eprintln!("gfx: {word} {}", if on { "on" } else { "off" });
+        return;
+    }
     match what {
+        "aa" => {
+            let aa = value.and_then(quality::Aa::parse).unwrap_or_else(|| quality::aa().next());
+            quality::set_aa(aa);
+            hp3_world::settings::store(vm, "hp3.app", "AntiAliasing", aa.label());
+            eprintln!("gfx: anti-aliasing {}", aa.label());
+        }
         "shadows" => {
             let on = match value {
                 Some("on") => true,
@@ -189,6 +209,39 @@ pub fn load_graphics(vm: &Vm<'_>) {
     if let Some(q) = hp3_world::settings::text(vm, "hp3.app", "ShadowQuality") {
         quality::set_high_shadows(q.eq_ignore_ascii_case("high"));
     }
+    // The environment wins over a saved choice (for testing a setting by hand).
+    if std::env::var_os("HP3_AA").is_none()
+        && std::env::var_os("HP3_FXAA").is_none()
+        && let Some(a) = hp3_world::settings::text(vm, "hp3.app", "AntiAliasing").and_then(|t| quality::Aa::parse(&t.replace("MSAA 4X", "msaa")))
+    {
+        quality::set_aa(a);
+    }
+    let env_names = ["HP3_TONEMAP", "HP3_RIM", "HP3_HEIGHT_FOG", "HP3_SOFT_PARTICLES"];
+    for (&(_, key, get, set), env) in SWITCHES.iter().zip(env_names) {
+        if std::env::var_os(env).is_none() && hp3_world::settings::text(vm, "hp3.app", key).is_some() {
+            set(hp3_world::settings::flag(vm, "hp3.app", key, get()));
+        }
+    }
+}
+
+/// `fps next`: the frame rate limit steps through the usual refresh rates, then none (the desktop's F10; the phone's touch
+/// panel has its own setting).
+fn fps(vm: &mut Vm<'_>) {
+    const STEPS: [u32; 8] = [30, 60, 90, 120, 144, 165, 240, 0];
+    let now = crate::platform::fps_limit();
+    let next = STEPS.iter().position(|&s| s == now).map_or(STEPS[0], |i| STEPS[(i + 1) % STEPS.len()]);
+    crate::platform::set_fps_limit(next);
+    hp3_world::settings::store(vm, "hp3.app", "FpsLimit", &next.to_string());
+    eprintln!("fps limit: {}", if next == 0 { "none".to_string() } else { next.to_string() });
+}
+
+/// `fov next`: the field of view offset steps by 5 degrees from -20 to +30, then back to -20 (the desktop's `[` and `]` keys
+/// change it freely; the phone's touch panel has its own slider).
+fn fov() {
+    let now = crate::platform::fov_offset();
+    let next = if now >= 30.0 { -20.0 } else { ((now / 5.0).floor() + 1.0) * 5.0 };
+    let v = crate::platform::nudge_fov(next - now);
+    eprintln!("fov offset: {v:+}");
 }
 
 /// `quidditch [next]` starts a match against the house the league says is next and sends the game to the
@@ -258,16 +311,10 @@ fn cheat(vm: &mut Vm<'_>, name: &str) {
         }
         // Pumpkin pasties: no helper exists, so they are added to the level's inventory carrier the way `VI_PumpkinPasty.Purchased` does.
         "pasties" => {
-            let carrier = hp3_world::world(vm)
-                .level_info
-                .and_then(|li| hp3_world::get(vm, li, "InventoryCarrierPawn").as_obj())
-                .or_else(|| hp3_world::get(vm, pc, "Pawn").as_obj());
-            match (carrier, hp3_world::find_object(vm, "HGame.PumpkinPastyCollection")) {
-                (Some(carrier), Some(class)) => {
-                    hp3_world::fire(vm, carrier, "AddToInventoryCollection", &mut [Value::Object(Some(class)), Value::Int(10)]);
-                    eprintln!("cheat: 10 pumpkin pasties");
-                }
-                _ => eprintln!("cheat: no pawn or no PumpkinPastyCollection class"),
+            if hp3_world::gifts::give_pasties(vm, 10) {
+                eprintln!("cheat: 10 pumpkin pasties");
+            } else {
+                eprintln!("cheat: no pawn or no PumpkinPastyCollection class");
             }
         }
         "beatboss" => {
@@ -301,9 +348,6 @@ fn cheat(vm: &mut Vm<'_>, name: &str) {
         "spellswitch" => {
             let label = hp3_world::natives::carpe_toggle(vm);
             eprintln!("cheat: carpe button -> {label}");
-            if let Ok(mut t) = SPELL_TOAST.lock() {
-                *t = Some((label, std::time::Instant::now()));
-            }
         }
         // Carpe Retractum pulls a fire crab toward the caster (see `carpe_on_crab` in hp3-world): an option, off by default.
         "carpecrab" => {

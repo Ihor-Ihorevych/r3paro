@@ -12,6 +12,7 @@ pub mod casttest;
 pub mod collision;
 pub mod config;
 pub mod fonts;
+pub mod gifts;
 pub mod nav;
 pub mod gui;
 pub mod input;
@@ -562,7 +563,11 @@ pub fn travel(vm: &mut Vm<'_>, url: &str) -> Result<Rc<Package>, VmError> {
     // Loading a saved game: the map is loaded as for any travel and the saved level put over it.
     if let Some(slot) = save::option_slot(url) {
         save::finish_load(vm, slot);
+        // The saved level replaced the actors the load made, the captain among them: the one now standing is found again.
+        quidditch::captain::relink(vm);
     }
+    // Back from a Quidditch match: the return slot is done with, and a win is paid.
+    quidditch::menu::after_level_ready(vm, url);
     Ok(map)
 }
 

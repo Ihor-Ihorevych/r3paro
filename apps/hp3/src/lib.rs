@@ -28,11 +28,11 @@ pub mod android;
 mod audio;
 pub mod broom;
 mod captaintalk;
-mod cheatmenu;
 pub mod commands;
 mod gamelog;
 mod gamepad;
 mod levelmenu;
+mod settingsmenu;
 mod present;
 mod quidbutton;
 use hp3_script::Value;
@@ -99,6 +99,8 @@ mod platform {
     pub fn note_saved() {}
     /// Buckbeak's flight (the phone's touch layout can swap its halves; the desktop has nothing to swap).
     pub fn set_flight(_on: bool) {}
+    /// The player can talk to the Quidditch captain (the phone shows its TALK button; the desktop has the E key).
+    pub fn set_captain_near(_on: bool) {}
 }
 
 /// The ini's name for a key.
@@ -474,7 +476,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
     // Frames are drawn off-screen and shown by a thread of their own, so waiting for the display does not hold up the game.
     let mut presenter = present::Presenter::new(surface, &caps, renderer.device.clone(), renderer.queue.clone(), format, width, height)
         .ok_or("the presenting thread could not be started")?;
-    let mut depth = renderer.depth_target(width.max(1), height.max(1));
+    let mut targets = hp3_render::gpu::FrameTargets::new(&renderer, width.max(1), height.max(1));
 
     let (start, start_rot) = scene.player_starts.first().copied().unwrap_or((Vec3::ZERO, [0, 0, 0]));
     // The level's geometry and pictures are on the GPU: the CPU copies (tens of megabytes) are not kept.
@@ -508,17 +510,19 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
     let mut fps_timer = Instant::now();
     let mut free_camera = false;
     let mut in_menu = false;
-    // F11 level list; G ghost, F fly, H walk (debug movement).
-    let mut levels = levelmenu::LevelMenu::new(root);
-    // F12 cheat list (the phone debug menu's entries).
-    let mut cheats = cheatmenu::CheatMenu::new();
+    // The Settings view (F12; F11 opens it on the level list; the phone's touch panel opens it with `menu <tab>`).
+    // G ghost, F fly, H walk (debug movement).
+    let mut settings_view = settingsmenu::Settings::new(root);
     let mut captain_talk = captaintalk::CaptainTalk::new();
     let mut captain_offer = captaintalk::Offer::SeasonOver;
     let mut current_map = map.clone();
     platform::set_level(&current_map);
-    // HP3_OPEN_LEVELS=1 starts with the list open (for screenshots).
+    // HP3_OPEN_LEVELS=1 starts with the level list open, HP3_OPEN_SETTINGS=<tab> on that tab (for screenshots).
     if std::env::var_os("HP3_OPEN_LEVELS").is_some() {
-        levels.toggle(&current_map);
+        settings_view.open_tab(settingsmenu::Tab::Levels, &current_map);
+    }
+    if let Some(tab) = std::env::var("HP3_OPEN_SETTINGS").ok().as_deref().and_then(settingsmenu::Tab::parse) {
+        settings_view.open_tab(tab, &current_map);
     }
     let mut pending_level: Option<String> = None;
     let mut surface_was_gone = false;
@@ -546,24 +550,33 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             }
         }
         // Menus take the mouse as a visible cursor; play takes it relative.
-        let menu = hp3_world::gui::menu_open(&mut vm);
+        // The captain's speech box counts as a menu too: the mouse is a visible cursor for its buttons, and on the phone the touch
+        // controls step aside so a finger taps them.
+        let game_menu = hp3_world::gui::menu_open(&mut vm);
+        let match_running = hp3_world::world(&mut vm).quidditch.is_some();
+        // The Quidditch captain in the Grounds hub: a prompt while the player stands near, a speech box once they talk.
+        if captain_talk.open && (game_menu || match_running) {
+            captain_talk.open = false;
+        }
+        // The Settings view is a menu as well (a visible cursor; on the phone the touch controls step aside and a finger taps it).
+        let menu = game_menu || captain_talk.open || settings_view.open;
         if menu != in_menu {
             in_menu = menu;
             platform::set_in_menu(menu);
             sdl.mouse().set_relative_mouse_mode(&window, !menu);
         }
-        // The Quidditch captain in the Grounds hub: a prompt while the player stands near, a speech box once they talk.
-        let match_running = hp3_world::world(&mut vm).quidditch.is_some();
-        if captain_talk.open && (in_menu || match_running) {
-            captain_talk.open = false;
-        }
-        let captain_near = !in_menu && !cheats.open && !levels.open && !captain_talk.open && !match_running && hp3_world::quidditch::captain::near(&mut vm);
-        // The QUIDDITCH button is on the front-end menu and on the in-game menu (its tabbed pages), while no match runs and no debug
-        // list is open.
-        let quid_button = in_menu && !levels.open && !cheats.open && hp3_world::world(&mut vm).quidditch.is_none() && {
+        let captain_near = !in_menu && !settings_view.open && !captain_talk.open && !match_running && hp3_world::quidditch::captain::near(&mut vm);
+        platform::set_captain_near(captain_near);
+        // The QUIDDITCH button is on the front-end menu and on the in-game menu (its tabbed pages), while no match runs and the
+        // Settings view is shut.
+        let quid_button = in_menu && !settings_view.open && hp3_world::world(&mut vm).quidditch.is_none() && {
             let front = hp3_world::quidditch::menu::front_end_map(&mut vm);
             front.eq_ignore_ascii_case(&current_map) || hp3_world::gui::top_menu_class(&mut vm).is_some_and(|c| c.starts_with("Tab_"))
         };
+        let status = settings_status(&vm, &current_map);
+        // Window coordinates to the render target's pixels (the mouse and a finger).
+        let pixel_scale = width as f32 / window.size().0.max(1) as f32;
+        let to_pixels = move |x: f32, y: f32| (x * pixel_scale, y * pixel_scale);
         for event in events.poll_iter() {
             if let Some(p) = &mut pad
                 && matches!(
@@ -587,6 +600,38 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                 Event::AudioDeviceAdded { iscapture: false, .. } | Event::AudioDeviceRemoved { iscapture: false, .. } => {
                     audio_reopen_at = Some(Instant::now() + std::time::Duration::from_millis(700));
                 }
+                // The Settings view: F12 opens or shuts it, F11 opens it on the level list; while open it takes the keyboard, the
+                // mouse and the fingers.
+                Event::KeyDown { scancode: Some(Scancode::F12), repeat: false, .. } => settings_view.toggle(),
+                Event::KeyDown { scancode: Some(Scancode::F11), repeat: false, .. } => {
+                    if settings_view.open {
+                        settings_view.close();
+                    } else {
+                        settings_view.open_tab(settingsmenu::Tab::Levels, &current_map);
+                    }
+                }
+                Event::KeyDown { scancode: Some(sc), .. } if settings_view.open => {
+                    if let Some(c) = settings_view.key(sc, &status, width, height) {
+                        commands::push(c);
+                    }
+                }
+                Event::KeyUp { .. } if settings_view.open => {}
+                Event::MouseButtonDown { mouse_btn: MouseButton::Left, x, y, .. } if settings_view.open => {
+                    let (px, py) = to_pixels(x, y);
+                    settings_view.press(px, py, &status, width, height);
+                }
+                Event::MouseButtonUp { mouse_btn: MouseButton::Left, x, y, .. } if settings_view.open => {
+                    let (px, py) = to_pixels(x, y);
+                    if let Some(c) = settings_view.release(px, py, &status, width, height) {
+                        commands::push(c);
+                    }
+                }
+                Event::MouseMotion { x, y, .. } if settings_view.open => {
+                    let (px, py) = to_pixels(x, y);
+                    settings_view.motion(px, py, &status, width, height);
+                }
+                Event::MouseWheel { y, .. } if settings_view.open => settings_view.wheel(y, &status, width, height),
+                Event::MouseButtonDown { .. } | Event::MouseButtonUp { .. } if settings_view.open => {}
                 Event::MouseButtonDown { mouse_btn: MouseButton::Left, x, y, .. } if quid_button && {
                     let (ww, _) = window.size();
                     let scale = width as f32 / ww.max(1) as f32;
@@ -597,8 +642,6 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                     let scale = width as f32 / ww.max(1) as f32;
                     quidbutton::hit(x * scale, y * scale, width, height)
                 } => {}
-                Event::KeyDown { scancode: Some(Scancode::F11), repeat: false, .. } if !cheats.open => levels.toggle(&current_map),
-                Event::KeyDown { scancode: Some(Scancode::F12), repeat: false, .. } if !levels.open => cheats.toggle(),
                 // F7: gamma, brightness and contrast back to the defaults (also while a menu is open).
                 Event::KeyDown { scancode: Some(Scancode::F7), repeat: false, .. } => commands::push("resetpicture"),
                 // F4: a screenshot with where the player is burned into it, plus the full F8 report beside it, in <root>/screenshots.
@@ -636,32 +679,6 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                     eprintln!("fps limit: {}", if next == 0 { "none".to_string() } else { next.to_string() });
                 }
                 // The cheat list takes the keyboard and the mouse the same way.
-                Event::KeyDown { scancode: Some(sc), .. } if cheats.open => match sc {
-                    Scancode::Up => cheats.step(-1),
-                    Scancode::Down => cheats.step(1),
-                    Scancode::Home => cheats.home(),
-                    Scancode::End => cheats.end(),
-                    Scancode::Return | Scancode::KpEnter => match cheats.choose() {
-                        cheatmenu::Pick::Command(c) => commands::push(c),
-                        cheatmenu::Pick::Levels => levels.toggle(&current_map),
-                    },
-                    Scancode::Escape => cheats.open = false,
-                    _ => {}
-                },
-                Event::MouseMotion { .. } | Event::MouseButtonDown { .. } if cheats.open => {}
-                // While the level list is open it takes the keyboard and the mouse.
-                Event::KeyDown { scancode: Some(sc), .. } if levels.open => match sc {
-                    Scancode::Up => levels.step(-1),
-                    Scancode::Down => levels.step(1),
-                    Scancode::PageUp => levels.step(-10),
-                    Scancode::PageDown => levels.step(10),
-                    Scancode::Home => levels.home(),
-                    Scancode::End => levels.end(),
-                    Scancode::Return | Scancode::KpEnter => pending_level = levels.choose(),
-                    Scancode::Escape => levels.open = false,
-                    _ => {}
-                },
-                Event::MouseMotion { .. } | Event::MouseButtonDown { .. } if levels.open => {}
                 // E next to the captain starts the talk; while it is open it takes the keyboard (Y or Enter: play, N or Escape: not now).
                 Event::KeyDown { scancode: Some(Scancode::E), repeat: false, .. } if captain_near => {
                     captain_offer = match hp3_world::quidditch::menu::next_opponent(&mut vm) {
@@ -680,6 +697,21 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                     Scancode::N | Scancode::Escape => captain_talk.open = false,
                     _ => {}
                 },
+                // A click (on the phone a tap) on one of the answers' buttons answers as its key does.
+                Event::MouseButtonDown { mouse_btn: MouseButton::Left, x, y, .. } if captain_talk.open => {
+                    let (ww, _) = window.size();
+                    let scale = width as f32 / ww.max(1) as f32;
+                    match captain_talk.hit(x * scale, y * scale, width, height, &captain_offer) {
+                        Some(captaintalk::Answer::Yes) => {
+                            captain_talk.open = false;
+                            if matches!(captain_offer, captaintalk::Offer::Match(_)) {
+                                commands::push("quidditch");
+                            }
+                        }
+                        Some(captaintalk::Answer::No) => captain_talk.open = false,
+                        None => {}
+                    }
+                }
                 Event::MouseMotion { .. } | Event::MouseButtonDown { .. } if captain_talk.open => {}
                 Event::KeyDown { scancode: Some(sc @ (Scancode::G | Scancode::F | Scancode::H)), repeat: false, .. } if !in_menu => {
                     let mode = match sc {
@@ -741,7 +773,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                     hp3_world::world(&mut vm).input.key_up(key);
                 }
                 // Q: Carpe or the crab's own spell for the next lock-on (only with "Carpe pulls crabs" on).
-                Event::KeyDown { scancode: Some(Scancode::Q), repeat: false, .. } if !in_menu && !cheats.open && !levels.open && hp3_world::natives::carpe_crab_on(&vm) => {
+                Event::KeyDown { scancode: Some(Scancode::Q), repeat: false, .. } if !in_menu && !settings_view.open && hp3_world::natives::carpe_crab_on(&vm) => {
                     let on = !hp3_world::natives::CARPE_PICK.load(std::sync::atomic::Ordering::Relaxed);
                     hp3_world::natives::CARPE_PICK.store(on, std::sync::atomic::Ordering::Relaxed);
                     eprintln!("carpe for crabs: {}", if on { "on" } else { "off" });
@@ -804,7 +836,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                 Event::Window { win_event: WindowEvent::PixelSizeChanged(w, h), .. } => {
                     (width, height) = (w.max(1) as u32, h.max(1) as u32);
                     presenter.resize(width, height);
-                    depth = renderer.depth_target(width, height);
+                    targets.update(&renderer, width, height);
                 }
                 Event::MouseMotion { xrel, yrel, .. } => {
                     if free_camera {
@@ -836,6 +868,18 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             }
         }
         for command in commands::take() {
+            // `menu <tab>` (the phone's touch panel), `menu close`, `menu`: the Settings view, which lives here.
+            if let Some(rest) = command.strip_prefix("menu") {
+                match rest.trim() {
+                    "close" => settings_view.close(),
+                    "" | "toggle" => settings_view.toggle(),
+                    name => match settingsmenu::Tab::parse(name) {
+                        Some(t) => settings_view.open_tab(t, &current_map),
+                        None => eprintln!("menu: unknown tab '{name}'"),
+                    },
+                }
+                continue;
+            }
             commands::run(&mut vm, &command, &mut pending_level);
         }
         // A Quidditch match: the phone's touch layout flies the broom (its stick and buttons come in through
@@ -880,7 +924,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
                 Err(e) => eprintln!("surface: {e}"),
             }
             presenter.resize(width, height);
-            depth = renderer.depth_target(width.max(1), height.max(1));
+            targets.update(&renderer, width.max(1), height.max(1));
         }
         // Settings > FPS limit: a frame takes at least that long.
         if let Some(budget) = platform::frame_budget() {
@@ -1067,42 +1111,28 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         let slot = presenter.take();
         stages.push(("wait", frame_start.elapsed().as_secs_f32() * 1000.0));
         let view = presenter.view(slot).clone();
-        let cmd = dynamic.draw_full(
+        // The anti-aliasing may have changed since the last frame (the Settings view): the targets follow it.
+        targets.update(&renderer, width, height);
+        let cmd = dynamic.draw_frame(
             &renderer,
             &gpu_scene,
             &refs,
             particle_draw.as_ref().map(|d| (&particle_renderer, d)),
             &camera,
-            &view,
-            &depth,
+            &targets.target(&view),
             width as f32 / height as f32,
         );
         stages.push(("draw", frame_start.elapsed().as_secs_f32() * 1000.0));
         hp3_world::world(&mut vm).canvas.ui_scale = platform::ui_scale();
         let mut quads = hp3_engine::hud_quads(&mut vm, &loader, &mut hud_cache, width, height);
         quads.extend(hp3_engine::screen_flash(&mut vm, width, height));
-        quads.extend(levels.quads(width, height, &current_map));
-        quads.extend(cheats.quads(width, height));
+        if settings_view.open {
+            quads.extend(settings_view.quads(width, height, &settings_status(&vm, &current_map)));
+        }
         if captain_talk.open {
             quads.extend(captain_talk.quads(width, height, &captain_offer));
         } else if captain_near {
             quads.extend(captain_talk.prompt(width, height));
-        }
-        // The spell indicator: with "Carpe pulls crabs" on, or while a spell picked by hand (the phone's spell button) is in the wand,
-        // and for a moment after the button was pressed.
-        let crab_option = hp3_world::natives::carpe_crab_on(&vm);
-        let hand_pick = hp3_world::natives::spell_pick();
-        let toast = commands::spell_toast();
-        // (Not in a Quidditch match: spells are not cast there, and the box sits over the match's score banner.)
-        if (crab_option || hand_pick.is_some() || toast.is_some()) && hp3_world::world(&mut vm).quidditch.is_none() {
-            let spell = hp3_world::natives::wand_spell_name(&mut vm).unwrap_or_else(|| "-".to_string());
-            let picked = hp3_world::natives::CARPE_PICK.load(std::sync::atomic::Ordering::Relaxed);
-            let mode = match (&hand_pick, &toast) {
-                (Some(_), _) => "PICKED",
-                (None, Some(_)) => "AUTO",
-                _ => "",
-            };
-            quads.extend(cheatmenu::spell_indicator(&spell, mode, crab_option.then_some(picked), width, height));
         }
         if quid_button {
             quads.extend(quidbutton::quads(width, height));
@@ -1183,6 +1213,16 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         }
     }
     Ok(())
+}
+
+/// What the Settings view shows of the game's state.
+fn settings_status(vm: &Vm<'_>, current_map: &str) -> settingsmenu::Status {
+    settingsmenu::Status {
+        carpe_crab: hp3_world::settings::flag(vm, "hp3.app", "CarpeCrab", false),
+        fps_limit: platform::fps_limit(),
+        fov_offset: platform::fov_offset(),
+        current_map: current_map.to_string(),
+    }
 }
 
 /// The camera `t` of the way from `a` to `b` (angles the short way round).

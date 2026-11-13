@@ -210,7 +210,7 @@ fn present_loop(
     });
     let mut frames_seen = 0u64;
     let mut adjust: Option<Adjust> = None;
-    let fxaa = fxaa_enabled();
+
     for message in messages {
         match message {
             Msg::Quit => break,
@@ -260,6 +260,7 @@ fn present_loop(
                 };
                 if let Some(frame) = frame {
                     let mut encoder = device.create_command_encoder(&Default::default());
+                    let fxaa = hp3_render::quality::fxaa_now();
                     if can_copy && look == NEUTRAL && !fxaa {
                         encoder.copy_texture_to_texture(image.as_image_copy(), frame.texture.as_image_copy(), wgpu::Extent3d { width: width.min(frame.texture.width()), height: height.min(frame.texture.height()), depth_or_array_layers: 1 });
                     } else {
@@ -272,16 +273,6 @@ fn present_loop(
                 let _ = free.send(slot);
             }
         }
-    }
-}
-
-/// Whether the shown frame goes through FXAA (edge smoothing). `HP3_FXAA=0|1` decides; by default on for the desktop and
-/// off on the phone, where the extra full-screen pass costs more than a plain copy.
-fn fxaa_enabled() -> bool {
-    match std::env::var("HP3_FXAA").ok().as_deref() {
-        Some("0" | "off" | "false") => false,
-        Some(_) => true,
-        None => !cfg!(target_os = "android"),
     }
 }
 

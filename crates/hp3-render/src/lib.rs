@@ -1,6 +1,7 @@
 //! The wgpu renderer.
 
 pub mod dynamic;
+pub mod fx;
 pub mod gpu;
 pub mod meshes;
 pub mod overlay;

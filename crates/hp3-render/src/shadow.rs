@@ -149,8 +149,8 @@ pub struct ShadowMaps {
 /// units of each map).
 pub const ACTOR_UNIFORM_BYTES: u64 = 256;
 
-/// Layers of the characters' shadow texture, the most nested maps there can be (the phone, which has no room for more, has one).
-pub const ACTOR_LAYERS: u32 = if cfg!(target_os = "android") { 1 } else { 3 };
+/// Layers of the characters' shadow texture, the most nested maps there can be (the Low tier uses only the first).
+pub const ACTOR_LAYERS: u32 = 3;
 
 impl ShadowMaps {
     pub fn new(device: &wgpu::Device) -> ShadowMaps {

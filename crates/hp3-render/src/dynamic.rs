@@ -23,18 +23,12 @@ pub fn take_draw_counts() -> (u64, u64, u64) {
 }
 
 const SHADER: &str = r#"
-struct Globals { view_proj: mat4x4<f32>, fog_color: vec4<f32>, fog: vec4<f32> };
-// How much of the picture's own color is left at a fragment (1 outside the fog): linear fog by depth from `fog.x` to `fog.y`.
-fn fog_factor(w: f32) -> f32 {
-    if (globals.fog.z < 0.5) { return 1.0; }
-    return clamp((globals.fog.y - 1.0 / w) / max(globals.fog.y - globals.fog.x, 1.0), 0.0, 1.0);
-}
+// (The camera's block `globals` and its helpers come from `fx::globals_wgsl`.)
 // One light as the original hands it to Direct3D: a = position and kind (0 point, 1 sun, 2 spot), b = direction and range,
 // c = diffuse color and cos(phi/2), d = attenuation 0, 1, 2 and cos(theta/2).
 struct Light { a: vec4<f32>, b: vec4<f32>, c: vec4<f32>, d: vec4<f32> };
 // The model matrix, the actor's ambient light (w = how many lights), extra.x = how much of it is faded out (0 solid) and its lights.
 struct Model { model: mat4x4<f32>, ambient: vec4<f32>, extra: vec4<f32>, lights: array<Light, 8> };
-@group(0) @binding(0) var<uniform> globals: Globals;
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
 @group(2) @binding(0) var<uniform> m: Model;
@@ -46,7 +40,7 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @l
               @location(3) normal: vec3<f32>) -> VsOut {
     var o: VsOut;
     let wp = m.model * vec4<f32>(position, 1.0);
-    o.pos = globals.view_proj * wp;
+    o.pos = squeeze(globals.view_proj * wp);
     o.uv = uv;
     o.fade = 1.0 - m.extra.x;
     o.world = wp.xyz;
@@ -86,21 +80,33 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @l
 
 @fragment fn fs(i: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, i.uv);
-    if (c.a < 0.5) { discard; }
+    let cover = coverage(c.a);
+    if (cover <= 0.0) { discard; }
     var light = i.light;
     // Receives the characters' shadow like the level does (self-lit orbs, with no normal, do not).
     if (dot(i.wnorm, i.wnorm) > 0.0) {
         let s = actor_shadow_term(i.world, normalize(i.wnorm), i.pos.xy, 3.0);
         light = light * s * mix(vec3<f32>(0.88, 0.94, 1.0), vec3<f32>(1.0), s);
+        light = light + rim(normalize(i.wnorm), i.world);
     }
-    return vec4<f32>(mix(globals.fog_color.rgb, c.rgb * light * 2.0, fog_factor(i.pos.w)), 1.0);
+    return vec4<f32>(finish(c.rgb * light * 2.0, i.world, i.pos.w), cover);
+}
+
+// The rim light (`fx.y`): where the surface turns away from the viewer it catches a soft light of the actor's surroundings
+// (its ambient, a little lifted so it shows in dark rooms), which lifts the characters off the background. The normal may face
+// either way (two-sided sections), so only how much it turns away counts.
+fn rim(n: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
+    if (globals.fx.y < 0.5) { return vec3<f32>(0.0); }
+    let v = normalize(globals.cam.xyz - world);
+    let edge = pow(1.0 - clamp(abs(dot(n, v)), 0.0, 1.0), 3.0);
+    return edge * 0.25 * clamp(m.ambient.rgb * 2.5 + vec3<f32>(0.12), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
 // Sections blended by their alpha (flame cards): nothing is cut out, the alpha goes to the blend.
 @fragment fn fs_blend(i: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, i.uv);
     if (c.a < 0.01) { discard; }
-    return vec4<f32>(c.rgb * i.light * 2.0, c.a * i.fade * fog_factor(i.pos.w));
+    return vec4<f32>(tonemap(c.rgb * i.light * 2.0), c.a * i.fade * fog_factor(i.pos.w) * (1.0 - height_fog(i.world)));
 }
 "#;
 
@@ -124,14 +130,12 @@ pub struct BlobShadow {
 }
 
 const SHADOW_SHADER: &str = r#"
-struct Globals { view_proj: mat4x4<f32>, fog_color: vec4<f32>, fog: vec4<f32> };
-@group(0) @binding(0) var<uniform> globals: Globals;
 struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) opacity: f32 };
 @vertex fn vs(@builtin(vertex_index) vi: u32, @location(0) c: vec4<f32>, @location(1) u: vec4<f32>, @location(2) v: vec4<f32>) -> VsOut {
     var corners = array<vec2<f32>, 4>(vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(-1.0, 1.0), vec2<f32>(1.0, 1.0));
     let q = corners[vi];
     var o: VsOut;
-    o.pos = globals.view_proj * vec4<f32>(c.xyz + u.xyz * q.x + v.xyz * q.y, 1.0);
+    o.pos = squeeze(globals.view_proj * vec4<f32>(c.xyz + u.xyz * q.x + v.xyz * q.y, 1.0));
     o.uv = q;
     o.opacity = c.w;
     return o;
@@ -242,16 +246,117 @@ pub struct GpuMesh {
     pub bounds_radius: f32,
 }
 
-pub struct Dynamic {
-    pipeline: wgpu::RenderPipeline,
+/// The actors' pipelines for one sample count.
+struct DynPipes {
+    opaque: wgpu::RenderPipeline,
     /// Sections blended by alpha and added by alpha: depth-tested, not written.
-    alpha_pipeline: wgpu::RenderPipeline,
-    additive_pipeline: wgpu::RenderPipeline,
+    alpha: wgpu::RenderPipeline,
+    additive: wgpu::RenderPipeline,
+    /// The soft blob shadows on the ground.
+    blob: wgpu::RenderPipeline,
+}
+
+/// What the actors' pipelines are made from (kept, so the MSAA set can be made when first wanted).
+struct DynSource {
+    layout: wgpu::PipelineLayout,
+    shader: wgpu::ShaderModule,
+    blob_layout: wgpu::PipelineLayout,
+    blob_shader: wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+}
+
+impl DynSource {
+    fn pipes(&self, d: &wgpu::Device, samples: u32) -> DynPipes {
+        let multisample = wgpu::MultisampleState { count: samples, ..Default::default() };
+        // `blend` None: opaque and cut-out sections (depth written); Some: blended with the given factors, depth only tested.
+        let make = |label: &str, fs: &str, blend: Option<wgpu::BlendState>| {
+            d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&self.layout),
+                vertex: wgpu::VertexState {
+                    module: &self.shader,
+                    entry_point: Some("vs"),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Vertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &crate::gpu::VERTEX_ATTRIBUTES,
+                    }],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &self.shader,
+                    entry_point: Some(fs),
+                    targets: &[Some(wgpu::ColorTargetState { format: self.format, blend, write_mask: wgpu::ColorWrites::ALL })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: blend.is_none(),
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                // With MSAA, cut-out sections (hair, cloaks' edges) smooth their edges by alpha to coverage.
+                multisample: wgpu::MultisampleState { count: samples, alpha_to_coverage_enabled: samples > 1 && blend.is_none(), ..Default::default() },
+                multiview: None,
+                cache: None,
+            })
+        };
+        let additive = wgpu::BlendState {
+            color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::SrcAlpha, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
+            alpha: wgpu::BlendComponent::OVER,
+        };
+        let blob = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("blob shadow"),
+            layout: Some(&self.blob_layout),
+            vertex: wgpu::VertexState {
+                module: &self.blob_shader,
+                entry_point: Some("vs"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: SHADOW_BYTES,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4],
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &self.blob_shader,
+                entry_point: Some("fs"),
+                targets: &[Some(wgpu::ColorTargetState { format: self.format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, cull_mode: None, ..Default::default() },
+            // Tested against the picture, never written; pulled a little toward the viewer so the ground it lies on does not cut it.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState { constant: -4, slope_scale: -2.0, clamp: 0.0 },
+            }),
+            multisample,
+            multiview: None,
+            cache: None,
+        });
+        DynPipes {
+            opaque: make("dynamic", "fs", None),
+            alpha: make("dynamic alpha", "fs_blend", Some(wgpu::BlendState::ALPHA_BLENDING)),
+            additive: make("dynamic additive", "fs_blend", Some(additive)),
+            blob,
+        }
+    }
+}
+
+pub struct Dynamic {
+    source: DynSource,
+    pipes: DynPipes,
+    /// The same for four samples a pixel, made the first time MSAA is used.
+    msaa_pipes: std::cell::OnceCell<DynPipes>,
     model_layout: wgpu::BindGroupLayout,
     instances: RefCell<(wgpu::Buffer, wgpu::BindGroup, u64)>,
     images: RefCell<HashMap<ObjKey, wgpu::TextureView>>,
     posed: RefCell<PosedRing>,
-    shadow_pipeline: wgpu::RenderPipeline,
     shadow_buffer: wgpu::Buffer,
     shadow_count: std::cell::Cell<u32>,
     /// The characters' shadow map: its depth pipeline, the light matrix it reads and this frame's settings.
@@ -278,7 +383,7 @@ impl Dynamic {
         let d = &r.device;
         let shader = d.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("dynamic"),
-            source: wgpu::ShaderSource::Wgsl(format!("{}{}", crate::shadow::actor_shadow_wgsl(3), SHADER).into()),
+            source: wgpu::ShaderSource::Wgsl(format!("{}{}{}", crate::shadow::actor_shadow_wgsl(3), crate::fx::globals_wgsl(), SHADER).into()),
         });
         let model_layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("model"),
@@ -298,81 +403,13 @@ impl Dynamic {
             bind_group_layouts: &[r.globals_layout(), r.texture_layout(), &model_layout, &r.shadow_maps().layout],
             push_constant_ranges: &[],
         });
-        // `blend` None: opaque and cut-out sections (depth written); Some: blended with the given factors, depth only tested.
-        let make = |label: &str, fs: &str, blend: Option<wgpu::BlendState>| {
-            d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs"),
-                    buffers: &[wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<Vertex>() as u64,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &crate::gpu::VERTEX_ATTRIBUTES,
-                    }],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some(fs),
-                    targets: &[Some(wgpu::ColorTargetState { format: r.color_format, blend, write_mask: wgpu::ColorWrites::ALL })],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: blend.is_none(),
-                    depth_compare: wgpu::CompareFunction::Less,
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: Default::default(),
-                multiview: None,
-                cache: None,
-            })
-        };
-        let pipeline = make("dynamic", "fs", None);
-        let alpha_pipeline = make("dynamic alpha", "fs_blend", Some(wgpu::BlendState::ALPHA_BLENDING));
-        let additive = wgpu::BlendState {
-            color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::SrcAlpha, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
-            alpha: wgpu::BlendComponent::OVER,
-        };
-        let additive_pipeline = make("dynamic additive", "fs_blend", Some(additive));
-        let shadow_shader = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("blob shadow"), source: wgpu::ShaderSource::Wgsl(SHADOW_SHADER.into()) });
-        let shadow_layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("blob shadow"), bind_group_layouts: &[r.globals_layout()], push_constant_ranges: &[] });
-        let shadow_pipeline = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let blob_shader = d.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("blob shadow"),
-            layout: Some(&shadow_layout),
-            vertex: wgpu::VertexState {
-                module: &shadow_shader,
-                entry_point: Some("vs"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: SHADOW_BYTES,
-                    step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4],
-                }],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shadow_shader,
-                entry_point: Some("fs"),
-                targets: &[Some(wgpu::ColorTargetState { format: r.color_format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, cull_mode: None, ..Default::default() },
-            // Tested against the picture, never written; pulled a little toward the viewer so the ground it lies on does not cut it.
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: Default::default(),
-                bias: wgpu::DepthBiasState { constant: -4, slope_scale: -2.0, clamp: 0.0 },
-            }),
-            multisample: Default::default(),
-            multiview: None,
-            cache: None,
+            source: wgpu::ShaderSource::Wgsl(format!("{}{}", crate::fx::globals_wgsl(), SHADOW_SHADER).into()),
         });
+        let blob_layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("blob shadow"), bind_group_layouts: &[r.globals_layout()], push_constant_ranges: &[] });
+        let source = DynSource { layout, shader, blob_layout, blob_shader, format: r.color_format };
+        let pipes = source.pipes(d, 1);
         let shadow_buffer = d.create_buffer(&wgpu::BufferDescriptor { label: Some("blob shadows"), size: SHADOW_CAPACITY * SHADOW_BYTES, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let caster_shader = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("character shadow"), source: wgpu::ShaderSource::Wgsl(CASTER_SHADER.into()) });
         let caster_light_layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -424,14 +461,13 @@ impl Dynamic {
         });
         let (buffer, bind) = Self::instance_buffer(r, &model_layout, 256);
         Dynamic {
-            pipeline,
-            alpha_pipeline,
-            additive_pipeline,
+            source,
+            pipes,
+            msaa_pipes: std::cell::OnceCell::new(),
             model_layout,
             instances: RefCell::new((buffer, bind, 256)),
             images: RefCell::new(HashMap::new()),
             posed: RefCell::default(),
-            shadow_pipeline,
             shadow_buffer,
             shadow_count: std::cell::Cell::new(0),
             caster_pipeline,
@@ -701,6 +737,30 @@ impl Dynamic {
         depth: &wgpu::TextureView,
         aspect: f32,
     ) -> wgpu::CommandBuffer {
+        let target = crate::gpu::Target { color, depth, msaa: None, depth_readable: false };
+        self.draw_frame(r, scene, meshes, particles, camera, &target, aspect)
+    }
+
+    /// The pipelines for `samples` a pixel.
+    fn pipes_for(&self, r: &Renderer, samples: u32) -> &DynPipes {
+        if samples > 1 { self.msaa_pipes.get_or_init(|| self.source.pipes(&r.device, samples)) } else { &self.pipes }
+    }
+
+    /// Draws a frame into `target` (a window's: see `FrameTargets`): the scene, the meshes and the particles. With soft
+    /// particles on (and a target whose depth can be read) the particles get a pass of their own after the scene's, which reads
+    /// its depth; otherwise they are drawn last in the scene's pass.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_frame(
+        &self,
+        r: &Renderer,
+        scene: &GpuScene,
+        meshes: &[(&GpuMesh, Mat4, ActorLight)],
+        particles: Option<(&crate::particles::ParticleRenderer, &crate::particles::ParticleDraw)>,
+        camera: &Camera,
+        target: &crate::gpu::Target<'_>,
+        aspect: f32,
+    ) -> wgpu::CommandBuffer {
+        let soft = particles.is_some() && target.depth_readable && crate::quality::soft_particles();
         let (posed_buffer, posed_parts) = self.upload_posed(r, meshes);
         {
             let mut inst = self.instances.borrow_mut();
@@ -815,25 +875,32 @@ impl Dynamic {
             }
             }
         };
-        r.draw_with_pre(
+        let pipes = self.pipes_for(r, target.samples());
+        r.draw_target(
             scene,
             camera,
-            color,
-            depth,
+            target,
             aspect,
+            soft,
             casters,
             // Opaque and cut-out sections go before the scene's blended surfaces, which test against their depth...
-            |pass| sections(pass, &[(MaterialBlend::Opaque, &self.pipeline)]),
+            |pass, _| sections(pass, &[(MaterialBlend::Opaque, &pipes.opaque)]),
             // ...and the blended and added ones, then the particles, after them.
-            |pass| {
+            |pass, samples| {
                 if self.shadow_count.get() > 0 {
-                    pass.set_pipeline(&self.shadow_pipeline);
+                    pass.set_pipeline(&pipes.blob);
                     pass.set_vertex_buffer(0, self.shadow_buffer.slice(..));
                     pass.draw(0..4, 0..self.shadow_count.get());
                 }
-                sections(pass, &[(MaterialBlend::Alpha, &self.alpha_pipeline), (MaterialBlend::Additive, &self.additive_pipeline)]);
-                if let Some((renderer, frame)) = particles {
-                    renderer.draw(pass, frame);
+                sections(pass, &[(MaterialBlend::Alpha, &pipes.alpha), (MaterialBlend::Additive, &pipes.additive)]);
+                if let Some((renderer, frame)) = particles.filter(|_| !soft) {
+                    renderer.draw(r, pass, frame, samples);
+                }
+            },
+            // Soft particles: a pass of their own over the finished picture, reading the scene's depth.
+            |enc, globals| {
+                if let Some((renderer, frame)) = particles.filter(|_| soft) {
+                    renderer.draw_soft(r, enc, globals, frame, target);
                 }
             },
         )

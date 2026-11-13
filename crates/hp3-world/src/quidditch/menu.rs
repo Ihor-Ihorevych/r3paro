@@ -28,8 +28,17 @@ const LEAGUE_FILE: &str = "League.txt";
 const FRONT_END: &str = "HP_Preamble";
 /// How long the result line stays on screen before the player is taken back to the menu (ticks of 1/60 s).
 pub const LINGER_TICKS: u64 = 540;
+/// The save slot that holds the level a match was asked from, so the match ends with the player back on the very spot they
+/// stood (next to the quick save's 99, outside the slots the game's own load page lists).
+pub const RETURN_SLOT: i32 = 98;
+/// What a won match gives: Bertie Bott's beans, cauldron cakes and pumpkin pasties.
+pub const REWARD_BEANS: i32 = 50;
+pub const REWARD_CAKES: i32 = 5;
+pub const REWARD_PASTIES: i32 = 5;
 
 thread_local! {
+    /// Won matches whose reward is not paid yet: it waits for a level with a player in it (`after_level_ready`).
+    static PENDING_WINS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     /// The match the front end asked for, waiting for the level that can play it. A thread local for the same
     /// reason the command queue is a static: it is set outside the VM (a menu pick) and read inside it.
     static REQUEST: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -102,9 +111,15 @@ fn remember_origin(vm: &mut Vm<'_>) {
         .and_then(|li| crate::get(vm, li, "Game").as_obj())
         .map(|g| crate::get(vm, g, "CurrentGameState").as_str().to_string())
         .filter(|s| !s.is_empty());
-    let url = match state {
-        Some(s) => format!("{map}?GameState={s}"),
-        None => map,
+    // The level as it is now goes into the return slot, so the match ends with the player where they stood (with what they
+    // carry). Without it (a write that failed) they are put back at the start of the story state.
+    let url = if crate::save::write(vm, RETURN_SLOT) {
+        format!("{map}?load={RETURN_SLOT}")
+    } else {
+        match state {
+            Some(s) => format!("{map}?GameState={s}"),
+            None => map,
+        }
     };
     println!("quidditch: the match was asked for from {url}");
     ORIGIN.with(|o| *o.borrow_mut() = Some(url));
@@ -152,6 +167,10 @@ pub fn record_result(vm: &mut Vm<'_>, opponent: &str, outcome: Outcome, score: S
     }
     l.record(outcome, score);
     write_league(vm, &l);
+    // A win is paid once the player is back in a level (`after_level_ready`).
+    if outcome == Outcome::Won {
+        PENDING_WINS.with(|w| w.set(w.get() + 1));
+    }
     let line = format!(
         "quidditch: league round recorded ({opponent}: {outcome:?} {}-{}), next {:?}, champion {:?}",
         score.home,
@@ -180,6 +199,53 @@ pub fn leave(vm: &mut Vm<'_>) -> String {
     println!("{line}");
     vm.log.push(line);
     map
+}
+
+/// A level has finished loading (and a saved one has been put over it). Back from a match through the return slot, the slot
+/// has done its job and goes. Wins not paid yet are paid on the first level that has a player in it: the one the match was
+/// asked from, or, for a match asked from the front end (no level to go back to), the next level the player loads. The front
+/// end and the match itself pay nothing (the front end has no player, the match's pawn is the broom).
+pub fn after_level_ready(vm: &mut Vm<'_>, url: &str) {
+    if crate::world(vm).map.name.eq_ignore_ascii_case(MATCH_MAP) {
+        return;
+    }
+    if crate::save::option_slot(url) == Some(RETURN_SLOT) {
+        crate::save::delete(vm, RETURN_SLOT);
+    }
+    let owed = PENDING_WINS.with(|w| w.get());
+    if owed == 0 {
+        return;
+    }
+    let front = front_end_map(vm);
+    let has_pawn = crate::world(vm).player.is_some_and(|pc| crate::get(vm, pc, "Pawn").as_obj().is_some());
+    if crate::world(vm).map.name.eq_ignore_ascii_case(&front) || !has_pawn {
+        let line = format!("quidditch: {owed} won match(es) not paid yet: no player here, paid on the next level with one");
+        println!("{line}");
+        vm.log.push(line);
+        return;
+    }
+    PENDING_WINS.with(|w| w.set(0));
+    pay_wins(vm, owed);
+}
+
+/// Gives the player the reward of `wins` won matches: each is 50 beans, 5 cauldron cakes and 5 pumpkin pasties. The log line
+/// has what the inventory carrier held before and after, so a reward that went missing shows where.
+fn pay_wins(vm: &mut Vm<'_>, wins: u32) {
+    let Some(pc) = crate::world(vm).player else { return };
+    let n = wins as i32;
+    let before = crate::gifts::collection_counts(vm);
+    crate::fire(vm, pc, "GiveBeans", &mut [hp3_script::Value::Int(REWARD_BEANS * n)]);
+    crate::fire(vm, pc, "GiveCakes", &mut [hp3_script::Value::Int(REWARD_CAKES * n)]);
+    let pasties = crate::gifts::give_pasties(vm, REWARD_PASTIES * n);
+    let after = crate::gifts::collection_counts(vm);
+    let line = format!(
+        "quidditch: {wins} win(s) paid: {} beans, {} cauldron cakes, {} pumpkin pasties (before: {before}; after: {after})",
+        REWARD_BEANS * n,
+        REWARD_CAKES * n,
+        if pasties { REWARD_PASTIES * n } else { 0 }
+    );
+    println!("{line}");
+    vm.log.push(line);
 }
 
 /// The league as lines for the log (`quidditch league`).

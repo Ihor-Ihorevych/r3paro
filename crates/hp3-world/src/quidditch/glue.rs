@@ -54,11 +54,13 @@ const FLY_ANIMS: [&str; 5] = ["Hover", "QuidFly", "Fly", "Idle", "Stand"];
 /// (`BludgerTuning::bumps_to_lose_control`), in seconds. A placeholder, tuned by feel like the rest.
 const SPIN_TIME: f32 = 2.0;
 
-/// Whether Harry reaches for the Snitch by himself while the catch window is open. Off: the catch is the
-/// player's (Space on the desktop, the JUMP button on the phone). `HP3_QUID_AUTOCATCH` turns it on, for
-/// headless runs.
-fn auto_catch() -> bool {
-    crate::envc::var_os("HP3_QUID_AUTOCATCH").is_some()
+/// Whether Harry grabs the Snitch by himself: while the catch window is open and he is within the Snitch's
+/// catch radius, the catch is made with no key pressed (the user's choice: on by default). The window still has
+/// to be earned with rings and Harry still has to fly close, so this only removes the button press.
+/// `HP3_QUID_AUTOCATCH=0` turns it off, and the catch is the player's again (Space on the desktop, the JUMP
+/// button on the phone).
+pub fn auto_catch() -> bool {
+    crate::envc::var("HP3_QUID_AUTOCATCH").map_or(true, |v| v.trim() != "0")
 }
 
 /// A match in progress: the pure systems, the arena they play in, and the actors that show them.
@@ -667,8 +669,7 @@ fn tick_match(vm: &mut Vm<'_>, m: &mut QuidditchMatch, dt: f32) {
     let tapped = keys.reach || std::mem::take(&mut m.pending_reach);
     if tapped {
         m.reach_left = REACH_TIME;
-        // The same tap is the boost: one second of speed, then a cooldown (`momentum`), so the lunge for the
-        // Snitch is a thing you have to time and not a thing you hold.
+        // The same tap is the boost (`momentum`): always available, a tap starts it or tops it back up.
         m.momentum.try_boost();
     }
     let real_dt = if dt.is_finite() { dt.clamp(0.0, 0.25) } else { 0.0 };
@@ -727,8 +728,9 @@ fn tick_match(vm: &mut Vm<'_>, m: &mut QuidditchMatch, dt: f32) {
     // Everything that happened this frame, for the commentary and the sounds.
     let mut events: Vec<MatchEvent> = Vec::new();
     if !ended && m.rules.phase() != MatchPhase::Intro {
-        // The catch key (`Space`/`Enter`), or every frame under `HP3_QUID_EASY` and where there is no catch key
-        // to hold (`auto_catch`).
+        // Every frame with the auto-grab (`auto_catch`, the default) and under `HP3_QUID_EASY`; otherwise the catch
+        // key (`Space`/`Enter`) or a tap of reach. The Snitch itself only lets the catch happen inside its window
+        // and its catch radius.
         let wants_catch = m.easy || keys.catch || m.reach_left > 0.0 || auto_catch();
         for e in m.snitch.step(&m.broom, wants_catch, dt) {
             match e {

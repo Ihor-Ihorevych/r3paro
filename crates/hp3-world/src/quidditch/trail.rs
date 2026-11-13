@@ -39,9 +39,11 @@ pub struct Ring {
 pub enum TrailEvent {
     /// Harry flew through ring `index` (its `Ring::id`); `streak` is how many he has now taken in a row.
     Through { index: u64, streak: u32 },
-    /// He went past a ring without going through it; `streak_lost` is the run it cost him (0 if there was
-    /// none). It costs nothing else.
-    Missed { streak_lost: u32 },
+    /// He went past a ring without going through it. It costs nothing: the run he is on carries on
+    /// (`TrailTuning::run_timeout` is what ends a run).
+    Missed,
+    /// No new ring for `TrailTuning::run_timeout` seconds: the run of `streak_lost` is over.
+    RunExpired { streak_lost: u32 },
 }
 
 /// The numbers of the ring trail, all placeholders tuned by feel like the rest of the match.
@@ -78,6 +80,10 @@ pub struct TrailTuning {
     /// When set, the bar still fills by closing in, but the catch window stays shut until the run is in
     /// (`Snitch::set_rings_ready`), so nobody loses a try waiting for it.
     pub catch_rings: u32,
+    /// Seconds a run of rings lasts without a new ring (the owner's rule): a ring gone past does not end the
+    /// run, going this long without flying through one does. 5 s against a ring every ~1.6 s in a chase
+    /// (`spacing` 1200 at the Snitch's 734 uu/s) forgives one ring missed, not two.
+    pub run_timeout: f32,
 }
 
 impl Default for TrailTuning {
@@ -97,6 +103,7 @@ impl Default for TrailTuning {
             streak_bonus: 0.15,
             // HP1's `PM_Hoops` rule: no catch window until six rings in a row (the owner's word: harder).
             catch_rings: 6,
+            run_timeout: 5.0,
         }
     }
 }
@@ -112,6 +119,8 @@ pub struct RingTrail {
     rings: Vec<Ring>,
     next_id: u64,
     streak: u32,
+    /// Seconds since the last ring flown through (what `run_timeout` is measured against).
+    since_through: f32,
     /// Snitch path flown since the last ring was dropped (uu).
     since: f32,
     last_snitch: Option<Vec3>,
@@ -127,7 +136,7 @@ impl RingTrail {
     }
 
     pub fn with_tuning(t: TrailTuning) -> RingTrail {
-        RingTrail { t, rings: Vec::new(), next_id: 0, streak: 0, since: 0.0, last_snitch: None, paused: false }
+        RingTrail { t, rings: Vec::new(), next_id: 0, streak: 0, since_through: 0.0, since: 0.0, last_snitch: None, paused: false }
     }
 
     /// Stops (or resumes) dropping rings. The rings already up carry on as they were.
@@ -144,7 +153,7 @@ impl RingTrail {
         &self.rings
     }
 
-    /// Rings flown through in a row; a ring gone past resets it.
+    /// Rings flown through in this run; it ends `run_timeout` seconds after the last one, not at a ring missed.
     pub fn streak(&self) -> u32 {
         self.streak
     }
@@ -178,7 +187,12 @@ impl RingTrail {
         // Expiry is silent: a ring nobody went for is not a miss.
         self.rings.retain(|r| r.age <= life);
         self.drop_ring(snitch_pos, snitch_dir_or_vel);
+        self.since_through += dt;
         self.check_harry(harry_prev, harry_now, &mut out);
+        let timeout = if self.t.run_timeout.is_finite() { self.t.run_timeout.max(0.0) } else { 0.0 };
+        if self.streak > 0 && self.since_through > timeout {
+            out.push(TrailEvent::RunExpired { streak_lost: std::mem::take(&mut self.streak) });
+        }
         out
     }
 
@@ -234,10 +248,11 @@ impl RingTrail {
             if goals::disc_crossing(prev, now, r.center, r.normal, r.radius).is_some() {
                 r.done = true;
                 self.streak += 1;
+                self.since_through = 0.0;
                 out.push(TrailEvent::Through { index: r.id, streak: self.streak });
             } else if now.is_finite() && (now - r.center).dot(r.normal) > behind && now.distance(r.center) < near {
                 r.done = true;
-                out.push(TrailEvent::Missed { streak_lost: std::mem::take(&mut self.streak) });
+                out.push(TrailEvent::Missed);
             }
         }
     }
@@ -288,7 +303,7 @@ pub fn chain_is_smooth(rings: &[Ring], spacing: f32) -> bool {
 }
 
 /// What `e` adds to the Snitch's catch bar: a ring's own bonus, and the bigger one on every `streak_len` in a
-/// row. A miss adds nothing (it has already cost the streak).
+/// row. A miss or the end of a run adds nothing.
 pub fn bonus_for(t: &TrailTuning, e: &TrailEvent) -> f32 {
     let TrailEvent::Through { streak, .. } = *e else { return 0.0 };
     let full = t.streak_len.max(1);
@@ -383,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_a_ring_resets_the_streak_and_costs_nothing_else() {
+    fn missing_a_ring_keeps_the_run_and_costs_nothing() {
         let d = TrailTuning::default();
         let mut t = trail();
         let away = Vec3::new(0.0, 9e4, 0.0);
@@ -400,14 +415,51 @@ mod tests {
             assert_eq!(ev, vec![TrailEvent::Through { index: i, streak: i as u32 + 1 }]);
         }
         assert_eq!(t.streak(), 2);
-        // The third, gone past wide of the rim but close by: a miss, and the run is lost.
+        // The third, gone past wide of the rim but close by: a miss, and the run carries on.
         let wide = snitch + Vec3::new(d.miss_behind + 50.0, d.radius + 100.0, 0.0);
         let ev = t.step(snitch, Vec3::X, away, wide, 1.0 / 60.0);
-        assert_eq!(ev, vec![TrailEvent::Missed { streak_lost: 2 }]);
-        assert_eq!(t.streak(), 0);
+        assert_eq!(ev, vec![TrailEvent::Missed]);
+        assert_eq!(t.streak(), 2);
         // It fires once, and nothing else happens to the trail: the rings are still there to be flown.
         assert!(t.step(snitch, Vec3::X, wide, wide, 1.0 / 60.0).is_empty());
         assert!(!t.rings().is_empty());
+    }
+
+    /// The run ends `run_timeout` seconds after the last ring flown through, and not a moment before; a new ring
+    /// inside that time starts the wait over.
+    #[test]
+    fn the_run_ends_after_run_timeout_without_a_ring() {
+        let d = TrailTuning::default();
+        let mut t = trail();
+        let away = Vec3::new(0.0, 9e4, 0.0);
+        let snitch = Vec3::new(9e4, 9e4, 9e4);
+        let through = |t: &mut RingTrail, x: f32| {
+            t.step(Vec3::new(x, 0.0, 0.0), Vec3::X, away, away, 0.0);
+            t.step(snitch, Vec3::X, Vec3::new(x - 100.0, 0.0, 0.0), Vec3::new(x + 100.0, 0.0, 0.0), 0.0)
+        };
+        // Time passing with nothing flown (a step integrates at most `MAX_DT`, so it goes in tenths).
+        let wait = |t: &mut RingTrail, secs: f32| {
+            let mut ev = Vec::new();
+            for _ in 0..(secs * 10.0).round() as u32 {
+                ev.extend(t.step(snitch, Vec3::X, away, away, 0.1));
+            }
+            ev
+        };
+        through(&mut t, 0.0);
+        assert_eq!(t.streak(), 1);
+        // Just short of the timeout: still on.
+        let ev = wait(&mut t, d.run_timeout - 0.2);
+        assert!(ev.is_empty(), "{ev:?}");
+        assert_eq!(t.streak(), 1);
+        // A new ring: the wait starts over.
+        through(&mut t, 5000.0);
+        assert_eq!(t.streak(), 2);
+        assert!(wait(&mut t, d.run_timeout - 0.2).is_empty());
+        // And past it, the run is over, once.
+        let ev = wait(&mut t, 0.4);
+        assert_eq!(ev, vec![TrailEvent::RunExpired { streak_lost: 2 }]);
+        assert_eq!(t.streak(), 0);
+        assert!(wait(&mut t, 10.0).is_empty());
     }
 
     /// A ring on the other side of the pitch is one Harry never went for: it expires without a miss.
@@ -425,7 +477,8 @@ mod tests {
     #[test]
     fn the_streak_bonus_lands_every_streak_len_rings() {
         let d = TrailTuning::default();
-        assert_eq!(bonus_for(&d, &TrailEvent::Missed { streak_lost: 3 }), 0.0);
+        assert_eq!(bonus_for(&d, &TrailEvent::Missed), 0.0);
+        assert_eq!(bonus_for(&d, &TrailEvent::RunExpired { streak_lost: 3 }), 0.0);
         for streak in 1..=6u32 {
             let got = bonus_for(&d, &TrailEvent::Through { index: 0, streak });
             let want = if streak % d.streak_len == 0 { d.ring_bonus + d.streak_bonus } else { d.ring_bonus };

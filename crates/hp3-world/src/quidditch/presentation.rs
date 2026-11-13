@@ -607,15 +607,23 @@ fn draw_art(
     centered(vm, f, &away.to_string(), 24.0 * s + sw * 1.5 + 10.0 * s, 18.0 * s + sh * 0.27, white_c);
     canvas::text(vm, f, &format!("Gryffindor - {opponent}"), 24.0 * s + 2.0 * sw + 24.0 * s, 18.0 * s + sh * 0.3, w, dim);
 
-    // The catch prompt, while the window is open: a hand, pulsing, and the key (or the button on a phone).
+    // The catch prompt, while the window is open: a hand, pulsing, and the key (or the button on a phone). With the
+    // auto-grab (the default) there is no key: Harry grabs the Snitch once he is close, so the prompt says to get close.
     if let Some(left) = window {
         let pulse = 0.65 + 0.35 * (t * 10.0).sin().abs();
         let hs = HAND * s * (1.0 + 0.1 * pulse);
         let y = h * 0.52;
-        pic(vm, art.hand, [cx - hs - 14.0 * s, y - hs * 0.5, hs, hs], pulse);
-        let (kw, kh) = (KEYCAP.0 * s, KEYCAP.1 * s);
-        pic(vm, art.keycap, [cx + 6.0 * s, y - kh * 0.5, kw, kh], 1.0);
-        centered(vm, f, if touch { "JUMP" } else { "SPACE" }, cx + 6.0 * s + kw * 0.5, y - 11.0 * s, gold);        centered(vm, f, &format!("{left:.1}"), cx, y + hs * 0.5 + 4.0 * s, dim);
+        if super::glue::auto_catch() {
+            pic(vm, art.hand, [cx - hs * 0.5, y - hs * 0.5, hs, hs], pulse);
+            centered(vm, f, "GET CLOSE TO GRAB IT!", cx, y + hs * 0.5 + 4.0 * s, gold);
+            centered(vm, f, &format!("{left:.1}"), cx, y + hs * 0.5 + 30.0 * s, dim);
+        } else {
+            pic(vm, art.hand, [cx - hs - 14.0 * s, y - hs * 0.5, hs, hs], pulse);
+            let (kw, kh) = (KEYCAP.0 * s, KEYCAP.1 * s);
+            pic(vm, art.keycap, [cx + 6.0 * s, y - kh * 0.5, kw, kh], 1.0);
+            centered(vm, f, if touch { "JUMP" } else { "SPACE" }, cx + 6.0 * s + kw * 0.5, y - 11.0 * s, gold);
+            centered(vm, f, &format!("{left:.1}"), cx, y + hs * 0.5 + 4.0 * s, dim);
+        }
     }
 
     // The first seconds of a match: what the controls are, as pictures with a few words.
@@ -625,7 +633,15 @@ fn draw_art(
         let rows: [(ObjId, &str); 3] = [
             (art.fly, if touch { "STICK: FLY" } else { "MOUSE / ARROWS: FLY" }),
             (art.hoop_on, "FLY THROUGH RINGS TO SPEED UP"),
-            (art.hand, if touch { "JUMP: BOOST + CATCH" } else { "RIGHT CLICK / A: BOOST + CATCH" }),
+            (
+                art.hand,
+                match (touch, super::glue::auto_catch()) {
+                    (true, true) => "JUMP: BOOST - GET CLOSE TO CATCH",
+                    (false, true) => "RIGHT CLICK / A: BOOST - GET CLOSE TO CATCH",
+                    (true, false) => "JUMP: BOOST + CATCH",
+                    (false, false) => "RIGHT CLICK / A: BOOST + CATCH",
+                },
+            ),
         ];
         let is = ICON * s;
         let mut y = 20.0 * s;

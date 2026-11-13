@@ -71,9 +71,10 @@ impl Default for SnitchTuning {
             gain_rate: 0.25,
             loss_rate: 0.15,
             // Seconds the catch window stays open once the bar is full.
-            // Two seconds, and a tighter reach: the catch is a moment, not a stretch.
-            max_catch_time: 2.0,
-            max_tries: 3,
+            // Two and a half seconds and four tries (2 s and 3 tries lost too many matches: the owner could not
+            // win). Still a moment, not a stretch, and the run of rings has to be in for the window to open.
+            max_catch_time: 2.5,
+            max_tries: 4,
             // Harry must be this close with the catch key held. **350 + `circle_radius`**: every distance
             // here is measured to the Snitch's real, circling position, so a Snitch looping 150 uu around its
             // path is up to 150 uu farther away than one flying the bare path. Widening the catch by exactly
