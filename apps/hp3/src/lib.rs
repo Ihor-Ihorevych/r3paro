@@ -858,8 +858,11 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         }
         // HP3_COMMANDS=<command>@<tick>[;<command>@<tick>...] (debugging): runs those commands at those world ticks (`quicksave@100;quickload@200`).
         if let Ok(list) = std::env::var("HP3_COMMANDS") {
+            // Once per world tick: the display can draw several frames in one tick, and a repeated `trigger` toggles back.
+            static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
             let tick = hp3_world::world(&mut vm).frame;
-            for item in list.split(';') {
+            let fresh = LAST.swap(tick as u64, std::sync::atomic::Ordering::Relaxed) != tick as u64;
+            for item in list.split(';').filter(|_| fresh) {
                 if let Some((command, at)) = item.rsplit_once('@')
                     && at.trim().parse::<u64>() == Ok(tick as u64)
                 {

@@ -1073,6 +1073,33 @@ pub fn register(vm: &mut Vm<'_>) {
     // are switched. The encounter starts while Harry, handed back to the hero controller at the end of his cutscene part,
     // is still on the ground; the engine's movement animation would stand him up in the new idle once he is given to the
     // companion controller, and he stayed down in the original. Called again later, he is switched then.
+    // Mover.TriggerToggle.Trigger picks Open or Close from `KeyNum`, which only changes once the state code runs on a later
+    // tick. A skipped cutscene runs all its lines in one tick, so two `Trigger`s meant to open and close again (the
+    // Ch1CarpeRetractum intro shows the flying shutter that way) both picked Open and the shutter stayed open. A second
+    // trigger in the same tick now undoes the first one (the mover's state code is put back where it was), as played out.
+    vm.register_override("TriggerToggle.Trigger", |vm, this, a| {
+        let Some(o) = this else { return Ok(Value::Empty) };
+        let tick = world(vm).frame;
+        if let Some((t, pc, latent)) = world(vm).toggled.remove(&o)
+            && t == tick
+        {
+            match pc {
+                Some(pc) => vm.state_pc.insert(o, pc),
+                None => vm.state_pc.remove(&o),
+            };
+            match latent {
+                Some(l) => vm.latent.insert(o, l),
+                None => vm.latent.remove(&o),
+            };
+            return Ok(Value::Empty);
+        }
+        let before = (tick, vm.state_pc.get(&o).copied(), vm.latent.get(&o).cloned());
+        let Some(name) = vm.db.names.find("Trigger") else { return Ok(Value::Empty) };
+        let Some(f) = vm.find_function(Some(o), None, name) else { return Ok(Value::Empty) };
+        let r = vm.call_original(f, this, a);
+        world(vm).toggled.insert(o, before);
+        r
+    });
     vm.register_override("HPCharacter.SwitchToFightStanceAnims", |vm, this, _a| {
         let Some(o) = this else { return Ok(Value::Empty) };
         if get(vm, o, "bUsingFightStanceAnims").as_bool() {
