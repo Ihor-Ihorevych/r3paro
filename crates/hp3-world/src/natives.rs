@@ -1100,6 +1100,29 @@ pub fn register(vm: &mut Vm<'_>) {
         world(vm).toggled.insert(o, before);
         r
     });
+    // An imp that has thrown a firecracker (ImpController state ThrowCracker) runs off the moment the throw animation ends
+    // (`GoToNextState` -> EvadePlayer / RunToPosition). House rule: it stands where it is for IMP_THROW_HOLD seconds first.
+    // The first call sleeps the state code and has it run the same statement again; the call after the sleep goes on as
+    // the script does. A hold cut short by a state change (a cracker hit) is forgotten.
+    const IMP_THROW_HOLD: f32 = 0.5;
+    vm.register_override("ThrowCracker.GoToNextState", |vm, this, a| {
+        let Some(o) = this else { return Ok(Value::Empty) };
+        let sets = vm.state_set_count(o);
+        if world(vm).imp_hold.remove(&o) != Some(sets) {
+            world(vm).imp_hold.insert(o, sets);
+            if let Some(pawn) = get(vm, o, "Pawn").as_obj() {
+                set(vm, pawn, "Acceleration", crate::physics::value(glam::Vec3::ZERO));
+            }
+            vm.latent.insert(o, hp3_script::vm::Latent::Sleep(IMP_THROW_HOLD));
+            vm.repeat_statement = true;
+            return Ok(Value::Empty);
+        }
+        let Some(name) = vm.db.names.find("GoToNextState") else { return Ok(Value::Empty) };
+        match vm.find_function(Some(o), None, name) {
+            Some(f) => vm.call_original(f, this, a),
+            None => Ok(Value::Empty),
+        }
+    });
     vm.register_override("HPCharacter.SwitchToFightStanceAnims", |vm, this, _a| {
         let Some(o) = this else { return Ok(Value::Empty) };
         if get(vm, o, "bUsingFightStanceAnims").as_bool() {

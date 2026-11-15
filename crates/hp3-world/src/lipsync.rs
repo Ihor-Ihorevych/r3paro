@@ -171,6 +171,7 @@ fn tick_visemes(vm: &mut Vm<'_>, l: &mut LipSync, now: f32) -> bool {
             let ch = channel_mut(vm, l.actor, VISEME_CHANNEL + i);
             ch.bone = Some(bone.clone());
             ch.scripted_blend = true;
+            ch.held_pose = true;
             ch.alpha = 0.0;
             ch.target_alpha = 0.0;
             ch.rate = 0.0;
@@ -191,6 +192,14 @@ fn tick_visemes(vm: &mut Vm<'_>, l: &mut LipSync, now: f32) -> bool {
         if crate::envc::var_os("HP3_LIPSYNC_DEBUG").is_some() && world(vm).frame % 15 == 0 {
             let frame = world(vm).frame;
             eprintln!("lipsync: tick {frame} t {t:.2} weights {}", weights.iter().map(|w| format!("{w:.2}")).collect::<Vec<_>>().join(" "));
+            // What the pose will really get: a channel without a sequence shows nothing, whatever its alpha.
+            let shown: Vec<String> = (0..VISEMES.len())
+                .map(|i| {
+                    let ch = channel_mut(vm, l.actor, VISEME_CHANNEL + i);
+                    if ch.sequence.is_some() { format!("{:.2}", ch.alpha) } else { "none".to_string() }
+                })
+                .collect();
+            eprintln!("lipsync: tick {frame} channel alphas {}", shown.join(" "));
         }
         for (i, w) in weights.iter().enumerate() {
             let ch = channel_mut(vm, l.actor, VISEME_CHANNEL + i);

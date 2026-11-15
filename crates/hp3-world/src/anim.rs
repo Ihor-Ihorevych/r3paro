@@ -42,6 +42,9 @@ pub struct Channel {
     pub tween_only: bool,
     /// `EnableChannelNotify(channel, false)`: the channel raises neither sequence notifies nor `AnimEnd`.
     pub ignore_notify: bool,
+    /// A pose held still and shown by its weight alone (a mouth shape of a dialog line): the weight passes through 0
+    /// many times while it is in use, and the channel keeps its sequence through that.
+    pub held_pose: bool,
 }
 
 impl Channel {
@@ -601,7 +604,7 @@ pub fn tick_actor(vm: &mut Vm<'_>, actor: ObjId, dt: f32) {
                 // A blended channel faded out to nothing after its one-shot finished has no pose left to show: a later
                 // fade-in of the channel must not bring back that stale last frame (Harry's hold pose in the dementor
                 // battle, where the hold sequence does not exist and only the release animation ever plays).
-                if ci > 0 && ch.scripted_blend && ch.alpha <= 0.0 && ch.target_alpha <= 0.0 && ch.sequence.is_some() && !ch.looping && (!ch.playing || ch.rate == 0.0) && ch.from.is_none() {
+                if ci > 0 && ch.scripted_blend && !ch.held_pose && ch.alpha <= 0.0 && ch.target_alpha <= 0.0 && ch.sequence.is_some() && !ch.looping && (!ch.playing || ch.rate == 0.0) && ch.from.is_none() {
                     ch.sequence = None;
                 }
                 // While a new sequence fades in it waits on its first frame: time goes to the fade, and only what is

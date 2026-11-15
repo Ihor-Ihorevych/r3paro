@@ -147,15 +147,17 @@ fn dump_near(vm: &mut Vm<'_>, radius: f32) {
 /// The on/off graphics switches: the `gfx` word, the settings key and the quality module's getter and setter.
 type Switch = (&'static str, &'static str, fn() -> bool, fn(bool));
 
-const SWITCHES: [Switch; 4] = [
+const SWITCHES: [Switch; 6] = [
     ("tonemap", "ToneMapping", hp3_render::quality::tonemap, hp3_render::quality::set_tonemap),
     ("rim", "RimLight", hp3_render::quality::rim_light, hp3_render::quality::set_rim_light),
     ("heightfog", "HeightFog", hp3_render::quality::height_fog, hp3_render::quality::set_height_fog),
     ("softparticles", "SoftParticles", hp3_render::quality::soft_particles, hp3_render::quality::set_soft_particles),
+    ("ao", "BakedAO", hp3_render::quality::baked_ao, hp3_render::quality::set_baked_ao),
+    ("blobs", "BlobShadows", hp3_render::quality::blob_shadows, hp3_render::quality::set_blob_shadows),
 ];
 
 /// `gfx shadows [on|off]`, `gfx quality [low|high]`, `gfx aa [off|fxaa|msaa]` (no value: the next one) and
-/// `gfx tonemap|rim|heightfog|softparticles [on|off]` (no value: the other way), kept in `[hp3.app]` of the settings.
+/// `gfx tonemap|rim|heightfog|softparticles|ao|blobs [on|off]` (no value: the other way), kept in `[hp3.app]` of the settings.
 fn gfx(vm: &mut Vm<'_>, what: &str, value: Option<&str>) {
     use hp3_render::quality;
     if let Some(&(word, key, get, set)) = SWITCHES.iter().find(|s| s.0 == what) {
@@ -216,7 +218,7 @@ pub fn load_graphics(vm: &Vm<'_>) {
     {
         quality::set_aa(a);
     }
-    let env_names = ["HP3_TONEMAP", "HP3_RIM", "HP3_HEIGHT_FOG", "HP3_SOFT_PARTICLES"];
+    let env_names = ["HP3_TONEMAP", "HP3_RIM", "HP3_HEIGHT_FOG", "HP3_SOFT_PARTICLES", "HP3_AO", "HP3_BLOB_SHADOWS"];
     for (&(_, key, get, set), env) in SWITCHES.iter().zip(env_names) {
         if std::env::var_os(env).is_none() && hp3_world::settings::text(vm, "hp3.app", key).is_some() {
             set(hp3_world::settings::flag(vm, "hp3.app", key, get()));

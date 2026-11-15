@@ -397,6 +397,36 @@ struct Batcher<'l, 's> {
     scene: Scene,
     /// The level's model (an `Asset::Model`), kept so that static meshes can find the zone they stand in.
     zone_model: Option<Rc<Asset>>,
+    /// Ambient occlusion is baked once the scene is built: the triangles rays meet are gathered while batching.
+    ao: Option<AoGather>,
+}
+
+/// What baking ambient occlusion needs from the batching: the solid, opaque triangles (each turned so that its front is the
+/// side its surface faces) and the lit static mesh vertices with their light split into ambient and direct.
+#[derive(Default)]
+struct AoGather {
+    occluders: Vec<[GVec3; 3]>,
+    mesh_light: Vec<MeshLight>,
+}
+
+/// A static mesh vertex whose colour is ambient + direct light: the ambient part is what the occlusion darkens.
+struct MeshLight {
+    batch: usize,
+    vertex: u32,
+    ambient: GVec3,
+    direct: GVec3,
+    normal: GVec3,
+}
+
+impl Batcher<'_, '_> {
+    fn new<'l, 's>(loader: &'l Loader<'s>, scene: Scene, ao: bool) -> Batcher<'l, 's> {
+        Batcher { loader, by_texture: HashMap::new(), sky: false, last_pan: None, scene, zone_model: None, ao: ao.then(AoGather::default) }
+    }
+
+    /// Whether the texture lets light through somewhere (cut-out or blended): such surfaces do not occlude.
+    fn see_through(&self, texture: &Option<ObjKey>) -> bool {
+        texture.as_ref().and_then(|k| self.scene.images.get(k)).is_some_and(|i| i.masked || i.translucent)
+    }
 }
 
 /// The zone the BSP puts a point in: the zone the last plane on the way down holds on the side the point is.
@@ -473,13 +503,19 @@ impl Batcher<'_, '_> {
     }
 
     fn batch(&mut self, texture: Option<ObjKey>, lightmap: Option<usize>) -> &mut Batch {
+        let i = self.batch_index(texture, lightmap);
+        &mut self.scene.batches[i]
+    }
+
+    /// The index in the scene's batches of the batch `batch` hands out.
+    fn batch_index(&mut self, texture: Option<ObjKey>, lightmap: Option<usize>) -> usize {
         let next = self.scene.batches.len();
         let pan = self.last_pan.take();
         let i = *self.by_texture.entry((texture.clone(), lightmap, pan.map(|p| (p.u.to_bits(), p.v.to_bits())), self.sky)).or_insert(next);
         if i == next {
             self.scene.batches.push(Batch { texture, lightmap, blend: None, pan, fluid: None, sky: self.sky, vertices: Vec::new(), indices: Vec::new() });
         }
-        &mut self.scene.batches[i]
+        i
     }
 }
 
@@ -491,7 +527,7 @@ pub fn build(loader: &Loader<'_>, map: &Rc<Package>) -> Scene {
 /// Like `build_with`, also drawing terrain with the given layers.
 pub fn build_map(loader: &Loader<'_>, map: &Rc<Package>, include: &dyn Fn(usize) -> bool, inputs: &MapInputs) -> Scene {
     let mut scene = build_with(loader, map, include, inputs.lighting.as_ref(), &inputs.class_statics);
-    let mut b = Batcher { loader, by_texture: HashMap::new(), sky: false, last_pan: None, scene: std::mem::take(&mut scene), zone_model: None };
+    let mut b = Batcher::new(loader, std::mem::take(&mut scene), false);
     b.zone_model = level_model(&b, map).map(|(_, m)| m);
     add_terrain(&mut b, map, inputs);
     add_fluids(&mut b, inputs);
@@ -755,14 +791,93 @@ pub fn build_with(
     lighting: Option<&Lighting>,
     class_statics: &HashMap<usize, ClassStatic>,
 ) -> Scene {
-    let mut b = Batcher { loader, by_texture: HashMap::new(), sky: false, last_pan: None, scene: Scene::default(), zone_model: None };
+    let mut b = Batcher::new(loader, Scene::default(), lighting.is_some() && crate::quality::baked_ao());
     add_bsp(&mut b, map, lighting);
     add_actors(&mut b, map, include, lighting, class_statics);
+    // The lightmaps are made last, when every solid triangle is known for the occlusion.
+    if let Some(l) = lighting
+        && let Some(model_asset) = b.zone_model.clone()
+        && let Asset::Model(model) = &*model_asset
+    {
+        let ao = b.ao.take().map(|g| bake_ao(&mut b.scene, model, g));
+        b.scene.lightmaps = build_lightmaps(model, l, ao.as_ref());
+    }
     b.scene
 }
 
-/// Computes a model's lightmap pages from its lights' shadow bitmaps.
-fn build_lightmaps(model: &hp3_assets::model::Model, lighting: &Lighting) -> Vec<Image> {
+/// The occlusion of each lightmap's texels (by lightmap index), filled and blurred, as it applies to ambient light.
+struct LightmapAo {
+    grids: HashMap<usize, Vec<f32>>,
+    params: crate::ao::Params,
+}
+
+/// The query points of a lightmap: each texel's centre on its surface and the surface's facing.
+fn lightmap_points(model: &hp3_assets::model::Model, lmi: usize, out: &mut Vec<(GVec3, GVec3)>) -> Option<(usize, usize)> {
+    let lm = model.light_maps.get(lmi)?;
+    let surf = model.surfs.get(lm.surf as usize)?;
+    let normal = model.vectors.get(surf.normal as usize).map(|v| GVec3::new(v.x, v.y, v.z)).unwrap_or(GVec3::Z);
+    let base = GVec3::new(lm.base.x, lm.base.y, lm.base.z);
+    let ax = GVec3::new(lm.axis_x.x, lm.axis_x.y, lm.axis_x.z);
+    let ay = GVec3::new(lm.axis_y.x, lm.axis_y.y, lm.axis_y.z);
+    let (w, h) = (lm.size[0].max(0) as usize, lm.size[1].max(0) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            out.push((base + ax * (x as f32 + 0.5) + ay * (y as f32 + 0.5), normal));
+        }
+    }
+    Some((w, h))
+}
+
+/// Bakes the occlusion of the lightmap texels and the lit static mesh vertices; darkens the vertices' ambient light here and
+/// hands back the lightmaps' share.
+fn bake_ao(scene: &mut Scene, model: &hp3_assets::model::Model, gather: AoGather) -> LightmapAo {
+    let params = crate::ao::Params::from_env();
+    let mut queries: Vec<(GVec3, GVec3)> = Vec::new();
+    let mut lightmaps: Vec<(usize, usize, usize, usize)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for page in &model.light_map_textures {
+        for &lmi in &page.light_maps {
+            let lmi = lmi as usize;
+            if !seen.insert(lmi) {
+                continue;
+            }
+            let start = queries.len();
+            if let Some((w, h)) = lightmap_points(model, lmi, &mut queries) {
+                lightmaps.push((lmi, start, w, h));
+            }
+        }
+    }
+    let texels = queries.len();
+    // Each vertex asks on both sides (static mesh normals are not trusted): the side outside the mesh is kept.
+    for m in &gather.mesh_light {
+        let p = GVec3::from(scene.batches[m.batch].vertices[m.vertex as usize].position);
+        queries.push((p, m.normal));
+        queries.push((p, -m.normal));
+    }
+    let values = crate::ao::bake_cached(&gather.occluders, &queries, &params);
+    let decode = crate::ao::decode;
+    for (k, m) in gather.mesh_light.iter().enumerate() {
+        let (a, b) = (decode(values[texels + 2 * k]), decode(values[texels + 2 * k + 1]));
+        let ao = match (a, b) {
+            (Some(a), Some(b)) => a.max(b),
+            (Some(a), None) | (None, Some(a)) => a,
+            (None, None) => 1.0,
+        };
+        let c = (m.ambient * params.ambient_factor(ao) + m.direct * params.direct_factor(ao)).min(GVec3::ONE);
+        scene.batches[m.batch].vertices[m.vertex as usize].color = c.to_array();
+    }
+    let grids = lightmaps
+        .into_iter()
+        .map(|(lmi, start, w, h)| {
+            let cells: Vec<Option<f32>> = values[start..start + w * h].iter().map(|&v| decode(v)).collect();
+            (lmi, crate::ao::fill_and_blur(&cells, w, h))
+        })
+        .collect();
+    LightmapAo { grids, params }
+}
+
+/// Computes a model's lightmap pages from its lights' shadow bitmaps, darkened by baked ambient occlusion when given.
+fn build_lightmaps(model: &hp3_assets::model::Model, lighting: &Lighting, ao: Option<&LightmapAo>) -> Vec<Image> {
     let n = LIGHTMAP_PAGE;
     // Each surface's zone (the front side of a node showing it) gives the ambient light of its texels.
     let mut surf_ambient: HashMap<i32, GVec3> = HashMap::new();
@@ -855,20 +970,28 @@ fn build_lightmaps(model: &hp3_assets::model::Model, lighting: &Lighting) -> Vec
                     lighting.lights.get(&index).map(|l| (l, bm))
                 })
                 .collect();
+            let width = lm.size[0].max(0) as usize;
+            let grid = ao.and_then(|a| a.grids.get(&(lmi as usize)).map(|g| (g, &a.params)));
             for y in 0..lm.size[1].max(0) as usize {
-                for x in 0..lm.size[0].max(0) as usize {
+                for x in 0..width {
                     let (px, py) = (lm.offset[0] as usize + x, lm.offset[1] as usize + y);
                     if px >= n || py >= n {
                         continue;
                     }
                     let p = base + ax * (x as f32 + 0.5) + ay * (y as f32 + 0.5);
-                    let mut c = surf_ambient.get(&lm.surf).copied().unwrap_or(lighting.ambient) * 0.5 * hp3_bsp_amb_mul;
+                    let ambient = surf_ambient.get(&lm.surf).copied().unwrap_or(lighting.ambient) * 0.5 * hp3_bsp_amb_mul;
+                    let mut direct = GVec3::ZERO;
                     for (l, bm) in &lights {
                         let shadow = soft_shadow(bm, x as i32, y as i32);
                         if shadow > 0.0 {
-                            c = (c + l.at_wall(p, normal, two_sided) * shadow * hp3_lightmap_scale).min(GVec3::ONE);
+                            direct += l.at_wall(p, normal, two_sided) * shadow * hp3_lightmap_scale;
                         }
                     }
+                    let c = match grid.and_then(|(g, params)| g.get(y * width + x).map(|&a| (a, params))) {
+                        Some((a, params)) => ambient.min(GVec3::ONE) * params.ambient_factor(a) + direct * params.direct_factor(a),
+                        None => ambient.min(GVec3::ONE) + direct,
+                    }
+                    .min(GVec3::ONE);
                     let t = (py * n + px) * 3;
                     texels[t..t + 3].copy_from_slice(&c.to_array());
                 }
@@ -904,9 +1027,8 @@ fn add_bsp(b: &mut Batcher<'_, '_>, map: &Rc<Package>, lighting: Option<&Lightin
     let Some((mp, model_asset)) = level_model(b, map) else { return };
     let Asset::Model(model) = &*model_asset else { return };
     b.zone_model = Some(model_asset.clone());
-    if let Some(l) = lighting {
-        b.scene.lightmaps = build_lightmaps(model, l);
-    }
+    // The pages themselves are made once the scene is built (`build_with`).
+    let pages = if lighting.is_some() { model.light_map_textures.len() } else { 0 };
     // Invisible, portal and fake-backdrop surfaces are not drawn.
     const HIDDEN: u32 = 0x0000_0001 | 0x0400_0000 | 0x0000_0080;
     // Unlit surfaces are drawn at full brightness.
@@ -936,7 +1058,20 @@ fn add_bsp(b: &mut Batcher<'_, '_>, map: &Rc<Package>, lighting: Option<&Lightin
         let first = node.first_vertex as usize;
         let n = node.num_vertices as usize;
         let Some(verts) = section.vertices.get(first..first + n) else { continue };
-        let page = (section.light_map_texture as usize) < b.scene.lightmaps.len();
+        let page = (section.light_map_texture as usize) < pages;
+        // Solid, opaque surfaces outside the sky room block the occlusion rays, each turned to face as its surface does.
+        if !b.sky
+            && !b.see_through(&texture)
+            && let Some(normal) = model.surfs.get(node.surf as usize).and_then(|s| model.vectors.get(s.normal as usize))
+            && let Some(ao) = b.ao.as_mut()
+        {
+            let normal = GVec3::new(normal.x, normal.y, normal.z);
+            let p = |v: &hp3_assets::model::BspVertex| GVec3::new(v.position.x, v.position.y, v.position.z);
+            for k in 1..n - 1 {
+                let (a, bb, c) = (p(&verts[0]), p(&verts[k]), p(&verts[k + 1]));
+                ao.occluders.push(if (bb - a).cross(c - a).dot(normal) >= 0.0 { [a, bb, c] } else { [a, c, bb] });
+            }
+        }
         // The window panes are backlit by the sky outside: HP3 shows them at their own brightness, not the room's.
         let backlit = {
             let path = mp.ref_path(section.material).to_ascii_lowercase();
@@ -1056,6 +1191,9 @@ fn add_actors(b: &mut Batcher<'_, '_>, map: &Rc<Package>, include: &dyn Fn(usize
         let mesh_amb_mul: f32 = std::env::var("HP3_MESH_AMB_MUL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.25);
         let transform = Mat4::from_translation(pos) * rotation_matrix(rotation) * Mat4::from_scale(scale3d * scale) * Mat4::from_translation(-prepivot);
         let uvs = sm.uv_streams.first().map(|s| s.uvs.as_slice()).unwrap_or(&[]);
+        let normal_matrix = transform.inverse().transpose();
+        // The mesh's solid triangles with the sum of their corners' normals, for the occlusion rays (turned below).
+        let mut solid: Vec<([GVec3; 3], GVec3)> = Vec::new();
         for (si_, section) in sm.sections.iter().enumerate() {
             let texture = match skins.get(si_).copied().filter(|s| !s.is_none()) {
                 Some(skin) => b.texture_for(map, skin),
@@ -1063,40 +1201,68 @@ fn add_actors(b: &mut Batcher<'_, '_>, map: &Rc<Package>, include: &dyn Fn(usize
             };
             // A section that lights itself (the orb on the Carpe Retractum font) is drawn at full brightness.
             let self_lit = skins.get(si_).copied().is_none_or(|s| s.is_none()) && materials.get(si_).copied().is_some_and(|m| b.loader.is_self_lit(&sp, m));
-            let normal_matrix = transform.inverse().transpose();
-            let batch = b.batch(texture, None);
+            let gather = b.ao.is_some();
+            let blocks = gather && !b.see_through(&texture);
+            let bi = b.batch_index(texture, None);
+            let batch = &mut b.scene.batches[bi];
             let base = batch.vertices.len() as u32;
             let first = section.first_index as usize;
             let count = section.num_faces as usize * 3;
             let Some(idx) = sm.indices.get(first..first + count) else { continue };
             let mut remap: HashMap<u16, u32> = HashMap::new();
+            let mut lit: Vec<MeshLight> = Vec::new();
+            let world = |vi: u16| {
+                let sv = sm.vertices.get(vi as usize);
+                let v = sv.map(|v| v.position).unwrap_or_default();
+                let nv = sv.map(|v| v.normal).unwrap_or_default();
+                let normal = normal_matrix.transform_vector3(GVec3::new(nv.x, nv.y, nv.z)).normalize_or(GVec3::Z);
+                (transform.transform_point3(GVec3::new(v.x, v.y, v.z)), normal)
+            };
             for &vi in idx {
                 let next = base + remap.len() as u32;
                 let out = *remap.entry(vi).or_insert_with(|| {
-                    let sv = sm.vertices.get(vi as usize);
-                    let v = sv.map(|v| v.position).unwrap_or_default();
-                    let p = transform.transform_point3(GVec3::new(v.x, v.y, v.z));
+                    let (p, normal) = world(vi);
                     let uv = uvs.get(vi as usize).copied().unwrap_or([0.0, 0.0]);
-                    let color = match (lighting, &baked) {
-                        _ if self_lit => [0.5, 0.5, 0.5],
+                    // The light as ambient + direct (the occlusion darkens the first).
+                    let parts = match (lighting, &baked) {
+                        _ if self_lit => None,
                         (Some(_), Some(colors)) => {
                             let c = colors[vi as usize];
-                            (mesh_ambient * mesh_amb_mul + GVec3::new(c.r as f32, c.g as f32, c.b as f32) / 255.0 * mesh_mul).min(GVec3::ONE).to_array()
+                            Some((mesh_ambient * mesh_amb_mul, GVec3::new(c.r as f32, c.g as f32, c.b as f32) / 255.0 * mesh_mul))
                         }
-                        (Some(l), None) => {
-                            let nv = sv.map(|v| v.normal).unwrap_or_default();
-                            let normal = normal_matrix.transform_vector3(GVec3::new(nv.x, nv.y, nv.z)).normalize_or(GVec3::Z);
-                            // Static mesh normals are not trusted yet: either side of a face takes light.
-                            (mesh_ambient + l.lights_at(p, normal).max(l.lights_at(p, -normal))).min(GVec3::ONE).to_array()
+                        // Static mesh normals are not trusted yet: either side of a face takes light.
+                        (Some(l), None) => Some((mesh_ambient, l.lights_at(p, normal).max(l.lights_at(p, -normal)))),
+                        (None, _) => None,
+                    };
+                    let color = match parts {
+                        Some((ambient, direct)) => {
+                            if gather {
+                                lit.push(MeshLight { batch: bi, vertex: next, ambient, direct, normal });
+                            }
+                            (ambient + direct).min(GVec3::ONE).to_array()
                         }
-                        (None, _) => [0.5, 0.5, 0.5],
+                        None => [0.5, 0.5, 0.5],
                     };
                     batch.vertices.push(Vertex { position: p.to_array(), uv, light_uv: MESH_LIGHT_UV, color });
                     next
                 });
                 batch.indices.push(out);
             }
+            if blocks {
+                for t in idx.chunks_exact(3) {
+                    let (a, b_, c) = (world(t[0]), world(t[1]), world(t[2]));
+                    solid.push(([a.0, b_.0, c.0], a.1 + b_.1 + c.1));
+                }
+            }
+            if let Some(ao) = b.ao.as_mut() {
+                ao.mesh_light.append(&mut lit);
+            }
             b.scene.stats.mesh_triangles += section.num_faces as usize;
+        }
+        // A mesh's corner order is the same all over: the side most of its normals point to is its front.
+        if let Some(ao) = b.ao.as_mut() {
+            let agree: f32 = solid.iter().map(|(t, n)| (t[1] - t[0]).cross(t[2] - t[0]).dot(*n).signum()).sum();
+            ao.occluders.extend(solid.into_iter().map(|(t, _)| if agree >= 0.0 { t } else { [t[0], t[2], t[1]] }));
         }
         b.scene.stats.static_meshes += 1;
     }

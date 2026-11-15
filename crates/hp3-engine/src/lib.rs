@@ -912,6 +912,8 @@ pub fn actor_instances(
     // The pawns that cast the shadow map this frame: their index in `out`, where they stand, how strong their strongest
     // light is, the way it travels and how bright their ambient light is.
     let real_shadows = shadows_on && dynamic.actor_shadows_enabled(r);
+    // The dark patch on the ground under each pawn (the blob, or the contact patch under real shadows) can be turned off alone.
+    let blobs = hp3_render::quality::blob_shadows();
     let mut casters: Vec<ShadowCaster> = Vec::new();
     let player_pc = hp3_world::world(vm).player;
     let player_pawn = player_pc.and_then(|pc| hp3_world::get(vm, pc, "Pawn").as_obj());
@@ -1128,7 +1130,7 @@ pub fn actor_instances(
         // With real shadows on, the blob shrinks to a contact patch under the feet and the pawn joins the shadow map's casters.
         let mut caster = None;
         if draw_type == DT_MESH && shadows_on && pawn_class.is_some_and(|p| vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, p))) {
-            if let Some(s) = pawn_shadow(vm, a, shown, &light, real_shadows) {
+            if blobs && let Some(s) = pawn_shadow(vm, a, shown, &light, real_shadows) {
                 shadows.push(s);
             }
             if real_shadows && light.fade <= 0.0 {

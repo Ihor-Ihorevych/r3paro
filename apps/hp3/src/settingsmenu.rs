@@ -182,11 +182,13 @@ impl Settings {
                 vec![
                     row(format!("ANTI-ALIASING: {aa_label}"), "gfx aa"),
                     row(format!("CHARACTER SHADOWS: {}", on_off(quality::actor_shadows())), "gfx shadows"),
+                    row(format!("GROUND BLOB SHADOW: {}", on_off(quality::blob_shadows())), "gfx blobs"),
                     row(format!("SHADOW QUALITY: {}", if quality::high_shadows() { "HIGH" } else { "LOW" }), "gfx quality"),
                     row(format!("TONE MAPPING: {}", on_off(quality::tonemap())), "gfx tonemap"),
                     row(format!("CHARACTER RIM LIGHT: {}", on_off(quality::rim_light())), "gfx rim"),
                     row(format!("HEIGHT FOG: {}", on_off(quality::height_fog())), "gfx heightfog"),
                     row(format!("SOFT PARTICLES: {soft_label}"), "gfx softparticles"),
+                    row(format!("BAKED AO: {} (NEXT LEVEL LOAD)", on_off(quality::baked_ao())), "gfx ao"),
                 ]
             }
             Tab::Game => vec![

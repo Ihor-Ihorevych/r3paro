@@ -306,6 +306,7 @@ fn vpose(root: &Path, package: &str, mesh: &str, out: &Path, seq: Option<&str>, 
 }
 
 fn play(root: &Path, map: &str, out: &Path, ticks: u32) -> Result<(), Box<dyn std::error::Error>> {
+    hp3_render::ao::set_cache_dir(root.join("hp3-cache").join("ao"));
     let set = PackageSet::open(root)?;
     let loader = Loader::new(&set);
     let mut pkg = set.get(map)?;

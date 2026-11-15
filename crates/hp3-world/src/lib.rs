@@ -109,6 +109,9 @@ pub struct World {
     pub stair_floor: std::collections::HashMap<ObjId, f32>,
     /// Toggle movers triggered this tick, with the tick and where their state code stood before (see `TriggerToggle.Trigger`).
     pub toggled: std::collections::HashMap<ObjId, (u64, Option<(hp3_script::StructId, usize)>, Option<hp3_script::vm::Latent>)>,
+    /// Imps holding still after a throw (`ThrowCracker.GoToNextState` override), with the controller's state-change count
+    /// when the hold started.
+    pub imp_hold: std::collections::HashMap<ObjId, u32>,
     /// The physics volumes of the level with their brush planes (built the first time a pawn is checked).
     pub volume_hulls: Option<Vec<VolumeHull>>,
     /// What travelled in with the player (the level keeps it for a restart).
@@ -675,6 +678,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         step_smooth: Default::default(),
         stair_floor: Default::default(),
         toggled: Default::default(),
+        imp_hold: Default::default(),
         volume_hulls: None,
         travel_info: travel.clone().unwrap_or_default(),
         url_options: String::new(),

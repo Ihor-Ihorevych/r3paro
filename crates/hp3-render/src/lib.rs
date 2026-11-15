@@ -1,5 +1,6 @@
 //! The wgpu renderer.
 
+pub mod ao;
 pub mod dynamic;
 pub mod fx;
 pub mod gpu;

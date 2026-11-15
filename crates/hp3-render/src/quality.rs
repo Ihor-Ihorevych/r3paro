@@ -2,7 +2,7 @@
 //! shadow and its quality tier, anti-aliasing, tone mapping, the characters' rim light, height fog and soft particles. Plain
 //! global switches the render passes read each frame; the first read takes its starting values from the environment
 //! (`HP3_ACTOR_SHADOWS=0`, `HP3_SHADOW_QUALITY=low|high`, `HP3_AA=off|fxaa|msaa`, `HP3_TONEMAP=0|1`, `HP3_RIM=0|1`,
-//! `HP3_HEIGHT_FOG=0|1`, `HP3_SOFT_PARTICLES=0|1`).
+//! `HP3_HEIGHT_FOG=0|1`, `HP3_SOFT_PARTICLES=0|1`, `HP3_AO=0|1`, `HP3_BLOB_SHADOWS=0|1`).
 //!
 //! Two shadow tiers: Low is the phone's single shadow map; High (the PC's default) nests several maps of growing reach around the player.
 
@@ -18,6 +18,9 @@ static RIM: AtomicBool = AtomicBool::new(true);
 static HEIGHT_FOG: AtomicBool = AtomicBool::new(true);
 // The one effect that costs an extra pass (the particles are drawn after the scene, reading its depth): off on the phone by default.
 static SOFT: AtomicBool = AtomicBool::new(!cfg!(target_os = "android"));
+// Baked ambient occlusion costs nothing a frame but rays when a level is first built: off on the phone until measured there.
+static BAKED_AO: AtomicBool = AtomicBool::new(!cfg!(target_os = "android"));
+static BLOBS: AtomicBool = AtomicBool::new(true);
 
 /// How edges are smoothed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,7 +91,33 @@ fn start() {
         env_flag("HP3_RIM", &RIM);
         env_flag("HP3_HEIGHT_FOG", &HEIGHT_FOG);
         env_flag("HP3_SOFT_PARTICLES", &SOFT);
+        env_flag("HP3_AO", &BAKED_AO);
+        env_flag("HP3_BLOB_SHADOWS", &BLOBS);
     });
+}
+
+/// The soft dark patch on the ground under each character (the whole shadow without real shadows, a contact patch with them).
+/// Off together with `actor_shadows`, characters cast no shadow at all.
+pub fn blob_shadows() -> bool {
+    start();
+    BLOBS.load(Relaxed)
+}
+
+pub fn set_blob_shadows(on: bool) {
+    start();
+    BLOBS.store(on, Relaxed);
+}
+
+/// Corners and crevices of the level are darkened by ambient occlusion baked into its lighting when the scene is built (`ao`);
+/// a change shows from the next level load.
+pub fn baked_ao() -> bool {
+    start();
+    BAKED_AO.load(Relaxed)
+}
+
+pub fn set_baked_ao(on: bool) {
+    start();
+    BAKED_AO.store(on, Relaxed);
 }
 
 /// Whether the characters cast real shadows (otherwise only their blob).

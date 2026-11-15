@@ -414,6 +414,7 @@ fn open_gpu(
 
 pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let config = hp3_core::Config::load(root);
+    hp3_render::ao::set_cache_dir(root.join("hp3-cache").join("ao"));
     let map = map
         .map(str::to_string)
         .or_else(|| config.get("URL", "LocalMap").map(|m| m.trim_end_matches(".unr").to_string()))

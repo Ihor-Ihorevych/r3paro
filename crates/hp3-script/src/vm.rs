@@ -146,6 +146,9 @@ pub struct Vm<'s> {
     /// switches them on again or the object enters a state (which starts with every event on).
     pub(crate) disabled_events: HashMap<ObjId, Vec<Name>>,
     pub(crate) state_sets: HashMap<ObjId, u32>,
+    /// Set by a native that starts a latent wait from state code (`Latent::Sleep`) and wants the statement that called it
+    /// run again once the wait is over, instead of the code going on with the next statement.
+    pub repeat_statement: bool,
     /// Statement being executed, for iterators to find their loop body.
     current_pc: usize,
     /// Script offset of the statement being run (for messages).
@@ -209,6 +212,7 @@ impl<'s> Vm<'s> {
             in_end_state: Default::default(),
             disabled_events: HashMap::default(),
             state_sets: HashMap::default(),
+            repeat_statement: false,
             current_pc: 0,
             current_offset: 0,
             ext: None,
@@ -303,6 +307,11 @@ impl<'s> Vm<'s> {
     }
 
     /// `Class.Function` of a function struct: the outer class name and its own name.
+    /// How many times an object has had its state changed (a different state each time).
+    pub fn state_set_count(&self, o: ObjId) -> u32 {
+        self.state_sets.get(&o).copied().unwrap_or(0)
+    }
+
     pub fn function_path(&self, f: StructId) -> String {
         let def = self.db.get(f);
         let outer = def.pkg.exports[def.export].outer;
@@ -980,6 +989,7 @@ impl<'s> Vm<'s> {
                 }
                 if self.latent.contains_key(&o) {
                     let next = match flow {
+                        _ if std::mem::take(&mut self.repeat_statement) => pc,
                         Flow::Jump(t) => t,
                         _ => pc + 1,
                     };

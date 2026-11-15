@@ -276,6 +276,16 @@ actor lights are looked up through a ground grid. `perf:` lines on Android now i
   the analysis tool) are not read by the retail engine. The older single-jaw-bone turn remains for speakers without the nine sequences, the
   amplitude bytes of creature sounds still drive `mouth_anim`. Tools: `HP3_LIPSYNC_DEBUG=1`, `HP3_LIPSYNC_DUMP=1` (envelope rows),
   `hp3-view pose` with `HP3_LIST_SEQS`, `HP3_FACE_POSES`, `HP3_FACE_REF`.
+  **Broken from 0.7.0 to 0.8.4, fixed 2026-11-15**: the rule in `anim::tick_actor` that drops the sequence of a faded-out one-shot
+  channel (Harry's dementor hold pose) also dropped every mouth shape whose weight was 0 for a tick, so the weights were worked out and
+  nothing was posed. The shapes are now marked `Channel::held_pose` and keep their sequence. Seen on screen (Ron, Adv1Express intro:
+  `HP3_SPAWN_CAM=40,22 HP3_SHOT=...@750,770,...`); `HP3_LIPSYNC_DEBUG` prints the channel alphas (`none` = no sequence).
+- **Expressions** are the scripts' own: `KWPawn.HandleFacialExpression` reads a `[Joy]`-style tag at the start of the dialog text and
+  `FacialAnimManager.PlayFacialAnim` plays that two-frame pose on channel 24 limited to `HeadBone` (in 0.5 s, held for the line, out 0.5 s).
+  `HpDialog.int` tags all 1855 lines (1463 `_Calm` = nothing; Joy 127, Fear 100, Surprise 60, Angry 54, Disgust 21, Smirk 17, Sad 13);
+  `HpDialog.Rus` has no tags, so the Russian game shows no expressions. **Blinks** (`KWPawn.StartBlinkAnimation`, channels 34 to 39, lids
+  and brows) need `bCanBlink` and `LeftBlinkAnim`/`RightBlinkAnim`, which no pawn in the retail maps has set (the `blinkleft`/`blinkright`
+  poses exist in the animation sets but nothing plays them).
 - **Soft shadows** (new, not in the original): `actor_instances` traces down from every pawn (`pawn_shadow`) and gives the renderer a quad
   lying on the ground (`Dynamic::set_shadows`, `BlobShadow`): a soft bell, stretched away from the strongest light on the pawn, weaker when
   the pawn is high above the ground or poorly lit. `HP3_NO_SHADOWS=1` turns them off, `HP3_SHADOW_DEBUG=1` prints the count.
