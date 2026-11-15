@@ -60,6 +60,10 @@ pub struct Collision {
     /// Whether the trace being made is for the player's pawn (which `bBlockPlayers` blocks) or for any other
     /// actor (which `bBlockActors` blocks).
     player_mover: bool,
+    /// The rabbit or dragon the player controls, if any. Volumes treat it as a creature (`player_mover` is false for it),
+    /// but against another actor it is the player, as in the original's `IsBlockedBy`: it is stopped by `bBlockPlayers`.
+    /// The Lapifors dirt mound (`bBlockActors` only, a 72-unit box) must let the rabbit in to within 45 units to be dug.
+    pub animal_player: Option<ObjId>,
     /// For the trace being made: the thing moving is not stopped by blocking actors (it does not have
     /// `bBlockActors`) or by the level's geometry (it does not have `bCollideWorld`).
     passes_actors: bool,
@@ -650,8 +654,9 @@ impl Collision {
                 keep(h);
             }
         }
+        let as_player = self.player_mover || (ignore.is_some() && ignore == self.animal_player);
         for b in self.actors.iter().filter(|_| actors && !self.passes_actors) {
-            if Some(b.actor) == ignore || (b.owner.is_some() && b.owner == ignore) || (self.mover_owner.is_some() && self.mover_owner == Some(b.actor)) || !(if self.player_mover { b.blocks_players } else { b.blocks_actors }) {
+            if Some(b.actor) == ignore || (b.owner.is_some() && b.owner == ignore) || (self.mover_owner.is_some() && self.mover_owner == Some(b.actor)) || !(if as_player { b.blocks_players } else { b.blocks_actors }) {
                 continue;
             }
             if let Some(h) = box_trace(b, start, end, extent) {

@@ -620,6 +620,30 @@ fn actors_of(vm: &mut Vm<'_>, class: Option<ObjId>, tag: Name) -> Vec<ObjId> {
     out
 }
 
+/// The live actors of a class and tag made at or after `from`. Spawned actors are added to the end of the actor list in the order
+/// they were made, and object ids only grow, so they are the list's tail.
+fn actors_made_since(vm: &mut Vm<'_>, class: Option<ObjId>, tag: Name, from: ObjId) -> Vec<ObjId> {
+    let class = class.and_then(|c| vm.class_of(c));
+    let new: Vec<ObjId> = world(vm).actors.iter().rev().take_while(|a| a.0 >= from.0).copied().collect();
+    let mut out = Vec::new();
+    for a in new.into_iter().rev() {
+        let e = vm.db.objects.get(a);
+        if e.deleted {
+            continue;
+        }
+        if let (Some(want), Some(have)) = (class, e.class)
+            && !vm.is_child_of(have, want)
+        {
+            continue;
+        }
+        if tag != Name::NONE && get(vm, a, "Tag").as_name() != tag {
+            continue;
+        }
+        out.push(a);
+    }
+    out
+}
+
 fn link(vm: &mut Vm<'_>, this: Option<ObjId>, list: &str, next: &str) {
     let (Some(o), Some(li)) = (this, world(vm).level_info) else { return };
     let head = get(vm, li, list);
@@ -665,6 +689,19 @@ pub fn register(vm: &mut Vm<'_>) {
     vm.register_iterator("Actor.DynamicActors", |vm, _this, a| {
         let tag = a.get(2).map(Value::as_name).unwrap_or(Name::NONE);
         let found: Vec<ObjId> = actors_of(vm, obj_arg(a, 0), tag).into_iter().filter(|&x| !get(vm, x, "bStatic").as_bool()).collect();
+        Ok(found.into_iter().map(|x| vec![a[0].clone(), Value::Object(Some(x)), Value::Name(tag)]).collect())
+    });
+    // Actors spawned while one of these loops runs are visited too, as the original walks the actor list to its current end:
+    // the Final Exam's first imp is spawned by a `TriggerEvent('FloorOneWaveOne')` loop with that same tag, and wakes only
+    // from that loop's `Trigger` (its `SeePlayer` does nothing).
+    vm.register_iterator_tail("Actor.AllActors", |vm, _this, a, from| {
+        let tag = a.get(2).map(Value::as_name).unwrap_or(Name::NONE);
+        let found = actors_made_since(vm, obj_arg(a, 0), tag, from);
+        Ok(found.into_iter().map(|x| vec![a[0].clone(), Value::Object(Some(x)), Value::Name(tag)]).collect())
+    });
+    vm.register_iterator_tail("Actor.DynamicActors", |vm, _this, a, from| {
+        let tag = a.get(2).map(Value::as_name).unwrap_or(Name::NONE);
+        let found: Vec<ObjId> = actors_made_since(vm, obj_arg(a, 0), tag, from).into_iter().filter(|&x| !get(vm, x, "bStatic").as_bool()).collect();
         Ok(found.into_iter().map(|x| vec![a[0].clone(), Value::Object(Some(x)), Value::Name(tag)]).collect())
     });
     vm.register_iterator("Actor.ChildActors", |vm, this, a| {

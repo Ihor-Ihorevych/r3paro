@@ -513,10 +513,20 @@ pub(crate) fn is_player_pawn(vm: &mut Vm<'_>, a: ObjId) -> bool {
 /// player has turned into, which go where the heroes may not.
 fn blocked_as_player(vm: &mut Vm<'_>, a: ObjId) -> bool {
     if !is_player_pawn(vm, a) {
+        if world(vm).collision.animal_player == Some(a) {
+            world(vm).collision.animal_player = None;
+        }
         return false;
     }
     let class = vm.db.objects.get(a).class;
     let animal = ["LapiforPawn", "Draconisfors"].iter().any(|n| vm.db.find(n).zip(class).is_some_and(|(k, c)| vm.is_child_of(c, k)));
+    // Other actors still see it as the player (see `Collision::animal_player`).
+    let c = &mut world(vm).collision;
+    if animal {
+        c.animal_player = Some(a);
+    } else if c.animal_player.is_some() {
+        c.animal_player = None;
+    }
     !animal
 }
 

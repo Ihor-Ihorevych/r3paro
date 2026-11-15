@@ -70,6 +70,9 @@ struct IterState {
     places: Vec<(usize, Place)>,
     /// First statement of the loop body.
     body: usize,
+    /// For an iterator over a growing source: its tail function, self, the argument values, and the first object made after
+    /// the entries taken so far.
+    tail: Option<(IterTailFn, Option<ObjId>, Vec<Value>, u32)>,
 }
 
 pub enum RunEnd {
@@ -88,6 +91,11 @@ pub enum Latent {
 
 /// An iterator native: one entry per iteration, each holding the values of all arguments.
 pub type IterFn = fn(&mut Vm<'_>, Option<ObjId>, &[Value]) -> VmResult<Vec<Vec<Value>>>;
+
+/// The rest of an iterator whose source can grow while its loop runs: the entries for objects made at or after the given one.
+/// The original's actor iterators walk the level's actor list up to its current end at every step, so an actor spawned by the
+/// loop body (a `TriggerEvent` whose triggered spawner makes an actor carrying the same tag) is visited too.
+pub type IterTailFn = fn(&mut Vm<'_>, Option<ObjId>, &[Value], ObjId) -> VmResult<Vec<Vec<Value>>>;
 
 #[derive(Clone, Debug)]
 enum Root {
@@ -131,6 +139,7 @@ pub struct Vm<'s> {
     /// `Object.AndAnd_BoolBool` and `Object.OrOr_BoolBool`, whose right operand is evaluated only when needed.
     short_circuit: [Option<StructId>; 2],
     iterators: HashMap<String, IterFn>,
+    iterator_tails: HashMap<String, IterTailFn>,
     /// Objects whose state code is waiting, and on what.
     pub latent: HashMap<ObjId, Latent>,
     /// Where each object's state code resumes.
@@ -206,6 +215,7 @@ impl<'s> Vm<'s> {
             rng: 0x1234_5678,
             short_circuit: [None, None],
             iterators: HashMap::default(),
+            iterator_tails: HashMap::default(),
             latent: HashMap::default(),
             state_pc: HashMap::default(),
             state_changed: Default::default(),
@@ -288,6 +298,11 @@ impl<'s> Vm<'s> {
     /// Adds an iterator native, by `Class.Function`.
     pub fn register_iterator(&mut self, path: &str, f: IterFn) {
         self.iterators.insert(path.to_ascii_lowercase(), f);
+    }
+
+    /// Gives an iterator a tail: when its loop runs out, the entries for objects made since it started are added.
+    pub fn register_iterator_tail(&mut self, path: &str, f: IterTailFn) {
+        self.iterator_tails.insert(path.to_ascii_lowercase(), f);
     }
 
     /// Whether a native function has an implementation.
@@ -1099,6 +1114,8 @@ impl<'s> Vm<'s> {
                         other => values.push(self.eval(other, frame, None)?),
                     }
                 }
+                // Taken before the iterator runs: anything made from here on is the tail's to find.
+                let mark = self.db.objects.len() as u32;
                 let items = if self.profile {
                     let t = std::time::Instant::now();
                     let r = iter(self, iter_this, &values)?;
@@ -1114,7 +1131,8 @@ impl<'s> Vm<'s> {
                     self.clear_iter_objects(&places, &values, frame);
                     return Ok(Flow::Jump(*end));
                 }
-                let state = IterState { items, index: 0, places, body };
+                let tail = self.iterator_tails.get(&path).copied().map(|t| (t, iter_this, values, mark));
+                let state = IterState { items, index: 0, places, body, tail };
                 self.write_iter(&state, frame);
                 frame.iters.push(state);
                 Flow::Next
@@ -1122,6 +1140,14 @@ impl<'s> Vm<'s> {
             Expr::IteratorNext => {
                 let Some(mut state) = frame.iters.pop() else { return Ok(Flow::Next) };
                 state.index += 1;
+                if state.index >= state.items.len()
+                    && let Some((t, this, values, mark)) = state.tail.take()
+                {
+                    let next = self.db.objects.len() as u32;
+                    let found = if next > mark { t(self, this, &values, ObjId(mark))? } else { Vec::new() };
+                    state.items.extend(found);
+                    state.tail = Some((t, this, values, next));
+                }
                 let more = state.index < state.items.len();
                 if more {
                     self.write_iter(&state, frame);
