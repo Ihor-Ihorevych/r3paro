@@ -441,8 +441,6 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
     let mut level_inputs = hp3_engine::map_inputs(&mut vm, &loader, &pkg, std::env::var_os("HP3_UNLIT").is_none());
     let scene = scene::build_map(&loader, &pkg, &|i| statics.contains(&i), &level_inputs);
     let mut lighting = level_inputs.lighting.take();
-    let mut level_pkg = pkg.clone();
-    let mut level_statics = statics;
     eprintln!("{map}: scene built in {:?} ({:?})", t.elapsed(), scene.stats);
 
     // On a phone the game is played with the screen on its side, whichever way it is held.
@@ -467,6 +465,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
     let (instance, surface, caps, format, renderer) = open_gpu(&window)?;
     eprintln!("GPU: {}", renderer.adapter_info);
     let mut gpu_scene = renderer.upload_scene(&scene);
+    let mut switched = hp3_engine::switched_batches(&scene);
     let dynamic = hp3_render::dynamic::Dynamic::new(&renderer);
     let mut mesh_cache = hp3_engine::MeshCache::default();
     let overlay = hp3_render::overlay::Overlay::new(&renderer);
@@ -574,7 +573,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             let front = hp3_world::quidditch::menu::front_end_map(&mut vm);
             front.eq_ignore_ascii_case(&current_map) || hp3_world::gui::top_menu_class(&mut vm).is_some_and(|c| c.starts_with("Tab_"))
         };
-        let status = settings_status(&vm, &current_map);
+        let status = settings_status(&mut vm, &current_map);
         // Window coordinates to the render target's pixels (the mouse and a finger).
         let pixel_scale = width as f32 / window.size().0.max(1) as f32;
         let to_pixels = move |x: f32, y: f32| (x * pixel_scale, y * pixel_scale);
@@ -1008,18 +1007,14 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             }
         }
         stages.push(("ticks", frame_start.elapsed().as_secs_f32() * 1000.0));
-        // A script flipped a material switch (Glacius froze the water): what was baked from it is built again.
+        // A script flipped a material switch (Glacius froze the water): the batches drawn with a switched material take the
+        // texture it shows now, and actors (whose meshes were made with the old one) are made again.
         switch_check += 1;
         if switch_check % 6 == 0 && hp3_engine::sync_material_switches(&mut vm, &loader) {
             let t = Instant::now();
-            level_inputs.lighting = lighting.take();
-            let scene = scene::build_map(&loader, &level_pkg, &|i| level_statics.contains(&i), &level_inputs);
-            lighting = level_inputs.lighting.take();
-            gpu_scene = renderer.upload_scene(&scene);
-            drop(scene);
-            loader.trim();
+            hp3_engine::retexture_switched(&renderer, &mut gpu_scene, &loader, &switched);
             mesh_cache = hp3_engine::MeshCache::default();
-            eprintln!("material switch changed: scene rebuilt in {:?}", t.elapsed());
+            eprintln!("material switch changed: {} batches retextured in {:?}", switched.len(), t.elapsed());
         }
         // A level switch the game asked for: the new level is loaded and its scene built.
         if hp3_world::world(&mut vm).quit_requested {
@@ -1052,12 +1047,10 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             let mut inputs = hp3_engine::map_inputs(&mut vm, &loader, &pkg, std::env::var_os("HP3_UNLIT").is_none());
             let scene = scene::build_map(&loader, &pkg, &|i| statics.contains(&i), &inputs);
             gpu_scene = renderer.upload_scene(&scene);
+            switched = hp3_engine::switched_batches(&scene);
             drop(scene);
             loader.trim();
             lighting = inputs.lighting.take();
-            level_inputs = inputs;
-            level_statics = statics;
-            level_pkg = pkg.clone();
             mesh_cache = hp3_engine::MeshCache::default();
             fog_state = hp3_engine::FogState::default();
             particle_cache = hp3_engine::ParticleCache::default();
@@ -1131,7 +1124,7 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
         let mut quads = hp3_engine::hud_quads(&mut vm, &loader, &mut hud_cache, width, height);
         quads.extend(hp3_engine::screen_flash(&mut vm, width, height));
         if settings_view.open {
-            quads.extend(settings_view.quads(width, height, &settings_status(&vm, &current_map)));
+            quads.extend(settings_view.quads(width, height, &settings_status(&mut vm, &current_map)));
         }
         if captain_talk.open {
             quads.extend(captain_talk.quads(width, height, &captain_offer));
@@ -1220,12 +1213,14 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
 }
 
 /// What the Settings view shows of the game's state.
-fn settings_status(vm: &Vm<'_>, current_map: &str) -> settingsmenu::Status {
+fn settings_status(vm: &mut Vm<'_>, current_map: &str) -> settingsmenu::Status {
+    let current_state = hp3_world::current_game_state(vm);
     settingsmenu::Status {
         carpe_crab: hp3_world::settings::flag(vm, "hp3.app", "CarpeCrab", false),
         fps_limit: platform::fps_limit(),
         fov_offset: platform::fov_offset(),
         current_map: current_map.to_string(),
+        current_state,
     }
 }
 

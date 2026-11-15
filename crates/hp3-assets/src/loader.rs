@@ -60,6 +60,8 @@ pub struct Loader<'s> {
     /// `Current` of material switches as the running game has them (scripts flip them: the water Glacius freezes).
     /// A switch not in here shows what its file says.
     switch_current: RefCell<HashMap<ObjKey, usize>>,
+    /// Set by `base_texture` when the way down to the texture went through a material switch.
+    switch_seen: std::cell::Cell<bool>,
 }
 
 /// Unreal rotation units: 65536 per turn.
@@ -80,7 +82,7 @@ pub fn tag_rotator(tag: &Tag<'_>) -> Option<[i32; 3]> {
 
 impl<'s> Loader<'s> {
     pub fn new(set: &'s PackageSet) -> Self {
-        Loader { set, images: RefCell::new(HashMap::new()), raw_images: RefCell::new(HashMap::new()), assets: RefCell::new(HashMap::new()), switch_current: RefCell::new(HashMap::new()) }
+        Loader { set, images: RefCell::new(HashMap::new()), raw_images: RefCell::new(HashMap::new()), assets: RefCell::new(HashMap::new()), switch_current: RefCell::new(HashMap::new()), switch_seen: std::cell::Cell::new(false) }
     }
 
     /// Forgets the switches' run-time entries (a new level starts them over).
@@ -91,6 +93,11 @@ impl<'s> Loader<'s> {
     /// Tells the loader which entry a material switch shows now; true when that differs from what it showed before.
     pub fn set_switch_current(&self, k: ObjKey, current: usize) -> bool {
         self.switch_current.borrow_mut().insert(k, current) != Some(current)
+    }
+
+    /// Whether the last `base_texture` passed through a material switch (what it found can change while the level runs).
+    pub fn last_texture_switched(&self) -> bool {
+        self.switch_seen.get()
     }
 
     /// The native asset decoded from an export, if its class has one.
@@ -408,6 +415,7 @@ impl<'s> Loader<'s> {
     /// Follows a material reference down to a texture: shaders' diffuse, combiners' first input, modifiers'
     /// material, the current entry of a switch or sequence.
     pub fn base_texture(&self, pkg: &Rc<Package>, r: ObjRef) -> Option<(Rc<Package>, usize)> {
+        self.switch_seen.set(false);
         let (mut p, mut i) = self.set.resolve(pkg, r)?;
         for _ in 0..16 {
             let chain = self.set.export_chain(&p, i);
@@ -432,6 +440,9 @@ impl<'s> Loader<'s> {
             let switch = !off && chain.iter().any(|c| c.eq_ignore_ascii_case("MaterialSwitch"));
             let sequence = !off && chain.iter().any(|c| c.eq_ignore_ascii_case("MaterialSequence"));
             let live_current = if switch { self.switch_current.borrow().get(&key(&p, i)).copied() } else { None };
+            if switch {
+                self.switch_seen.set(true);
+            }
             let next = self.with_tags(&p, i, |tags, _| {
                 if switch
                     && let Some(t) = props::find(&p, tags, "Materials", 0)

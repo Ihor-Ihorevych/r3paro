@@ -221,6 +221,8 @@ pub struct FluidSurface {
     /// The actor (its object id), whose place `GpuRenderer::move_fluids` follows.
     pub actor: u32,
     pub texture: ObjKey,
+    /// Its skin, when that goes through a material switch (see `Batch::switched`): the package and the export.
+    pub switched: Option<ObjKey>,
     pub at: [f32; 3],
     pub yaw: i32,
     pub nx: usize,
@@ -318,6 +320,9 @@ pub struct Batch {
     /// A water surface that its actor may carry elsewhere (a mover lowering a fountain): the actor's id and the place the vertices
     /// were built at, so `GpuRenderer::move_fluids` can shift them.
     pub fluid: Option<(u32, [f32; 3])>,
+    /// The material its faces have, when that goes through a material switch: a script can flip it while the level runs
+    /// (Glacius freezes water), and the batch is then given the new texture (`GpuRenderer::retexture`).
+    pub switched: Option<(Rc<Package>, ObjRef)>,
     /// Belongs to the sky zone: drawn only in the sky pass, from the sky zone's camera.
     pub sky: bool,
     pub vertices: Vec<Vertex>,
@@ -389,11 +394,13 @@ pub fn rotation_matrix(rot: [i32; 3]) -> Mat4 {
 
 struct Batcher<'l, 's> {
     loader: &'l Loader<'s>,
-    by_texture: HashMap<(Option<ObjKey>, Option<usize>, Option<(u32, u32)>, bool), usize>,
+    by_texture: HashMap<(Option<ObjKey>, Option<usize>, Option<(u32, u32)>, bool, Option<(String, i32)>), usize>,
     /// Whether the batches `batch` hands out are the sky zone's.
     sky: bool,
     /// The scroll of the material `texture_for` looked at last; the next `batch` takes it.
     last_pan: Option<loader::Pan>,
+    /// The material `texture_for` looked at last, when it goes through a material switch; the next `batch` takes it.
+    last_switch: Option<(Rc<Package>, ObjRef)>,
     scene: Scene,
     /// The level's model (an `Asset::Model`), kept so that static meshes can find the zone they stand in.
     zone_model: Option<Rc<Asset>>,
@@ -420,7 +427,7 @@ struct MeshLight {
 
 impl Batcher<'_, '_> {
     fn new<'l, 's>(loader: &'l Loader<'s>, scene: Scene, ao: bool) -> Batcher<'l, 's> {
-        Batcher { loader, by_texture: HashMap::new(), sky: false, last_pan: None, scene, zone_model: None, ao: ao.then(AoGather::default) }
+        Batcher { loader, by_texture: HashMap::new(), sky: false, last_pan: None, last_switch: None, scene, zone_model: None, ao: ao.then(AoGather::default) }
     }
 
     /// Whether the texture lets light through somewhere (cut-out or blended): such surfaces do not occlude.
@@ -465,7 +472,9 @@ impl Batcher<'_, '_> {
 
     fn texture_for(&mut self, pkg: &Rc<Package>, material: ObjRef) -> Option<ObjKey> {
         self.last_pan = self.loader.pan_of(pkg, material);
-        let (tp, ti) = self.loader.base_texture(pkg, material)?;
+        let found = self.loader.base_texture(pkg, material);
+        self.last_switch = self.loader.last_texture_switched().then(|| (pkg.clone(), material));
+        let (tp, ti) = found?;
         let k = loader::key(&tp, ti);
         if !self.scene.images.contains_key(&k) {
             match self.loader.image(&tp, ti) {
@@ -511,9 +520,12 @@ impl Batcher<'_, '_> {
     fn batch_index(&mut self, texture: Option<ObjKey>, lightmap: Option<usize>) -> usize {
         let next = self.scene.batches.len();
         let pan = self.last_pan.take();
-        let i = *self.by_texture.entry((texture.clone(), lightmap, pan.map(|p| (p.u.to_bits(), p.v.to_bits())), self.sky)).or_insert(next);
+        let switched = self.last_switch.take();
+        // Faces whose material can be switched keep to batches of their own, so that only they change when it is.
+        let switch_id = switched.as_ref().map(|(p, r)| (p.name.clone(), r.0));
+        let i = *self.by_texture.entry((texture.clone(), lightmap, pan.map(|p| (p.u.to_bits(), p.v.to_bits())), self.sky, switch_id)).or_insert(next);
         if i == next {
-            self.scene.batches.push(Batch { texture, lightmap, blend: None, pan, fluid: None, sky: self.sky, vertices: Vec::new(), indices: Vec::new() });
+            self.scene.batches.push(Batch { texture, lightmap, blend: None, pan, fluid: None, sky: self.sky, switched, vertices: Vec::new(), indices: Vec::new() });
         }
         i
     }
@@ -541,11 +553,12 @@ fn add_fluids(b: &mut Batcher<'_, '_>, inputs: &MapInputs) {
             continue;
         }
         let Some(texture) = b.texture_key(&f.texture) else { continue };
+        let switched = f.switched.as_ref().and_then(|(p, i)| Some((b.loader.set.get(p).ok()?, ObjRef::from_export(*i))));
         let (sin, cos) = (f.yaw as f32 * std::f32::consts::TAU / 65536.0).sin_cos();
         let at = GVec3::from(f.at);
         // Unlit: the reflection is its own light (the surroundings are too dark for it).
         let color = [0.5, 0.5, 0.5];
-        let mut batch = Batch { texture: Some(texture), lightmap: None, blend: None, pan: None, fluid: Some((f.actor, f.at)), sky: false, vertices: Vec::with_capacity(f.nx * f.ny), indices: Vec::new() };
+        let mut batch = Batch { texture: Some(texture), lightmap: None, blend: None, pan: None, fluid: Some((f.actor, f.at)), sky: false, switched, vertices: Vec::with_capacity(f.nx * f.ny), indices: Vec::new() };
         for j in 0..f.ny {
             for i in 0..f.nx {
                 let (lx, ly) = ((i as f32 - (f.nx - 1) as f32 / 2.0) * f.spacing, (j as f32 - (f.ny - 1) as f32 / 2.0) * f.spacing);
@@ -637,7 +650,7 @@ fn add_terrain(b: &mut Batcher<'_, '_>, map: &Rc<Package>, inputs: &MapInputs) {
                 break;
             }
             let m = layer.matrix;
-            let mut batch = Batch { texture: Some(texture), lightmap: None, blend: alpha, pan: None, fluid: None, sky: false, vertices: Vec::with_capacity(w * h), indices: Vec::new() };
+            let mut batch = Batch { texture: Some(texture), lightmap: None, blend: alpha, pan: None, fluid: None, sky: false, switched: None, vertices: Vec::with_capacity(w * h), indices: Vec::new() };
             for k in 0..w * h {
                 let p = pos(k);
                 let u = p.x * m[0][0] + p.y * m[1][0] + p.z * m[2][0] + m[3][0];
@@ -709,6 +722,8 @@ fn add_deco(b: &mut Batcher<'_, '_>, map: &Rc<Package>, t: &hp3_assets::level::T
         let uvs = sm.uv_streams.first().map(|s| s.uvs.as_slice()).unwrap_or(&[]);
         // One texture per mesh section, found once.
         let textures: Vec<Option<ObjKey>> = (0..sm.sections.len()).map(|si| materials.get(si).copied().and_then(|m| b.texture_for(&mesh_pkg, m))).collect();
+        // Looked up ahead of their batches: no single material to remember for a switch.
+        b.last_switch = None;
         let (hx, hy) = (t.heightmap_x as usize, t.heightmap_y as usize);
         let mut placed = 0usize;
         for (sector_index, sector_ref) in t.sectors.iter().enumerate() {

@@ -2504,6 +2504,40 @@ pub fn memprobe(tag: &str) {
 #[cfg(not(windows))]
 pub fn memprobe(_tag: &str) {}
 
+/// The story states the levels use (`HPWorldInfo.GameStateMasterList` also lists 020, 030, 050, 080, 110 and 120, which no
+/// actor is grouped under and nothing sets), in story order, with what the story has got to in each. The names are ours: the
+/// game's data has only the numbers. They follow the cutscenes that set each state (`SetGameState` in System/Cutscenes).
+pub const STORY_STATES: &[(&str, &str)] = &[
+    ("GState000", "START OF TERM"),
+    ("GState010", "CARPE RETRACTUM CHALLENGE"),
+    ("GState040", "BUCKBEAK LESSON"),
+    ("GState060", "DRACONIFORS LESSON"),
+    ("GState065", "DRACONIFORS CHALLENGE"),
+    ("GState070", "QUIDDITCH, PATRONUS, GLACIUS"),
+    ("GState075", "GLACIUS CHALLENGE, BUCKBEAK SENTENCED"),
+    ("GState085", "SHRIEKING SHACK, LAKE DEMENTORS"),
+    ("GState090", "TIME-TURNER NIGHT"),
+    ("GState100", "FINAL EXAMS"),
+];
+
+/// A story state shown with its number and name (`040 BUCKBEAK LESSON`); one we have no name for shows its number alone.
+pub fn story_state_label(state: &str) -> String {
+    let number = state.get(6..).filter(|_| state.len() > 6 && state[..6].eq_ignore_ascii_case("gstate")).unwrap_or(state);
+    match STORY_STATES.iter().find(|(s, _)| s.eq_ignore_ascii_case(state)) {
+        Some((_, name)) => format!("{number} {name}"),
+        None => number.to_ascii_uppercase(),
+    }
+}
+
+/// The story state the running level is in (`GameInfo.CurrentGameState`).
+pub fn current_game_state(vm: &mut Vm<'_>) -> Option<String> {
+    let game = world(vm).level_info.and_then(|li| get(vm, li, "Game").as_obj())?;
+    match get(vm, game, "CurrentGameState") {
+        Value::Str(s) if !s.is_empty() => Some(s.to_string()),
+        _ => None,
+    }
+}
+
 /// The story state a level picked from a menu should start in: the lowest `GState` the map's actors are grouped under apart
 /// from the starting one (a level that is jumped to starts in its first story state, not in `GState000`, which the next level's
 /// start spots do not expect and where the way out of the level ends in a staging room). `None` when the map has no such groups.

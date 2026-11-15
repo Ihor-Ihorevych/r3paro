@@ -497,9 +497,15 @@ pub fn spawn(vm: &mut Vm<'_>, spawner: Option<ObjId>, a: &[Value]) -> Result<Val
     set(vm, obj, "Instigator", instigator);
     // An actor that collides with the world is fitted to a free place near where it was asked for, as the original does when
     // it spawns one: a creature born with its feet in the floor is lifted out of it, not left to fall through.
+    // One that fits nowhere near is not made at all, as the original's SpawnActor refuses it (FindSpot fails); scripts
+    // that must place something try again elsewhere (`FancySpawn`). The Final Exam's top-floor imps were made wedged
+    // between a ledge and the ceiling and stayed stuck there, each costing hundreds of sweeps a tick.
     if get(vm, obj, "bCollideWorld").as_bool() {
         let at = crate::physics::vec(&get(vm, obj, "Location"));
-        crate::physics::far_move(vm, obj, at, false, false);
+        if !crate::physics::far_move(vm, obj, at, false, false) {
+            vm.db.objects.get_mut(obj).deleted = true;
+            return Ok(Value::Object(None));
+        }
     }
     // Before the game and its mutators exist (the game spawns its managers in its own PreBeginPlay) there is no one to ask whether
     // an actor is relevant, and `Actor.PreBeginPlay` would take the missing answer for "no" and destroy it: the vendor, wizard card

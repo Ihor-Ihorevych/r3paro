@@ -51,6 +51,27 @@ pub fn sync_material_switches(vm: &mut Vm<'_>, loader: &Loader<'_>) -> bool {
     changed
 }
 
+/// The batches of a built scene whose material goes through a material switch: their index and that material. Kept after the
+/// scene itself is dropped, so that a flipped switch only gives these their new texture (`retexture_switched`).
+pub fn switched_batches(scene: &hp3_render::scene::Scene) -> Vec<(usize, Rc<Package>, ObjRef)> {
+    scene.batches.iter().enumerate().filter_map(|(i, b)| b.switched.as_ref().map(|(p, r)| (i, p.clone(), *r))).collect()
+}
+
+/// After `sync_material_switches` says a switch changed: each switched batch is looked up again and drawn with the texture
+/// and scroll its material leads to now. Nothing else of the scene is built again.
+pub fn retexture_switched(renderer: &hp3_render::gpu::Renderer, scene: &mut hp3_render::gpu::GpuScene, loader: &Loader<'_>, batches: &[(usize, Rc<Package>, ObjRef)]) {
+    for (batch, pkg, material) in batches {
+        let found = loader.base_texture(pkg, *material);
+        let key = found.as_ref().map(|(p, i)| loader::key(p, *i));
+        let image = found.and_then(|(p, i)| loader.image(&p, i));
+        // HP3_SWITCH_DEBUG: what each switched batch is drawn with now.
+        if std::env::var_os("HP3_SWITCH_DEBUG").is_some() {
+            eprintln!("switch: batch {batch} material {} -> {key:?} image {:?}", pkg.ref_path(*material), image.as_ref().map(|i| (i.width, i.height, i.translucent)));
+        }
+        renderer.retexture(scene, *batch, key.as_ref(), image.as_deref(), loader.pan_of(pkg, *material));
+    }
+}
+
 /// `LightEffect` of sunlights in HP3 (the `Sunlight` class default).
 pub(crate) const LE_SUNLIGHT: u8 = 19;
 
@@ -213,6 +234,7 @@ pub fn map_inputs(vm: &mut Vm<'_>, loader: &Loader<'_>, map: &Package, lit: bool
                 _ => None,
             };
             let Some(texture) = skin.and_then(|s| texture_key(vm, loader, s)) else { continue };
+            let switched = if loader.last_texture_switched() { skin.and_then(|s| export_of(vm, s)).map(|(p, i)| (p.name.clone(), i)) } else { None };
             let at = hp3_world::physics::vec(&hp3_world::get(vm, a, "Location"));
             let yaw = hp3_world::get(vm, a, "Rotation").fields().get(1).map_or(0, Value::as_int);
             let size = |vm: &mut Vm<'_>, n: &str| hp3_world::get(vm, a, n).as_int().max(0) as usize;
@@ -223,6 +245,7 @@ pub fn map_inputs(vm: &mut Vm<'_>, loader: &Loader<'_>, map: &Package, lit: bool
             out.fluids.push(FluidSurface {
                 actor: a.0 as u32,
                 texture,
+                switched,
                 at: at.to_array(),
                 yaw,
                 nx: size(vm, "FluidXSize"),

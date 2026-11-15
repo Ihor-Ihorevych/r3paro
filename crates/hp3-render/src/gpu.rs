@@ -630,7 +630,7 @@ impl Renderer {
         // The opaque triangles of the level, as the moving lights' shadows see them.
         let mut shadow_positions: Vec<[f32; 3]> = Vec::new();
         let mut shadow_indices: Vec<u32> = Vec::new();
-        for batch in &scene.batches {
+        for (batch_index, batch) in scene.batches.iter().enumerate() {
             if batch.indices.is_empty() {
                 continue;
             }
@@ -655,13 +655,10 @@ impl Renderer {
                 contents: bytemuck::cast_slice(&batch.indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
-            // A texture flagged as alpha-blended whose alpha is all or nothing (a cabinet with open sides, a fully opaque wall) is
-            // drawn as a cut-out instead: blended surfaces write no depth and are not sorted, so one cabinet showed through another.
-            let translucent = batch.texture.as_ref().and_then(|k| scene.images.get(k)).is_some_and(|i| i.translucent && (!mostly_binary_alpha(i) || std::env::var_os("HP3_NO_BINARY_ALPHA").is_some()));
-            let pass = if batch.blend.is_some() { 1 } else if translucent { 2 } else { 0 };
+            let pass = draw_pass(batch.blend.is_some(), batch.texture.as_ref().and_then(|k| scene.images.get(k)).map(|i| &**i));
             let pan = batch.pan.map(|p| (p, batch.vertices.clone()));
             let fluid = batch.fluid.map(|(actor, at)| (actor, at, batch.vertices.clone()));
-            draws.push(Draw { bind, vertices, indices, count: batch.indices.len() as u32, pass, sky: batch.sky, pan, fluid, fluid_shift: std::cell::Cell::new([0.0; 3]) });
+            draws.push(Draw { bind, vertices, indices, count: batch.indices.len() as u32, pass, sky: batch.sky, pan, fluid, fluid_shift: std::cell::Cell::new([0.0; 3]), batch: batch_index, second: batch.switched.is_some().then(|| (second.cloned(), batch.vertices.clone())) });
         }
         // A second camera for the sky zone's view.
         let sky_globals = d.create_buffer(&wgpu::BufferDescriptor {
@@ -678,7 +675,28 @@ impl Renderer {
         let id = self.scene_count.get() + 1;
         self.scene_count.set(id);
         let shadow_geom = crate::shadow::ShadowGeom::new(&self.device, &shadow_positions, &shadow_indices);
-        GpuScene { globals, globals_bg, draws, sky: scene.sky, sky_globals, sky_globals_bg, shadow_geom, id }
+        GpuScene { globals, globals_bg, draws, sky: scene.sky, sky_globals, sky_globals_bg, shadow_geom, id, views }
+    }
+
+    /// Gives the draws made from scene batch `batch` (one whose material can be switched, `Batch::switched`) another texture
+    /// and scroll: a script flipped the switch. `key` names the texture and `image` is its picture (uploaded once per scene);
+    /// None draws it plain. The geometry, its light and its place in the moving lights' shadows stay as built.
+    pub fn retexture(&self, scene: &mut GpuScene, batch: usize, key: Option<&hp3_assets::loader::ObjKey>, image: Option<&hp3_assets::loader::Image>, pan: Option<hp3_assets::loader::Pan>) {
+        let view = match (key, image) {
+            (Some(k), Some(img)) => Some(scene.views.entry(k.clone()).or_insert_with(|| self.upload(img.width, img.height, &img.rgba)).clone()),
+            _ => None,
+        };
+        let view = view.unwrap_or_else(|| self.upload(1, 1, &[200, 200, 200, 255]));
+        for d in scene.draws.iter_mut().filter(|d| d.batch == batch) {
+            let Some((second, built)) = &d.second else { continue };
+            d.bind = self.texture_bind_lit(&view, second.as_ref());
+            d.pass = draw_pass(d.pass == 1, image);
+            // Scrolling starts again from the vertices as built; a batch that stops scrolling gets them back.
+            if d.pan.is_some() && pan.is_none() {
+                self.queue.write_buffer(&d.vertices, 0, bytemuck::cast_slice(built));
+            }
+            d.pan = pan.map(|p| (p, built.clone()));
+        }
     }
 
     /// Slides the pictures of scrolling materials (the scenery outside a train's windows) to where `seconds` of the level's
@@ -956,6 +974,14 @@ impl Renderer {
 }
 
 /// Whether nearly every pixel of an image is fully clear or fully solid (at most 3% partial alpha).
+/// Which pass a batch is drawn in: 0 opaque, 1 terrain layer (`blend`), 2 alpha-blended. A texture flagged as alpha-blended
+/// whose alpha is all or nothing (a cabinet with open sides, a fully opaque wall) is drawn as a cut-out instead: blended
+/// surfaces write no depth and are not sorted, so one cabinet showed through another.
+fn draw_pass(blend: bool, image: Option<&hp3_assets::loader::Image>) -> u8 {
+    let translucent = image.is_some_and(|i| i.translucent && (!mostly_binary_alpha(i) || std::env::var_os("HP3_NO_BINARY_ALPHA").is_some()));
+    if blend { 1 } else if translucent { 2 } else { 0 }
+}
+
 fn mostly_binary_alpha(image: &hp3_assets::loader::Image) -> bool {
     let partial = image.rgba.chunks_exact(4).filter(|p| p[3] > 8 && p[3] < 247).count();
     partial * 100 <= image.rgba.len() / 4 * 3
@@ -995,6 +1021,11 @@ struct Draw {
     fluid: Option<(u32, [f32; 3], Vec<Vertex>)>,
     /// How far `move_fluids` has shifted it.
     fluid_shift: std::cell::Cell<[f32; 3]>,
+    /// The scene batch it was made from.
+    batch: usize,
+    /// A batch whose material can be switched (`Batch::switched`): its second picture (lightmap page or alpha map) and its
+    /// vertices as built, so that `retexture` can bind it again with another texture and scroll. None for the rest.
+    second: Option<(Option<wgpu::TextureView>, Vec<Vertex>)>,
 }
 
 /// A scene uploaded to the GPU.
@@ -1008,6 +1039,8 @@ pub struct GpuScene {
     /// What the moving lights' shadows are made from (none for a scene without opaque geometry).
     shadow_geom: Option<crate::shadow::ShadowGeom>,
     id: u64,
+    /// The pictures uploaded so far, by texture: a switched batch flipping back finds its old one here.
+    views: HashMap<hp3_assets::loader::ObjKey, wgpu::TextureView>,
 }
 
 impl Renderer {

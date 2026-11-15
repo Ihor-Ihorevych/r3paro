@@ -66,6 +66,8 @@ pub struct Status {
     pub fps_limit: u32,
     pub fov_offset: f32,
     pub current_map: String,
+    /// The story state the running level is in (`GState040`), if any.
+    pub current_state: Option<String>,
 }
 
 /// One entry: what it shows, the command it runs, and whether choosing it closes the view (it leaves the level).
@@ -136,11 +138,17 @@ pub struct Settings {
     /// The last thing run and when, shown under the list so a choice is seen to have happened.
     done: Option<(Instant, String)>,
     drag: Option<Drag>,
+    /// The story state a level picked from the list starts in: 0 is the level's own first one (`menu_start_state`), n is
+    /// `hp3_world::STORY_STATES[n - 1]`.
+    story: usize,
 }
+
+/// The Levels tab's first entry, which picks the story state; the levels follow it.
+const STORY_COMMAND: &str = "storystate next";
 
 impl Settings {
     pub fn new(root: &std::path::Path) -> Settings {
-        Settings { open: false, tab: 0, selected: 0, scroll: 0, maps: crate::levelmenu::list_maps(root), done: None, drag: None }
+        Settings { open: false, tab: 0, selected: 0, scroll: 0, maps: crate::levelmenu::list_maps(root), done: None, drag: None, story: 0 }
     }
 
     fn current_tab(&self) -> Tab {
@@ -156,7 +164,8 @@ impl Settings {
         self.scroll = 0;
         self.drag = None;
         if tab == Tab::Levels {
-            self.selected = self.maps.iter().position(|m| m.eq_ignore_ascii_case(current_map)).unwrap_or(0);
+            // The story-state entry comes first.
+            self.selected = self.maps.iter().position(|m| m.eq_ignore_ascii_case(current_map)).map_or(0, |i| i + 1);
             self.scroll = self.selected.saturating_sub(4);
         }
     }
@@ -215,11 +224,27 @@ impl Settings {
                 leaving("LEAVE THE MATCH", "quidditch stop"),
                 row("LEAGUE TABLE (TO THE LOG)", "quidditch league"),
             ],
-            Tab::Levels => self
-                .maps
-                .iter()
-                .map(|m| leaving(if m.eq_ignore_ascii_case(&st.current_map) { format!("{m} (HERE)") } else { m.clone() }, format!("level {m}")))
-                .collect(),
+            Tab::Levels => {
+                let state = self.story.checked_sub(1).and_then(|i| hp3_world::STORY_STATES.get(i)).map(|(s, _)| *s);
+                let shown = state.map_or("AUTO (THE LEVEL'S FIRST)".to_string(), hp3_world::story_state_label);
+                let mut rows = vec![row(format!("STORY STATE: {shown}"), STORY_COMMAND)];
+                rows.extend(self.maps.iter().map(|m| {
+                    let label = if m.eq_ignore_ascii_case(&st.current_map) {
+                        match &st.current_state {
+                            Some(s) => format!("{m} (HERE, {})", hp3_world::story_state_label(s)),
+                            None => format!("{m} (HERE)"),
+                        }
+                    } else {
+                        m.clone()
+                    };
+                    let command = match state {
+                        Some(s) => format!("level {m}?GameState={s}"),
+                        None => format!("level {m}"),
+                    };
+                    leaving(label, command)
+                }));
+                rows
+            }
             Tab::Debug => vec![
                 row("QUICK SAVE", "quicksave"),
                 leaving("QUICK LOAD", "quickload"),
@@ -314,6 +339,11 @@ impl Settings {
         let rows = self.rows(st);
         let r = rows.get(index)?;
         self.selected = index;
+        // The story-state entry is the view's own: it steps to the next state and runs nothing.
+        if r.command == STORY_COMMAND {
+            self.story = (self.story + 1) % (hp3_world::STORY_STATES.len() + 1);
+            return None;
+        }
         self.done = Some((Instant::now(), r.label.clone()));
         if r.closes {
             self.close();
