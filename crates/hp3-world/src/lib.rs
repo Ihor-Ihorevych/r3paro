@@ -112,6 +112,10 @@ pub struct World {
     /// Imps holding still after a throw (`ThrowCracker.GoToNextState` override), with the controller's state-change count
     /// when the hold started.
     pub imp_hold: std::collections::HashMap<ObjId, u32>,
+    /// Actors on a bone, or let go from one and not yet moved. A bone attachment is placed without updating the actor's
+    /// zone, so until its first real move it keeps the zone it had before: a firecracker in the imp's hand, or let go
+    /// with the hand inside a wall, is not out of the world. Removed by that first move or the actor's destruction.
+    pub released_from_bone: hp3_script::fx::FxHashSet<ObjId>,
     /// The physics volumes of the level with their brush planes (built the first time a pawn is checked).
     pub volume_hulls: Option<Vec<VolumeHull>>,
     /// What travelled in with the player (the level keeps it for a restart).
@@ -679,6 +683,7 @@ pub fn load_with(vm: &mut Vm<'_>, map: &Rc<Package>, config: hp3_core::Config, t
         stair_floor: Default::default(),
         toggled: Default::default(),
         imp_hold: Default::default(),
+        released_from_bone: Default::default(),
         volume_hulls: None,
         travel_info: travel.clone().unwrap_or_default(),
         url_options: String::new(),
@@ -1593,6 +1598,7 @@ pub fn destroy_actor(vm: &mut Vm<'_>, o: ObjId) -> bool {
     let w = world(vm);
     w.actors.retain(|&x| x != o);
     w.timers.remove(&o);
+    w.released_from_bone.remove(&o);
     vm.latent.remove(&o);
     true
 }

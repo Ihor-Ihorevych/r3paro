@@ -1313,6 +1313,18 @@ fn fell_out_of_world(vm: &mut Vm<'_>, a: ObjId) -> bool {
     if !is_pawn(vm, a) || crate::envc::var_os("HP3_NO_FELL_CHECK").is_some() {
         return false;
     }
+    // On a bone, or let go from one and not yet moved: its zone is still the one from before (see
+    // `World::released_from_bone`); the first move of some length is the one that looks it up again.
+    if world(vm).anim.attachments.contains_key(&a) || get(vm, a, "AttachmentBone").as_name() != hp3_script::Name::NONE {
+        world(vm).released_from_bone.insert(a);
+        return false;
+    }
+    if world(vm).released_from_bone.contains(&a) {
+        if vec(&get(vm, a, "Velocity")) != Vec3::ZERO {
+            world(vm).released_from_bone.remove(&a);
+        }
+        return false;
+    }
     let loc = vec(&get(vm, a, "Location"));
     if world(vm).collision.zone_at(loc) != Some(0) {
         return false;

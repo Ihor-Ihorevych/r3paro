@@ -647,7 +647,10 @@ impl Collision {
         for m in &self.movers {
             // A mover whose collision the script turned off (COMC hides the obstacle logs a track does not use with
             // SetCollision(false)) stops nothing, like any other actor.
-            if Some(m.actor) == ignore || self.passes_actors || self.inactive.contains(&m.actor) || !self.blocks_mover(m.actor) {
+            // A mover stops what collides with the world, whatever its own blocking flags (Engine.dll's IsBlockedBy: a brush
+            // or encroacher blocks iff the mover has bCollideWorld): a thrown firecracker (bBlockActors off) fell through
+            // the Final Exam's lift floors.
+            if Some(m.actor) == ignore || self.passes_world || self.inactive.contains(&m.actor) || !self.blocks_mover(m.actor) {
                 continue;
             }
             if let Some(h) = m.trace(start, end, extent) {

@@ -1297,7 +1297,9 @@ pub fn register(vm: &mut Vm<'_>) {
         let mut hits = line_hits(vm, o, start, end, extent, &filter);
         let level = world(vm).level_info;
         let ghost = Mover { player: false, blocks_actors: false, collide_world: true };
-        if let Some(mut h) = world(vm).collision.trace_for(ghost, start, end, extent, None) {
+        if let Some(mut h) = world(vm).collision.trace_for(ghost, start, end, extent, None)
+            && h.actor.is_none_or(|x| !hits.iter().any(|k| k.actor == Some(x)))
+        {
             h.actor = h.actor.or(level);
             let wanted = match (class, h.actor.and_then(|x| vm.db.objects.get(x).class)) {
                 (Some(want), Some(have)) => vm.is_child_of(have, want),
