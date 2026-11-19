@@ -62,6 +62,7 @@ fn refresh_actor_boxes(vm: &mut Vm<'_>) {
     let s = Slots::get(vm);
     let (collide_type, collision_width, rotation) = (crate::actor_slot(vm, "CollideType"), crate::actor_slot(vm, "CollisionWidth"), crate::actor_slot(vm, "Rotation"));
     let use_cylinder = crate::actor_slot(vm, "bUseCylinderCollision");
+    let volume_class = vm.db.find("Volume");
     let mut boxes = Vec::new();
     // Which actors have a box at all is worked out again only for actors written since the last tick.
     let mut memo = std::mem::take(&mut crate::world(vm).memo_boxes);
@@ -76,7 +77,12 @@ fn refresh_actor_boxes(vm: &mut Vm<'_>) {
         // As the original picks an actor's collision: a `CollideType` box first, whatever it draws; then a static mesh by its
         // triangles (unless it asks for its cylinder); anything else is its cylinder.
         let ct_box = crate::read(vm, a, collide_type).as_byte() == CT_BOX && crate::collision_rules_new();
+        // A volume is its brush (baked into the collision): the cylinder every actor has by default is not part of it. A blocking
+        // volume that keeps players out of a rabbit hole (`bBlockPlayers` only) was an invisible cylinder 22 across in the hole's mouth
+        // as well, which the rabbit (taken for a player among actors) could not get past.
+        let is_volume = !ct_box && volume_class.is_some_and(|v| vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, v)));
         let has_box = crate::read(vm, a, s.collide).as_bool()
+            && !is_volume
             && (blocks_actors || blocks_players)
             && (ct_box || crate::read(vm, a, s.static_mesh).as_obj().is_none() || crate::read(vm, a, use_cylinder).as_bool())
             && r > 0.0
@@ -161,6 +167,9 @@ pub fn move_actor(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<Hit> {
         player,
         blocks_actors: get(vm, a, "bBlockActors").as_bool() && get(vm, a, "bCollideActors").as_bool(),
         collide_world: get(vm, a, "bCollideWorld").as_bool(),
+        // A spell flies through the invisible barriers meant for creatures and the player (the fountain's blocking volume used to stop
+        // every Spongify cast at the wand).
+        passes_volumes: !player && !get(vm, a, "bBlockActors").as_bool() && is_projectile(vm, a),
     };
     let mut loc = loc;
     let whole = delta.length();
@@ -246,7 +255,40 @@ pub fn move_actor(vm: &mut Vm<'_>, a: ObjId, delta: Vec3) -> Option<Hit> {
         hit = world(vm).collision.trace_for(how, loc, loc + delta, ext, Some(a));
     }
     let time = hit.map(|h| h.time).unwrap_or(1.0);
-    set(vm, a, "Location", value(loc + delta * time));
+    let end = loc + delta * time;
+    // HP3_PAWN_HITS=1 (debugging): what stops the player's pawn in a move.
+    if let Some(h) = hit
+        && crate::envc::var_os("HP3_PAWN_HITS").is_some()
+        && is_player_pawn(vm, a)
+    {
+        let by = h.actor.map(|o| hp3_script::natives::object_path(vm, o));
+        eprintln!("pawnhit: frame {} from {loc} to {} stopped at {:.3} {} normal {} by {by:?} (player-type {})", world(vm).frame, loc + delta, h.time, h.location, h.normal, how.player);
+    }
+    // What stops a spell (the game log): where it was, where it meant to go, what it ran into.
+    if let Some(h) = hit
+        && is_projectile(vm, a)
+    {
+        let who = hp3_script::natives::object_path(vm, a);
+        let with = h.actor.map(|o| hp3_script::natives::object_path(vm, o));
+        vm.log.push(format!("spell stopped: {who} from {loc} meant to reach {} hit at {end} (share {:.3}) normal {} by {with:?}", loc + delta, h.time, h.normal));
+    }
+    // A projectile that does not block (a spell) touches the projectile targets on its way, in the order it meets them: a thin one (a
+    // Spongify pad lies on the floor) would be stopped short by the floor, or stepped over between two end-of-move checks.
+    if !how.blocks_actors && is_projectile(vm, a) && crate::envc::var_os("HP3_NO_PROJ_SWEEP").is_none() {
+        let mut from = loc;
+        for _ in 0..4 {
+            let Some((t, _)) = crate::touch::first_proj_target(vm, a, from, end) else { break };
+            let len = (end - from).length().max(1e-3);
+            let at = from + (end - from) * (t + 0.02 / len).min(1.0);
+            set(vm, a, "Location", value(at));
+            crate::touch::settle(vm, a);
+            if vm.db.objects.get(a).deleted {
+                return None;
+            }
+            from = at;
+        }
+    }
+    set(vm, a, "Location", value(end));
     // The hit's time is a share of the whole move asked for, not of what was left of it.
     if made > 0.0
         && let Some(h) = hit.as_mut()
@@ -2211,6 +2253,11 @@ fn is_interpolation_manager(vm: &mut Vm<'_>, a: ObjId) -> bool {
 fn is_pawn(vm: &mut Vm<'_>, a: ObjId) -> bool {
     let Some(pawn) = vm.db.find("Pawn") else { return false };
     vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, pawn))
+}
+
+pub(crate) fn is_projectile(vm: &mut Vm<'_>, a: ObjId) -> bool {
+    let Some(projectile) = vm.db.find("Projectile") else { return false };
+    vm.db.objects.get(a).class.is_some_and(|c| vm.is_child_of(c, projectile))
 }
 
 /// Moves the angle `cur` toward `want` (both in Unreal's 65536 per turn) by at most `delta`, the short way round.

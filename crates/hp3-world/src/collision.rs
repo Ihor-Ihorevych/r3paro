@@ -68,6 +68,7 @@ pub struct Collision {
     /// `bBlockActors`) or by the level's geometry (it does not have `bCollideWorld`).
     passes_actors: bool,
     passes_world: bool,
+    passes_volumes: bool,
     /// Movers: their triangles in their own space, placed by a transform that follows them.
     pub movers: Vec<MoverShape>,
     /// Where each mover is in `movers` (movers are only ever added through `add_mover`).
@@ -169,6 +170,9 @@ pub struct Mover {
     pub blocks_actors: bool,
     /// It has `bCollideWorld`: the level's geometry stops it.
     pub collide_world: bool,
+    /// A spell in flight (a projectile that does not block actors): the blocking volumes (invisible barriers for the creatures and
+    /// the player) do not stop it, only real geometry and actors do.
+    pub passes_volumes: bool,
 }
 
 /// A mover's collision: triangles in mover space and the current mover-to-world placement.
@@ -533,10 +537,12 @@ impl Collision {
         self.player_mover = how.player;
         self.passes_actors = !how.blocks_actors;
         self.passes_world = !how.collide_world;
+        self.passes_volumes = how.passes_volumes;
         let hit = self.trace_with(start, end, extent, ignore, true);
         self.player_mover = false;
         self.passes_actors = false;
         self.passes_world = false;
+        self.passes_volumes = false;
         hit
     }
 
@@ -613,7 +619,7 @@ impl Collision {
                         continue;
                     }
                     let h = &self.hulls[i as usize];
-                    if Some(h.actor) == ignore || self.inactive.contains(&h.actor) || !self.blocks_mover(h.actor) {
+                    if self.passes_volumes || Some(h.actor) == ignore || self.inactive.contains(&h.actor) || !self.blocks_mover(h.actor) {
                         continue;
                     }
                     if (start.min(end) - extent).cmpgt(h.hi).any() || (start.max(end) + extent).cmplt(h.lo).any() {
@@ -773,6 +779,11 @@ impl Collision {
     /// through, and one that blocks creatures only lets the player through.
     fn blocks_mover(&self, actor: ObjId) -> bool {
         self.blocks.get(&actor).is_none_or(|&(actors, players)| if self.player_mover { players } else { actors })
+    }
+
+    /// For debugging: the (creatures, players) flags the baked shapes of an actor stop, if set, and whether it is switched off.
+    pub fn debug_blocks(&self, actor: ObjId) -> (Option<(bool, bool)>, bool) {
+        (self.blocks.get(&actor).copied(), self.inactive.contains(&actor))
     }
 
     /// Sets which kinds of mover the baked shapes of an actor stop.

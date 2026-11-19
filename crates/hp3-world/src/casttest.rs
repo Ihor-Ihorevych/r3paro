@@ -215,6 +215,60 @@ pub fn step(vm: &mut Vm<'_>, t: &mut CastTest, frame: u32) {
     if t.history.last().is_none_or(|(_, s)| *s != now_state) {
         t.history.push((r, now_state.clone()));
     }
+    // HP3_CAST_CURSOR=1 (also): what the aim from the camera to the target meets first in the level's geometry.
+    if std::env::var_os("HP3_CAST_CURSOR").is_some() && r == 60 {
+        if let Some(cam) = get(vm, pc, "Camera").as_obj() {
+            let from = vec(&get(vm, cam, "Location"));
+            let to = vec(&get(vm, target, "Location"));
+            let col = &crate::world(vm).collision;
+            let hit = col.trace_static(from, to + (to - from).normalize_or_zero() * 200.0, Vec3::ZERO);
+            match hit {
+                Some(h) => println!("cast: aim from camera {from} to target {to}: first level hit at {} (normal {}, time {:.3}, actor {:?})", from + (to - from).normalize_or_zero() * h.time * ((to - from).length() + 200.0), h.normal, h.time, h.actor.map(|a| a.0)),
+                None => println!("cast: aim from camera {from} to target {to}: nothing in the level's geometry on the way"),
+            }
+            // and straight down at the target's spot
+            let down = col.trace_static(to + Vec3::Z * 60.0, to - Vec3::Z * 60.0, Vec3::ZERO);
+            println!("cast: trace down at the target: {:?}", down.map(|h| (to + Vec3::Z * 60.0 - Vec3::Z * 120.0 * (1.0 - h.time), h.actor.map(|a| a.0))));
+        }
+    }
+    // HP3_CAST_CURSOR=1 (also): every tick a spell of the cast's class is alive, where it is and what it touches.
+    if std::env::var_os("HP3_CAST_CURSOR").is_some() && r >= 40 {
+        for sp in actors_of(vm, &t.spell) {
+            if vm.db.objects.get(sp).deleted {
+                continue;
+            }
+            let touching = crate::touch::touching(vm, sp).into_iter().map(|o| name_of(vm, o)).collect::<Vec<_>>();
+            println!(
+                "cast: r={r} spell {} at {} velocity {} phys {} collideWorld {} collideActors {} blockActors {} blockPlayers {} touching {touching:?}",
+                name_of(vm, sp),
+                vec(&get(vm, sp, "Location")),
+                vec(&get(vm, sp, "Velocity")),
+                get(vm, sp, "Physics").as_int(),
+                get(vm, sp, "bCollideWorld").as_bool(),
+                get(vm, sp, "bCollideActors").as_bool(),
+                get(vm, sp, "bBlockActors").as_bool(),
+                get(vm, sp, "bBlockPlayers").as_bool()
+            );
+        }
+    }
+    // HP3_CAST_CURSOR=1: where the spell cursor is and what it touches, every 30 ticks while the cast runs.
+    if std::env::var_os("HP3_CAST_CURSOR").is_some() && r >= 40 && r % 30 == 0 {
+        for c in actors_of(vm, "SpellCursor") {
+            let loc = vec(&get(vm, c, "Location"));
+            let touching = crate::touch::touching(vm, c).into_iter().map(|o| name_of(vm, o)).collect::<Vec<_>>();
+            println!(
+                "cast: r={r} cursor {} state {} at {loc} radius {} height {} collide {} hidden {} touching {touching:?}; target at {} (distance {:.1})",
+                name_of(vm, c),
+                state_name(vm, c),
+                get(vm, c, "CollisionRadius").as_float(),
+                get(vm, c, "CollisionHeight").as_float(),
+                get(vm, c, "bCollideActors").as_bool(),
+                get(vm, c, "bHidden").as_bool(),
+                vec(&get(vm, target, "Location")),
+                (vec(&get(vm, target, "Location")) - loc).length()
+            );
+        }
+    }
     // HP3_CAST_PROPS=A,B: print these properties of the target (and of the caster as "pawn.X") every 60 ticks (HP3_CAST_EVERY=n changes that).
     let every = std::env::var("HP3_CAST_EVERY").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(60);
     if r >= 100 && r % every == 0
@@ -417,6 +471,20 @@ fn place(vm: &mut Vm<'_>, t: &mut CastTest, pc: ObjId, pawn: ObjId) {
         println!("cast: no fully clear spot; using the best one ({:.0}% of the way clear)", score * 100.0);
         chosen = Some((stand, yaw));
     }
+    // HP3_CAST_HERE=1: stay where the player is (a loaded save made at the place that fails) and only aim at the target.
+    if std::env::var_os("HP3_CAST_HERE").is_some() {
+        let here = vec(&get(vm, pawn, "Location"));
+        let yaw = get(vm, pawn, "Rotation").fields().get(1).map(Value::as_int).unwrap_or(0);
+        chosen = Some((here, yaw));
+        println!("cast: staying at {here} (yaw {yaw})");
+    }
+    // HP3_CAST_AT=x,y,z,yaw: stand exactly there (a place a player reported) instead of the harness's own search.
+    if let Ok(spec) = std::env::var("HP3_CAST_AT") {
+        let v: Vec<f32> = spec.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        if v.len() >= 4 {
+            chosen = Some((Vec3::new(v[0], v[1], v[2]), v[3] as i32));
+        }
+    }
     let Some((stand, yaw)) = chosen else {
         println!("cast: no clear spot in front of the target");
         std::process::exit(4)
@@ -428,7 +496,7 @@ fn place(vm: &mut Vm<'_>, t: &mut CastTest, pc: ObjId, pawn: ObjId) {
     set(vm, pc, "Rotation", rot(0, yaw));
     // HP3_CAST_ACTIVATE=1 sends the target the Trigger event the level's own logic would (puzzle targets start inert).
     let inert = get(vm, target, "vulnerableToClass").as_obj().is_none() || !get(vm, target, "bProjTarget").as_bool();
-    if std::env::var_os("HP3_CAST_ACTIVATE").is_some() && inert {
+    if std::env::var_os("HP3_CAST_ACTIVATE").is_some_and(|v| inert || v == "force") {
         fire(vm, target, "Trigger", &mut [Value::Object(Some(pawn)), Value::Object(Some(pawn))]);
     }
     let vulnerable = get(vm, target, "vulnerableToClass").as_obj().map(|c| name_of(vm, c));
@@ -650,7 +718,12 @@ fn report_spell(vm: &mut Vm<'_>, r: u32) {
 fn direct_hit(vm: &mut Vm<'_>, spell_name: &str, pawn: ObjId, target: ObjId) {
     let Some(class) = vm.db.find(spell_name).map(|s| vm.db.get(s).object) else { return };
     let at = get(vm, target, "Location");
-    let args = [Value::Object(Some(class)), Value::Object(Some(pawn)), Value::Empty, at.clone(), Value::Empty];
+    // HP3_CAST_FLYFROM=x,y,z: the spell is born there and flies to the target on its own (the flight, not the cursor, is under test).
+    let born = std::env::var("HP3_CAST_FLYFROM").ok().and_then(|s| {
+        let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        (v.len() == 3).then(|| crate::physics::value(Vec3::new(v[0], v[1], v[2])))
+    });
+    let args = [Value::Object(Some(class)), Value::Object(Some(pawn)), Value::Empty, born.unwrap_or_else(|| at.clone()), Value::Empty];
     let Ok(Value::Object(Some(spell))) = crate::natives::spawn(vm, None, &args) else {
         println!("cast: direct spawn failed");
         return;

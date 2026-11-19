@@ -863,9 +863,13 @@ pub fn run(root: &Path, map: Option<&str>) -> Result<(), Box<dyn std::error::Err
             let tick = hp3_world::world(&mut vm).frame;
             let fresh = LAST.swap(tick as u64, std::sync::atomic::Ordering::Relaxed) != tick as u64;
             for item in list.split(';').filter(|_| fresh) {
+                // Each entry once: a load restarts the tick count, and `quickload@150` would load again every time it came round.
+                static DONE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
                 if let Some((command, at)) = item.rsplit_once('@')
                     && at.trim().parse::<u64>() == Ok(tick as u64)
+                    && !DONE.lock().unwrap().iter().any(|d| d == item)
                 {
+                    DONE.lock().unwrap().push(item.to_string());
                     commands::push(command.trim());
                 }
             }

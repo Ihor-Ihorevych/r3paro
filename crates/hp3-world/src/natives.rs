@@ -450,7 +450,7 @@ fn line_hits(vm: &mut Vm<'_>, source: ObjId, start: glam::Vec3, end: glam::Vec3,
 pub fn debug_trace_actors(vm: &mut Vm<'_>, source: ObjId, start: glam::Vec3, end: glam::Vec3, extent: glam::Vec3) -> Vec<(String, f32, glam::Vec3)> {
     let filter = LineFilter { class: None, projectile_targets: false, movers: true };
     let mut hits = line_hits(vm, source, start, end, extent, &filter);
-    let ghost = crate::collision::Mover { player: false, blocks_actors: false, collide_world: true };
+    let ghost = crate::collision::Mover { player: false, blocks_actors: false, collide_world: true, passes_volumes: false };
     if let Some(h) = world(vm).collision.trace_for(ghost, start, end, extent, None) {
         hits.push(h);
     }
@@ -1302,7 +1302,7 @@ pub fn register(vm: &mut Vm<'_>) {
         let filter = LineFilter { class, projectile_targets: false, movers: true };
         let mut hits = line_hits(vm, o, start, end, extent, &filter);
         let level = world(vm).level_info;
-        let ghost = Mover { player: false, blocks_actors: false, collide_world: true };
+        let ghost = Mover { player: false, blocks_actors: false, collide_world: true, passes_volumes: false };
         if let Some(mut h) = world(vm).collision.trace_for(ghost, start, end, extent, None)
             && h.actor.is_none_or(|x| !hits.iter().any(|k| k.actor == Some(x)))
         {

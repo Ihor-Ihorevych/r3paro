@@ -495,6 +495,52 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                 }
             }
         }
+        // HP3_BOX_TRACE=sx,sy,sz,ex,ey,ez,hx,hy,hz@<tick>: what a box of that half size meets moving along that line (level and actors, as a creature).
+        if let Some((line, tick)) = std::env::var("HP3_BOX_TRACE").ok().as_deref().and_then(|s| s.split_once('@')).map(|(a, b)| (a.to_string(), b.parse::<u32>().unwrap_or(0)))
+            && tick == frame
+        {
+            let v: Vec<f32> = line.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            if v.len() == 9 {
+                let (s, e, h) = (glam::Vec3::new(v[0], v[1], v[2]), glam::Vec3::new(v[3], v[4], v[5]), glam::Vec3::new(v[6], v[7], v[8]));
+                let how = hp3_world::collision::Mover { player: std::env::var_os("HP3_BOX_PLAYER").is_some(), blocks_actors: true, collide_world: true, passes_volumes: false };
+                match hp3_world::world(&mut vm).collision.trace_for(how, s, e, h, None) {
+                    Some(hit) => { let by = hit.actor.map(|o| hp3_script::natives::object_path(&vm, o)); println!("boxtrace {frame}: {s} -> {e} stopped at {:.3} {} normal {} by {by:?}", hit.time, hit.location, hit.normal) }
+                    None => println!("boxtrace {frame}: {s} -> {e} clear"),
+                }
+            }
+        }
+        // HP3_DIG_PROBE=<wall name>@<tick>: asks that wall's CanDigMe about the player's pawn from a ring of spots around the wall (and puts it back).
+        if let Some((name, tick)) = std::env::var("HP3_DIG_PROBE").ok().as_deref().and_then(|s| s.split_once('@')).map(|(a, b)| (a.to_string(), b.parse::<u32>().unwrap_or(0)))
+            && tick == frame
+            && let Some(pc) = hp3_world::world(&mut vm).player
+            && let Some(pawn) = hp3_world::get(&mut vm, pc, "Pawn").as_obj()
+            && let Some(wall) = hp3_world::world(&mut vm).actors.clone().into_iter().find(|&a| hp3_script::natives::object_path(&vm, a).ends_with(&format!(".{name}")))
+        {
+            let home = hp3_world::get(&mut vm, pawn, "Location");
+            let c = hp3_world::physics::vec(&hp3_world::get(&mut vm, wall, "Location"));
+            let (hr, hs) = (hp3_world::get(&mut vm, pawn, "Rotation"), hp3_world::physics::vec(&home));
+            let now = hp3_world::fire(&mut vm, wall, "CanDigMe", &mut [hp3_script::Value::Object(Some(pawn))]);
+            let yadig = hp3_world::fire(&mut vm, wall, "CanYaDigIt", &mut []);
+            println!("digprobe: as it stands: pawn at {hs} rot {hr:?} CanDigMe {now:?} CanYaDigIt {yadig:?}");
+            let flags: Vec<String> = ["bCollideActors", "bBlockActors", "bBlockPlayers", "bBlockZeroExtentTraces", "bBlockNonZeroExtentTraces", "bBlocksCamera", "bHidden", "CollideType", "bOneSided"].iter().map(|f| format!("{f}={:?}", hp3_world::get(&mut vm, wall, f))).collect();
+            println!("digprobe: wall {}", flags.join(" "));
+            println!("digprobe: collision blocks entry {:?} for {wall:?}", hp3_world::world(&mut vm).collision.debug_blocks(wall));
+            let pflags: Vec<String> = ["bCollideActors", "bBlockActors", "bBlockPlayers", "bCollideWorld", "CollisionRadius", "CollisionHeight", "Physics"].iter().map(|f| format!("{f}={:?}", hp3_world::get(&mut vm, pawn, f))).collect();
+            println!("digprobe: pawn {}", pflags.join(" "));
+for (dx, dy) in [(0.0f32, -20.0f32), (0.0, -22.0), (0.0, -24.0), (0.0, -26.0), (0.0, -28.0), (0.0, -30.0), (-10.0, -22.0), (10.0, -22.0), (-20.0, -22.0), (20.0, -22.0), (-30.0, -22.0), (30.0, -22.0), (-40.0, -22.0), (40.0, -22.0)] {
+                for yaw in [16384, 0, 32768, 49152] {
+                    let r = hp3_script::Value::Struct(vec![hp3_script::Value::Int(0), hp3_script::Value::Int(yaw), hp3_script::Value::Int(0)].into());
+                    hp3_world::set(&mut vm, pawn, "Rotation", r);
+                    hp3_world::set(&mut vm, pawn, "Location", hp3_world::physics::value(glam::Vec3::new(c.x + dx, c.y + dy, -208.0)));
+                    let ok = hp3_world::fire(&mut vm, wall, "CanDigMe", &mut [hp3_script::Value::Object(Some(pawn))]);
+                    if ok.as_bool() {
+                        println!("digprobe: offset ({dx},{dy}) yaw {yaw}: CAN dig");
+                    }
+                }
+            }
+            println!("digprobe: done (only the spots that can dig are listed)");
+            hp3_world::set(&mut vm, pawn, "Location", home);
+        }
         // HP3_DYN_LIGHTS=<every>: prints the live dynamic lights (bDynamicLight actors with a LightType) every so many ticks.
         if std::env::var("HP3_DYN_LIGHTS").ok().and_then(|v| v.parse::<u32>().ok()).is_some_and(|e| e > 0 && frame % e == 0) {
             for a in hp3_world::world(&mut vm).actors.clone() {
@@ -1064,7 +1110,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
             // HP3_PROBE_ITEM: a thrown pickup instead (blocked by the world only, not a player).
             let item = std::env::var_os("HP3_PROBE_ITEM").is_some();
             let movers = std::env::var("HP3_PROBE_ITEM").is_ok_and(|v| v == "movers");
-            let how = hp3_world::collision::Mover { player: !item, blocks_actors: !item || movers, collide_world: true };
+            let how = hp3_world::collision::Mover { player: !item, blocks_actors: !item || movers, collide_world: true, passes_volumes: false };
             for k in 0..8 {
                 let ang = k as f32 * std::f32::consts::FRAC_PI_4;
                 let dir = glam::Vec3::new(ang.cos(), ang.sin(), 0.0);
@@ -1096,7 +1142,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                     at = glam::Vec3::new(v[0], v[1], v[2]);
                 }
             }
-            let how = hp3_world::collision::Mover { player: true, blocks_actors: true, collide_world: true };
+            let how = hp3_world::collision::Mover { player: true, blocks_actors: true, collide_world: true, passes_volumes: false };
             let from_h: f32 = std::env::var("HP3_PROBE_DOWN_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(500.0);
             for dy in (-120..=120).step_by(40) {
                 let mut row = String::new();
@@ -1154,7 +1200,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
     if let Ok(spec) = std::env::var("HP3_PROBE_WALK") {
         let n: Vec<f32> = spec.split(',').filter_map(|s| s.parse().ok()).collect();
         if n.len() == 8 {
-            let how = hp3_world::collision::Mover { player: true, blocks_actors: true, collide_world: true };
+            let how = hp3_world::collision::Mover { player: true, blocks_actors: true, collide_world: true, passes_volumes: false };
             let ext = glam::Vec3::new(n[3], n[3], n[4]);
             let dir = glam::Vec3::new(n[5], n[6], 0.0).normalize() * 3.0;
             let mut p = glam::Vec3::new(n[0], n[1], n[2]);
@@ -1187,7 +1233,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
     if let Ok(spec) = std::env::var("HP3_PROBE_PROFILE") {
         let n: Vec<f32> = spec.split(',').filter_map(|s| s.parse().ok()).collect();
         if n.len() == 6 {
-            let how = hp3_world::collision::Mover { player: true, blocks_actors: true, collide_world: true };
+            let how = hp3_world::collision::Mover { player: true, blocks_actors: true, collide_world: true, passes_volumes: false };
             let ext = glam::Vec3::new(n[4], n[4], n[5]);
             let mut y = n[1];
             while y <= n[2] {
@@ -1220,7 +1266,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
                 if hp3_world::world(&mut vm).collision.box_overlaps_triangles(at + dir * d, half, None) { exact = Some(d); break; }
                 d += 0.25;
             }
-            let how = hp3_world::collision::Mover { player: true, blocks_actors: true, collide_world: true };
+            let how = hp3_world::collision::Mover { player: true, blocks_actors: true, collide_world: true, passes_volumes: false };
             let tr = hp3_world::world(&mut vm).collision.trace_for(how, at, at + dir * 80.0, half, None);
             println!("exact: first overlap at {exact:?}; trace says {:?} normal {:?}", tr.map(|h| h.time * 80.0), tr.map(|h| h.normal));
         }
@@ -1230,7 +1276,7 @@ fn level(root: &Path, map: &str, frames: u32) -> Result<ExitCode, Box<dyn std::e
     if let Ok(spec) = std::env::var("HP3_PROBE_RING") {
         let n: Vec<f32> = spec.split(',').filter_map(|s| s.parse().ok()).collect();
         if n.len() == 5 {
-            let how = hp3_world::collision::Mover { player: true, blocks_actors: true, collide_world: true };
+            let how = hp3_world::collision::Mover { player: true, blocks_actors: true, collide_world: true, passes_volumes: false };
             let at = glam::Vec3::new(n[0], n[1], n[2]);
             let ext = glam::Vec3::new(n[3], n[3], n[4]);
             for up in [0.0f32, 10.0, 20.0, 30.0] {

@@ -351,6 +351,9 @@ pub fn settle(vm: &mut Vm<'_>, a: ObjId) {
             if !other.collide || !overlap_between(&world(vm).collision, (a, &shape), (b, &other)) {
                 continue;
             }
+            if shields_target(vm, a, b, &other) {
+                continue;
+            }
             if !me_traces && !blocks_traces(vm, b, &s) {
                 continue;
             }
@@ -378,6 +381,10 @@ fn begin(vm: &mut Vm<'_>, a: ObjId, b: ObjId) {
         return;
     }
     link(vm, a, b);
+    if crate::envc::var_os("HP3_TOUCH_DEBUG").is_some() && crate::physics::is_projectile(vm, a) {
+        let (pa, pb) = (hp3_script::natives::object_path(vm, a), hp3_script::natives::object_path(vm, b));
+        eprintln!("touch: frame {} spell {pa} meets {pb}", world(vm).frame);
+    }
     if crate::envc::var_os("HP3_SLIDE_DEBUG").is_some() && (crate::physics::is_player_pawn(vm, a) || crate::physics::is_player_pawn(vm, b)) {
         let (pa, pb) = (hp3_script::natives::object_path(vm, a), hp3_script::natives::object_path(vm, b));
         eprintln!("slide: frame {} touch {pa} and {pb}", world(vm).frame);
@@ -513,6 +520,100 @@ pub fn frame_pass(vm: &mut Vm<'_>) {
             settle(vm, a);
         }
     }
+}
+
+/// What `a` touches right now.
+pub fn touching(vm: &mut Vm<'_>, a: ObjId) -> Vec<ObjId> {
+    world(vm).touch.partners.get(&a).cloned().unwrap_or_default()
+}
+
+/// Whether `b` only stands in the way of the spell `a`: it is not something the spell is vulnerable to, and the actor the spell
+/// was cast at (`TargetActor`) lies inside it. The hidden chest of the inside hub has its Alohomora trigger inside the chest's own
+/// blocking cylinder, a couple of units wider: a spell that ended a step in that rim touched the chest alone and was used up, so the
+/// chest opened only from the directions where a step happened to reach both at once.
+fn shields_target(vm: &mut Vm<'_>, a: ObjId, b: ObjId, other: &Shape) -> bool {
+    if !crate::physics::is_projectile(vm, a) {
+        return false;
+    }
+    let Some(target) = get(vm, a, "TargetActor").as_obj().filter(|&t| t != b && !vm.db.objects.get(t).deleted) else { return false };
+    let class = vm.db.objects.get(a).class;
+    let meant = get(vm, b, "vulnerableToClass").as_obj().and_then(|c| vm.class_of(c));
+    if matches!((class, meant), (Some(have), Some(want)) if vm.is_child_of(have, want)) {
+        return false;
+    }
+    let at = crate::physics::vec(&get(vm, target, "Location"));
+    let d = at - other.location;
+    (d.x * d.x + d.y * d.y).sqrt() < other.radius && d.z.abs() < other.height
+}
+
+/// The first projectile target (`bProjTarget`, an upright cylinder, not already touched) that the cylinder of `a` meets while it
+/// moves from `start` to `end`: how far along the move (0 to 1) it first overlaps it, and the actor. A spell that flies at
+/// a thin target (a Spongify pad is a disc a few units high lying on the floor) would otherwise stop at the floor, or step over the disc between two
+/// end-of-move checks, and never touch it: the reference's projectiles hit what they are aimed at along their way.
+pub fn first_proj_target(vm: &mut Vm<'_>, a: ObjId, start: Vec3, end: Vec3) -> Option<(f32, ObjId)> {
+    if vm.ext.is_none() || vm.db.objects.get(a).deleted {
+        return None;
+    }
+    if !world(vm).touch.primed {
+        prime(vm);
+    }
+    let s = slots(vm);
+    let me = shape_of(vm, a, &s);
+    if !me.collide || me.obox.is_some() || me.half.is_some() {
+        return None;
+    }
+    let owner = crate::get(vm, a, "Owner").as_obj();
+    let already = world(vm).touch.partners.get(&a).cloned().unwrap_or_default();
+    let d = end - start;
+    let mut best: Option<(f32, ObjId)> = None;
+    for b in along(vm, start, end, me.radius + me.height) {
+        if b == a || Some(b) == owner || already.contains(&b) {
+            continue;
+        }
+        let Some(other) = shape_cached(vm, b, &s) else { continue };
+        if !other.collide || other.obox.is_some() || other.half.is_some() || !crate::get(vm, b, "bProjTarget").as_bool() || shields_target(vm, a, b, &other) {
+            continue;
+        }
+        let (reach, tall) = (me.radius + other.radius, me.height + other.height);
+        let (mut t0, mut t1) = (0.0f32, 1.0f32);
+        // across the heights
+        let z0 = start.z - other.location.z;
+        if d.z.abs() < 1e-6 {
+            if z0.abs() > tall {
+                continue;
+            }
+        } else {
+            let (ta, tb) = ((-tall - z0) / d.z, (tall - z0) / d.z);
+            t0 = t0.max(ta.min(tb));
+            t1 = t1.min(ta.max(tb));
+        }
+        // across the ground: the distance of the move's point from the target's middle is at most the sum of the radii
+        let p = (start - other.location).truncate();
+        let dxy = d.truncate();
+        let a2 = dxy.length_squared();
+        let c2 = p.length_squared() - reach * reach;
+        if a2 < 1e-9 {
+            if c2 > 0.0 {
+                continue;
+            }
+        } else {
+            let b2 = 2.0 * p.dot(dxy);
+            let disc = b2 * b2 - 4.0 * a2 * c2;
+            if disc < 0.0 {
+                continue;
+            }
+            let root = disc.sqrt();
+            t0 = t0.max((-b2 - root) / (2.0 * a2));
+            t1 = t1.min((-b2 + root) / (2.0 * a2));
+        }
+        if t0 > t1 {
+            continue;
+        }
+        if best.is_none_or(|(bt, bb)| t0 < bt || (t0 == bt && b.0 < bb.0)) {
+            best = Some((t0, b));
+        }
+    }
+    best
 }
 
 /// Colliding actors whose cylinders could be reached by a segment from `start` to `end` swept with a box of
