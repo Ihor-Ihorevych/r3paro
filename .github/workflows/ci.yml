@@ -108,3 +108,25 @@ jobs:
       # for the phone
       - name: Check the Android library
         run: cargo check --target aarch64-linux-android -p hp3 --lib
+
+  # the .NET (Avalonia) launcher in apps/launcher: its tests on each desktop OS. Window tests run on Avalonia's headless
+  # platform, so no display is needed. dotnet test must run from apps/launcher, where global.json selects the test runner.
+  launcher:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/launcher
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: apps/launcher/global.json
+
+      - name: Tests
+        run: dotnet test

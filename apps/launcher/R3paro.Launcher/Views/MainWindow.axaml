@@ -1,0 +1,29 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:R3paro.Launcher.ViewModels"
+        x:Class="R3paro.Launcher.Views.MainWindow"
+        x:DataType="vm:MainViewModel"
+        Title="r3paro"
+        Width="560" SizeToContent="Height" MinWidth="420"
+        WindowStartupLocation="CenterScreen"
+        CanResize="True">
+  <StackPanel Margin="20" Spacing="12">
+    <TextBlock Text="Harry Potter and the Prisoner of Azkaban" FontSize="18" FontWeight="SemiBold" />
+    <TextBlock Text="Game folder (the one with System and Maps):" Opacity="0.8" />
+    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+      <TextBox Grid.Column="0" Text="{Binding GameFolder}" IsReadOnly="True" PlaceholderText="No folder chosen" />
+      <Button Grid.Column="1" Content="Browse…" Command="{Binding BrowseCommand}" />
+    </Grid>
+    <TextBlock Text="{Binding Status}" TextWrapping="Wrap"
+               Foreground="{DynamicResource SystemFillColorCriticalBrush}"
+               IsVisible="{Binding !IsValid}" />
+    <TextBlock Text="{Binding Status}" TextWrapping="Wrap"
+               Foreground="{DynamicResource SystemFillColorSuccessBrush}"
+               IsVisible="{Binding IsValid}" />
+    <Button Content="Play" Command="{Binding PlayCommand}" HorizontalAlignment="Right"
+            MinWidth="120" HorizontalContentAlignment="Center" Classes="accent" />
+    <SelectableTextBlock Text="{Binding Error}" IsVisible="{Binding Error, Converter={x:Static ObjectConverters.IsNotNull}}"
+                         FontFamily="Consolas,Menlo,DejaVu Sans Mono,monospace" FontSize="12"
+                         TextWrapping="Wrap" Foreground="{DynamicResource SystemFillColorCriticalBrush}" />
+  </StackPanel>
+</Window>

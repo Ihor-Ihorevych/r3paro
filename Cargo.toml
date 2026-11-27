@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "tools/*", "apps/*"]
+exclude = ["apps/launcher"] # .NET (Avalonia) launcher, not a crate
 
 [workspace.package]
 version = "0.9.1"

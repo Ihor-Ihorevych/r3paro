@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="R3paro.Launcher.FakeEngine/R3paro.Launcher.FakeEngine.csproj" />
+  <Project Path="R3paro.Launcher.Tests/R3paro.Launcher.Tests.csproj" />
+  <Project Path="R3paro.Launcher/R3paro.Launcher.csproj" />
+</Solution>
