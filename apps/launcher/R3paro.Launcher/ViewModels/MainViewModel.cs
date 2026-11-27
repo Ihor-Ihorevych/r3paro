@@ -46,8 +46,15 @@ public sealed partial class MainViewModel : ObservableObject
     {
         if (_loading) return;
         Revalidate();
-        if (IsValid)
+        if (!IsValid) return;
+        try
+        {
             _settings.Save(_settings.Load() with { GameFolder = value });
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            Error = $"Could not save settings: {e.Message}";
+        }
     }
 
     private void Revalidate()
@@ -65,7 +72,14 @@ public sealed partial class MainViewModel : ObservableObject
             GameFolder = folder;
     }
 
-    private bool CanPlay => IsValid && !IsLaunching;
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(PlayCommand))]
+    public partial bool IsGameRunning { get; private set; }
+
+    /// <summary>Completes when the game started by Play exits; null before the first launch.</summary>
+    public Task? RunningGame { get; private set; }
+
+    private bool CanPlay => IsValid && !IsLaunching && !IsGameRunning;
 
     [RelayCommand(CanExecute = nameof(CanPlay))]
     private async Task PlayAsync()
@@ -77,10 +91,34 @@ public sealed partial class MainViewModel : ObservableObject
         {
             var result = await _launcher.LaunchAsync(GameFolder!);
             Error = result.Started ? null : result.Error;
+            if (result is { Started: true, Running: { IsCompleted: false } running })
+                RunningGame = TrackGameAsync(running);
+        }
+        catch (Exception e)
+        {
+            // A command exception would be rethrown on the UI thread and close the launcher.
+            Error = $"Could not start the game: {e.Message}";
         }
         finally
         {
             IsLaunching = false;
+        }
+    }
+
+    private async Task TrackGameAsync(Task running)
+    {
+        IsGameRunning = true;
+        try
+        {
+            await running;
+        }
+        catch (Exception)
+        {
+            // The game's exit is all that matters here.
+        }
+        finally
+        {
+            IsGameRunning = false;
         }
     }
 }

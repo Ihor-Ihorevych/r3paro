@@ -1,6 +1,7 @@
 namespace R3paro.Launcher.Services;
 
-public sealed record LaunchResult(bool Started, string? Error);
+/// <param name="Running">When started: completes when the game process exits.</param>
+public sealed record LaunchResult(bool Started, string? Error, Task? Running = null);
 
 public interface IGameLauncher
 {

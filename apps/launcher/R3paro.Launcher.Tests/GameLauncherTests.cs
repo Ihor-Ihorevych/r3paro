@@ -7,8 +7,14 @@ internal sealed class FakeSettings(LauncherSettings value) : ISettingsStore
 {
     public LauncherSettings Value { get; private set; } = value;
     public int Saves { get; private set; }
+    public Exception? SaveError { get; init; }
     public LauncherSettings Load() => Value;
-    public void Save(LauncherSettings settings) { Value = settings; Saves++; }
+    public void Save(LauncherSettings settings)
+    {
+        if (SaveError is not null) throw SaveError;
+        Value = settings;
+        Saves++;
+    }
 }
 
 public sealed class GameLauncherTests : IDisposable
@@ -91,5 +97,23 @@ public sealed class GameLauncherTests : IDisposable
         var r = await Launcher(FakeEngine, TimeSpan.FromMilliseconds(500)).LaunchAsync(Game("sleep"), TestContext.Current.CancellationToken);
         Assert.True(r.Started, r.Error);
         Assert.True(sw.Elapsed < TimeSpan.FromSeconds(2.5), $"took {sw.Elapsed}");
+    }
+
+    [Fact]
+    public async Task Running_task_completes_when_game_exits()
+    {
+        var r = await Launcher(FakeEngine, TimeSpan.FromMilliseconds(500)).LaunchAsync(Game("sleep"), TestContext.Current.CancellationToken);
+        Assert.True(r.Started, r.Error);
+        Assert.NotNull(r.Running);
+        Assert.False(r.Running.IsCompleted);
+        await r.Running.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task Quick_successful_exit_has_completed_running_task()
+    {
+        var r = await Launcher(FakeEngine).LaunchAsync(Game("ok"), TestContext.Current.CancellationToken);
+        Assert.True(r.Started, r.Error);
+        Assert.True(r.Running?.IsCompleted);
     }
 }

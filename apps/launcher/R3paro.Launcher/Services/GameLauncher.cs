@@ -61,15 +61,16 @@ public sealed class GameLauncher(ISettingsStore settings, string baseDir, TimeSp
         if (await Task.WhenAny(exited, Task.Delay(earlyExitWindow, ct)) != exited)
         {
             // The game is running; keep draining stderr and release the handle when it quits.
-            _ = exited.ContinueWith(_ => process.Dispose(), TaskScheduler.Default);
-            return new LaunchResult(true, null);
+            // The launcher must outlive the game: hp3 panics on a stderr write once the pipe's reader is gone.
+            var running = exited.ContinueWith(_ => process.Dispose(), TaskScheduler.Default);
+            return new LaunchResult(true, null, running);
         }
 
-        process.WaitForExit(); // flushes the remaining stderr lines
+        // WaitForExitAsync has already waited for redirected stderr to reach EOF.
         var code = process.ExitCode;
         process.Dispose();
         if (code == 0)
-            return new LaunchResult(true, null);
+            return new LaunchResult(true, null, Task.CompletedTask);
 
         string text;
         lock (stderr) text = string.Join("\n", stderr);

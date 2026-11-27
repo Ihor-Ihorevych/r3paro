@@ -131,6 +131,53 @@ public sealed class MainViewModelTests
     }
 
     [Fact]
+    public async Task Play_stays_disabled_while_game_runs()
+    {
+        _settings = new FakeSettings(new LauncherSettings("G"));
+        _validator.Valid.Add("G");
+        var game = new TaskCompletionSource();
+        _launcher.Next = () => Task.FromResult(new LaunchResult(true, null, game.Task));
+        var vm = Vm();
+
+        await vm.PlayCommand.ExecuteAsync(null);
+        Assert.True(vm.IsGameRunning);
+        Assert.False(vm.PlayCommand.CanExecute(null));
+        await vm.PlayCommand.ExecuteAsync(null);
+        Assert.Single(_launcher.Calls);
+
+        game.SetResult();
+        await vm.RunningGame!;
+        await Task.Yield();
+        Assert.False(vm.IsGameRunning);
+        Assert.True(vm.PlayCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public async Task Save_failure_shows_error_and_keeps_folder()
+    {
+        _validator.Valid.Add("G");
+        _settings = new FakeSettings(new LauncherSettings()) { SaveError = new UnauthorizedAccessException("denied") };
+        var vm = Vm("G");
+        await vm.BrowseCommand.ExecuteAsync(null);
+        Assert.Equal("G", vm.GameFolder);
+        Assert.True(vm.IsValid);
+        Assert.Equal("Could not save settings: denied", vm.Error);
+    }
+
+    [Fact]
+    public async Task Unexpected_launch_exception_shows_error()
+    {
+        _settings = new FakeSettings(new LauncherSettings("G"));
+        _validator.Valid.Add("G");
+        _launcher.Next = () => throw new InvalidOperationException("weird");
+        var vm = Vm();
+        await vm.PlayCommand.ExecuteAsync(null);
+        Assert.Equal("Could not start the game: weird", vm.Error);
+        Assert.False(vm.IsLaunching);
+        Assert.True(vm.PlayCommand.CanExecute(null));
+    }
+
+    [Fact]
     public async Task Play_success_clears_error()
     {
         _settings = new FakeSettings(new LauncherSettings("G"));
