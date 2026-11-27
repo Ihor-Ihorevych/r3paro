@@ -59,7 +59,7 @@ public sealed class GameLauncherTests : IDisposable
     public async Task Missing_engine()
     {
         var path = Path.Combine(_root, "no-hp3.exe");
-        var r = await Launcher(path).LaunchAsync(Game("ok"));
+        var r = await Launcher(path).LaunchAsync(Game("ok"), TestContext.Current.CancellationToken);
         Assert.False(r.Started);
         Assert.Equal($"Engine not found: {path}", r.Error);
     }
@@ -67,7 +67,7 @@ public sealed class GameLauncherTests : IDisposable
     [Fact]
     public async Task Early_failure_reports_stderr()
     {
-        var r = await Launcher(FakeEngine).LaunchAsync(Game("fail"));
+        var r = await Launcher(FakeEngine).LaunchAsync(Game("fail"), TestContext.Current.CancellationToken);
         Assert.False(r.Started);
         Assert.Contains("boom", r.Error);
         Assert.DoesNotContain("line 6\n", r.Error + "\n");
@@ -78,7 +78,7 @@ public sealed class GameLauncherTests : IDisposable
     public async Task Argument_passed_intact()
     {
         var game = Game("ok", "HP3 Ü dir");
-        var r = await Launcher(FakeEngine).LaunchAsync(game);
+        var r = await Launcher(FakeEngine).LaunchAsync(game, TestContext.Current.CancellationToken);
         Assert.True(r.Started, r.Error);
         Assert.Equal(game, File.ReadAllText(Path.Combine(game, "arg.txt")));
         Assert.Equal("1", File.ReadAllText(Path.Combine(game, "argc.txt")));
@@ -88,7 +88,7 @@ public sealed class GameLauncherTests : IDisposable
     public async Task Long_running_counts_as_started()
     {
         var sw = Stopwatch.StartNew();
-        var r = await Launcher(FakeEngine, TimeSpan.FromMilliseconds(500)).LaunchAsync(Game("sleep"));
+        var r = await Launcher(FakeEngine, TimeSpan.FromMilliseconds(500)).LaunchAsync(Game("sleep"), TestContext.Current.CancellationToken);
         Assert.True(r.Started, r.Error);
         Assert.True(sw.Elapsed < TimeSpan.FromSeconds(2.5), $"took {sw.Elapsed}");
     }
