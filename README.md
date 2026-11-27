@@ -22,7 +22,7 @@ Version **0.5.5**. It is the engine behind Harry Potter 3 in
   particle effects, the HUD and menus with the game's fonts (system fonts for other languages), Bink sound
   effects and dialogue, and Ogg music.
 - **Platforms**: Windows (desktop window, 60 fps) and Android arm64. On Android it runs inside Flipendo with
-  its touch controls and settings panel.
+  its touch controls and settings panel. On the desktop, an optional launcher picks the game folder and starts the game.
 
 Known gaps are in `docs/status.md` and `docs/ROADMAP.md`: no movie playback (Bink video), parts of the GUI
 (some list and slider widgets), and many values still need to be matched to the retail game by playing it.
@@ -65,25 +65,36 @@ CMake (Visual Studio Build Tools ships one; it must be on the `PATH`, SDL3 is bu
 git clone https://github.com/Ihor-Ihorevych/r3paro
 cd r3paro
 cargo build --release -p hp3
-target
-elease\hp3.exe "C:\Games\HP3"
+target\release\hp3.exe "C:\Games\HP3"
 ```
 
 A build without `--release` is far too slow to play. The first build takes several minutes.
 
-**Launcher** (Windows, Linux, macOS): a small window to choose the game folder, check it and press **Play**,
-instead of typing the path. It lives in `apps/launcher` and needs the [.NET 11 SDK](https://dotnet.microsoft.com/download):
+### Launcher (Windows, Linux, macOS)
+
+Instead of typing the path, you can use the launcher: a small window where you choose the game folder, it checks the
+folder, and **Play** starts the game. It is not in the release zip yet; build it from `apps/launcher` with the
+[.NET 11 SDK](https://dotnet.microsoft.com/download), next to the engine:
 
 ```sh
+cargo build --release -p hp3
 cd apps/launcher
 dotnet publish R3paro.Launcher -c Release -o ../../target/release
 ../../target/release/r3paro-launcher
 ```
 
-It starts `hp3` (`hp3.exe` on Windows) from its own folder, so publish it next to the engine as above. It remembers the
-folder in `r3paro/launcher.json` under the user's app-data folder (`%APPDATA%` on Windows, `~/.config` on Linux and
-macOS); an `"EnginePath"` entry there points it at an `hp3` elsewhere. If the game quits at once, the launcher shows
-the last lines of its error output. `dotnet test` in `apps/launcher` runs its tests.
+1. **Browse…** and pick the game folder from step 1. The launcher says what is wrong with it, if anything: no `System`
+   folder, no `System/Core.u`, no `Maps` folder, or not writable (saves go to `Save`). Upper or lower case does not
+   matter.
+2. **Play** starts `hp3` (`hp3.exe` on Windows) from the launcher's own folder, with the game folder. If the game quits
+   at once, the launcher shows the last lines of its error output.
+3. While the game runs, Play stays off. Closing the launcher only hides it; it quits by itself when the game ends.
+
+It remembers the folder in `r3paro/launcher.json` in your app-data folder (`%APPDATA%` on Windows, `~/.config` on Linux
+and macOS). To use an `hp3` somewhere else, add `"EnginePath": "<path to hp3>"` to that file. The published launcher needs
+the .NET 11 runtime on the computer. On Linux and macOS it needs an `hp3` built for that system.
+
+Its tests: `cd apps/launcher` and `dotnet test` (they must run from that folder; CI runs them on all three systems).
 
 ### 3. Android
 
@@ -106,6 +117,8 @@ controls and settings. You need Android 10 or newer, 64-bit, and about 1 GB free
 | What you see | What to do |
 |---|---|
 | `error: ... Core.u` or "no such package" | the folder you gave is not the game's folder: it must hold `System\Core.u` and `Maps` |
+| launcher: "Engine not found: ..." | publish the launcher next to `hp3.exe` (see Launcher), or set `"EnginePath"` in `launcher.json` |
+| launcher: "Could not start ...: Permission denied" (Linux, macOS) | `chmod +x hp3` |
 | the window opens and stays black | wait for the level to load (a minute on a slow disk); the terminal prints progress. Update your graphics driver if it never ends |
 | very slow | use the release build (`cargo build --release`); `HP3_FPS=0` lifts the 60 fps cap |
 | no sound | check the system volume and the default audio device; the music is `Music\*.ogg` |
@@ -156,6 +169,10 @@ A workspace of crates: `hp3-package` (the package format), `hp3-assets` (meshes,
 game's natives), `hp3-anim` (skeletal animation), `hp3-audio`, `hp3-render` (wgpu), `hp3-gui`, `hp3-engine` and
 the `hp3` app (SDL3 window and Android entry). Formats and findings are written down in `docs/formats/` and
 `docs/status.md`.
+
+The launcher (`apps/launcher`) is a separate .NET solution, outside the cargo workspace: Avalonia with MVVM
+(CommunityToolkit.Mvvm) and dependency injection. The folder check, settings, starting the game and the folder picker
+are small services behind interfaces; `MainViewModel` uses them and the window binds to it.
 
 ## Community
 
