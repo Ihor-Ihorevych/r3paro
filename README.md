@@ -71,6 +71,20 @@ elease\hp3.exe "C:\Games\HP3"
 
 A build without `--release` is far too slow to play. The first build takes several minutes.
 
+**Launcher** (Windows, Linux, macOS): a small window to choose the game folder, check it and press **Play**,
+instead of typing the path. It lives in `apps/launcher` and needs the [.NET 11 SDK](https://dotnet.microsoft.com/download):
+
+```sh
+cd apps/launcher
+dotnet publish R3paro.Launcher -c Release -o ../../target/release
+../../target/release/r3paro-launcher
+```
+
+It starts `hp3` (`hp3.exe` on Windows) from its own folder, so publish it next to the engine as above. It remembers the
+folder in `r3paro/launcher.json` under the user's app-data folder (`%APPDATA%` on Windows, `~/.config` on Linux and
+macOS); an `"EnginePath"` entry there points it at an `hp3` elsewhere. If the game quits at once, the launcher shows
+the last lines of its error output. `dotnet test` in `apps/launcher` runs its tests.
+
 ### 3. Android
 
 On Android the engine is part of [Flipendo Droid](https://github.com/Ihor-Ihorevych/flipendo-droid), which brings the touch
