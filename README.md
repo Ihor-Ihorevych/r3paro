@@ -45,18 +45,22 @@ writable. The Windows programs of the game (`.exe`, `.dll`) are not used and can
 **Easiest: the release zip.**
 
 1. Download `r3paro-<version>-windows.zip` from the [Releases](../../releases) page and unpack it anywhere.
-2. Open a terminal (PowerShell or cmd) in that folder and start the game, giving it the path of the game folder:
+2. Double-click `r3paro-launcher.exe`, press **Browse…**, choose the game folder from step 1 and press **Play**
+   (see [Launcher](#launcher-windows-linux-macos)). It remembers the folder for next time.
+
+   Or start `hp3.exe` yourself: open a terminal (PowerShell or cmd) in that folder and give it the path of the game folder:
 
    ```
    .\hp3.exe "C:\Games\HP3"
    ```
 
-   Or drag the game folder onto `hp3.exe`, or make a shortcut whose target is `hp3.exe "C:\Games\HP3"`.
+   You can also drag the game folder onto `hp3.exe`, or make a shortcut whose target is `hp3.exe "C:\Games\HP3"`.
 3. A window opens and the game starts at its own menu: **New Game**, pick a slot, and play. To jump straight to a
    level, add its name: `.\hp3.exe "C:\Games\HP3" HP3_Adv1Express` (the names are the files in `Maps`, without `.unr`;
    **F11** in game shows the list). **Shift+Escape** quits.
 
-The first start takes a few seconds while the scripts and the level load; a log scrolls in the terminal.
+The first start takes a few seconds while the scripts and the level load; a log scrolls in the terminal (from the
+launcher, in a console window that opens next to the game).
 
 **Build it yourself** (the same exe, from this source): install [rustup](https://rustup.rs) (stable Rust) and
 CMake (Visual Studio Build Tools ships one; it must be on the `PATH`, SDL3 is built from source), then:
@@ -73,8 +77,10 @@ A build without `--release` is far too slow to play. The first build takes sever
 ### Launcher (Windows, Linux, macOS)
 
 Instead of typing the path, you can use the launcher: a small window where you choose the game folder, it checks the
-folder, and **Play** starts the game. It is not in the release zip yet; build it from `apps/launcher` with the
-[.NET 11 SDK](https://dotnet.microsoft.com/download), next to the engine:
+folder, and **Play** starts the game. The Windows zip has it as `r3paro-launcher.exe`, next to `hp3.exe`; it is
+self-contained, so nothing else needs installing.
+
+To build it yourself, install the [.NET 11 SDK](https://dotnet.microsoft.com/download) and publish it next to the engine:
 
 ```sh
 cargo build --release -p hp3
@@ -82,6 +88,9 @@ cd apps/launcher
 dotnet publish R3paro.Launcher -c Release -o ../../target/release
 ../../target/release/r3paro-launcher
 ```
+
+That build needs the .NET 11 runtime on the computer. The zip's single-file exe comes from the `win-x64` profile:
+`dotnet publish R3paro.Launcher -p:PublishProfile=win-x64 -o <folder>`.
 
 1. **Browse…** and pick the game folder from step 1. The launcher says what is wrong with it, if anything: no `System`
    folder, no `System/Core.u`, no `Maps` folder, or not writable (saves go to `Save`). Upper or lower case does not
@@ -91,8 +100,8 @@ dotnet publish R3paro.Launcher -c Release -o ../../target/release
 3. While the game runs, Play stays off. Closing the launcher only hides it; it quits by itself when the game ends.
 
 It remembers the folder in `r3paro/launcher.json` in your app-data folder (`%APPDATA%` on Windows, `~/.config` on Linux
-and macOS). To use an `hp3` somewhere else, add `"EnginePath": "<path to hp3>"` to that file. The published launcher needs
-the .NET 11 runtime on the computer. On Linux and macOS it needs an `hp3` built for that system.
+and macOS). To use an `hp3` somewhere else, add `"EnginePath": "<path to hp3>"` to that file. On Linux and macOS it needs an
+`hp3` built for that system.
 
 Its tests: `cd apps/launcher` and `dotnet test` (they must run from that folder; CI runs them on all three systems).
 

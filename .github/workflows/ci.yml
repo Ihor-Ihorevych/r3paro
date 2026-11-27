@@ -1,4 +1,5 @@
-# Builds R3paro on GitHub's runners: the Windows game and tools, and a check of the Android library.
+# Builds R3paro on GitHub's runners: the Windows game, launcher and tools, a check of the Android library, and the
+# launcher's tests on Windows, Linux and macOS.
 # The game's data is never in CI, so nothing here runs a level. A pushed tag v<major>.<minor>.<patch> (it must match the
 # version in Cargo.toml) also publishes the Windows zip as a pre-release; a manual run keeps it as an artifact.
 # The APK is built by Flipendo Droid's workflow (it needs Flipendo's SDL3 and Java side).
@@ -55,11 +56,30 @@ jobs:
             exit 1
           fi
 
+      # the launcher: one self-contained, trimmed exe (apps/launcher, profile win-x64), so players install no .NET
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: apps/launcher/global.json
+
+      - name: Launcher
+        working-directory: apps/launcher
+        run: dotnet publish R3paro.Launcher -p:PublishProfile=win-x64 -o ../../launcher-out
+
+      # trimming can drop code that is only reached by reflection: make sure the window still comes up
+      - name: Launcher starts
+        shell: pwsh
+        run: |
+          $p = Start-Process launcher-out/r3paro-launcher.exe -PassThru
+          Start-Sleep 10
+          if ($p.HasExited) { Write-Output "::error::r3paro-launcher.exe exited at startup (code $($p.ExitCode))"; exit 1 }
+          Stop-Process -Id $p.Id
+
       - name: Package
         run: |
           DIR="r3paro-${{ steps.version.outputs.version }}-windows"
           mkdir "$DIR"
           cp target/release/hp3.exe target/release/hp3-run.exe target/release/hp3-view.exe target/release/hp3-pkg.exe "$DIR/"
+          cp launcher-out/r3paro-launcher.exe "$DIR/"
           cp README.md LICENSE CLEANROOM.md "$DIR/"
           7z a -tzip "$DIR.zip" "$DIR" > /dev/null
           echo "ZIP=$DIR.zip" >> "$GITHUB_ENV"
@@ -78,7 +98,8 @@ jobs:
           prerelease: true
           generate_release_notes: true
           body: |
-            The engine for Harry Potter and the Prisoner of Azkaban, for Windows: `hp3.exe <your HP3 folder> [map]`.
+            The engine for Harry Potter and the Prisoner of Azkaban, for Windows: start `r3paro-launcher.exe`, choose
+            your HP3 folder and press Play, or run `hp3.exe <your HP3 folder> [map]`.
             **No game data inside**: you need your own copy of the PC game. Controls, options and tools: README.
             On Android the engine is part of Flipendo Droid.
 
